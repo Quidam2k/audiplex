@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Server config (contains jwt_secret + machine-specific paths)
+server/config.yaml
+
+# Server runtime artifacts (regenerated from the library)
+server/audiplex.db
+server/*.db.pre-*-backup
+server/*.db.bak-*
+server/audiplex.db-journal
+server/audiplex.db-wal
+server/audiplex.db-shm
+server/covers/
+
+# Android / Gradle
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml
+
+# Android version counter (auto-incremented on each build)
+android/version.properties
+
+# Local agent settings + session planning notes (personal context)
+.claude/
+cascades/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Junk
+nul

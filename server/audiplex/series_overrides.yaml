@@ -1,0 +1,8 @@
+# Manual series assignments for books where embedded tags and OpenLibrary
+# don't provide series info. Matched by title (case-insensitive).
+# Author is optional, used for disambiguation.
+overrides:
+  - title: "Apex"
+    author: "Ramez Naam"
+    series: "Nexus"
+    sequence: "3"
