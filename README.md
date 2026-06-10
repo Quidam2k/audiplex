@@ -61,3 +61,7 @@ Update), served by the server from the gradle output directory.
 For off-LAN access, put the server and phone on a [Tailscale](https://tailscale.com)
 tailnet and use the tailnet hostname as the server URL — no port forwarding
 required.
+
+## License
+
+[MIT](LICENSE)
