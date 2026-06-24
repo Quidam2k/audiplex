@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from audiplex.config import get_settings
 from audiplex.database import get_db, init_db
 from audiplex.routers import app as app_router
-from audiplex.routers import auth_router, library, music, progress, streaming
+from audiplex.routers import auth_router, library, music, playback, progress, streaming
 from audiplex.scanner import scan_library
 
 logger = logging.getLogger("audiplex")
@@ -58,6 +58,7 @@ app.include_router(library.router)
 app.include_router(streaming.router)
 app.include_router(progress.router)
 app.include_router(music.router)
+app.include_router(playback.router)
 app.include_router(app_router.router)
 
 

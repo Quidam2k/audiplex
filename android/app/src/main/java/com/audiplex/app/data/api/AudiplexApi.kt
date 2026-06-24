@@ -149,6 +149,20 @@ interface AudiplexApi {
         @Query("min_skips") minSkips: Int = 2
     ): List<SkipSuspectSchema>
 
+    // ----- DJ playback command bus (remote control) -----
+
+    /**
+     * Long-poll for the next DJ command. The server blocks up to ~25s
+     * (under our 30s read timeout) and returns HTTP 204 (empty body) on
+     * timeout — the caller re-issues. Returns the command on 200.
+     */
+    @GET("api/playback/command/next")
+    suspend fun getNextPlaybackCommand(): Response<DjCommandDto>
+
+    /** Report current now-playing state up to the server for the agent to read. */
+    @POST("api/playback/state")
+    suspend fun postPlaybackState(@Body state: PlaybackStateDto): PlaybackStateDto
+
     companion object {
         fun coverUrl(baseUrl: String, bookId: Int): String =
             "${baseUrl}api/library/books/$bookId/cover"

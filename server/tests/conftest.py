@@ -27,7 +27,7 @@ from audiplex.models import (
     Track,
     User,
 )
-from audiplex.routers import auth_router, library, music, progress, streaming
+from audiplex.routers import auth_router, library, music, playback, progress, streaming
 
 
 def _create_test_app():
@@ -38,6 +38,7 @@ def _create_test_app():
     test_app.include_router(streaming.router)
     test_app.include_router(progress.router)
     test_app.include_router(music.router)
+    test_app.include_router(playback.router)
     return test_app
 
 

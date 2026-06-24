@@ -276,3 +276,36 @@ data class FolderListing(
     val folders: List<FolderNode> = emptyList(),
     val albums: List<AlbumSummary> = emptyList()
 )
+
+// ----- DJ playback command bus (remote control) -----
+
+@JsonClass(generateAdapter = true)
+data class DjCommandPayload(
+    // v1 'play_now' carries track_ids; future command types add fields here.
+    @Json(name = "track_ids") val trackIds: List<Int>? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class DjCommandDto(
+    val id: Long,
+    val type: String,
+    val payload: DjCommandPayload? = null,
+    @Json(name = "created_at") val createdAt: Double? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class NowPlayingTrackDto(
+    val id: Int,
+    val title: String?,
+    val artist: String?
+)
+
+@JsonClass(generateAdapter = true)
+data class PlaybackStateDto(
+    val playing: Boolean,
+    val track: NowPlayingTrackDto?,
+    @Json(name = "position_ms") val positionMs: Long,
+    @Json(name = "duration_ms") val durationMs: Long,
+    @Json(name = "queue_length") val queueLength: Int,
+    @Json(name = "queue_index") val queueIndex: Int
+)

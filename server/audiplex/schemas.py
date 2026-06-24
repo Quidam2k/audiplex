@@ -206,3 +206,41 @@ class SkipSuspectSchema(BaseModel):
     track: TrackSchema
     early_skip_count: int
     total_starts: int
+
+
+# ----- DJ playback command bus (remote control) -----
+
+
+class PlaybackCommand(BaseModel):
+    """A command from the DJ agent for the client to execute.
+
+    v1 type: 'play_now' with payload {"track_ids": [int, ...]}.
+    """
+
+    type: str
+    payload: dict = {}
+
+
+class PlaybackCommandQueued(BaseModel):
+    """Ack returned to the agent after enqueueing a command."""
+
+    id: int
+    type: str
+    pending: int
+
+
+class NowPlayingTrack(BaseModel):
+    id: int
+    title: str | None = None
+    artist: str | None = None
+
+
+class PlaybackState(BaseModel):
+    """Now-playing snapshot written by the client, read by the agent."""
+
+    playing: bool = False
+    track: NowPlayingTrack | None = None
+    position_ms: int = 0
+    duration_ms: int = 0
+    queue_length: int = 0
+    queue_index: int = 0

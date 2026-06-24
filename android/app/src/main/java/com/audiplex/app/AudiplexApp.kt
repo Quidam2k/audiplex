@@ -6,6 +6,7 @@ import androidx.work.Configuration
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import com.audiplex.app.playback.DjCommandClient
 import dagger.hilt.android.HiltAndroidApp
 import okhttp3.OkHttpClient
 import javax.inject.Inject
@@ -15,6 +16,14 @@ class AudiplexApp : Application(), Configuration.Provider, SingletonImageLoader.
 
     @Inject lateinit var workerFactory: HiltWorkerFactory
     @Inject lateinit var okHttpClient: OkHttpClient
+    @Inject lateinit var djCommandClient: DjCommandClient
+
+    override fun onCreate() {
+        super.onCreate()
+        // Start the DJ remote-control bridge for the life of the process. Both
+        // loops idle cheaply (long-poll / 5s tick) until a server + token exist.
+        djCommandClient.start()
+    }
 
     override val workManagerConfiguration: Configuration
         get() = Configuration.Builder()
