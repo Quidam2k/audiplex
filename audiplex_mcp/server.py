@@ -10,12 +10,13 @@ Config via environment:
                     cd server && python -m audiplex.create_service_token
 
 Tools: dj_play_now, dj_skip, dj_queue, dj_play_next, dj_reorder,
-dj_now_playing. The agent resolves vague requests -> track IDs via the
-existing catalog REST API (GET /api/music/albums, /artists, /tracks...).
-dj_queue_by (MCP-side name→IDs resolution helper) lands in P3.
+dj_queue_by, dj_now_playing. The agent can pass explicit track IDs (resolved
+via the catalog REST API) or let dj_queue_by resolve an artist/album/genre
+NAME to tracks MCP-side (there is no dedicated /search endpoint).
 """
 
 import os
+from urllib.parse import quote
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -142,6 +143,95 @@ async def dj_reorder(from_index: int, to_index: int) -> str:
         return data
     return (
         f"Queued reorder {from_index} -> {to_index} "
+        f"(command #{data.get('id')}, {data.get('pending')} pending)."
+    )
+
+
+async def _get(path: str):
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(f"{AUDIPLEX_URL}{path}", headers=_headers())
+    if resp.status_code == 401:
+        raise PermissionError("Auth failed (401). Check AUDIPLEX_TOKEN.")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _best_match(items: list[dict], name_key: str, q: str) -> dict | None:
+    """Pick the best name match: exact > startswith > substring (all
+    case-insensitive). Returns None if nothing contains the query."""
+    ql = q.strip().lower()
+    exact = [x for x in items if (x.get(name_key) or "").lower() == ql]
+    if exact:
+        return exact[0]
+    starts = [x for x in items if (x.get(name_key) or "").lower().startswith(ql)]
+    if starts:
+        return starts[0]
+    contains = [x for x in items if ql in (x.get(name_key) or "").lower()]
+    return contains[0] if contains else None
+
+
+_MODE_CMD = {"now": "play_now", "queue": "queue", "next": "play_next"}
+
+
+@mcp.tool()
+async def dj_queue_by(
+    query: str,
+    kind: str = "artist",
+    mode: str = "queue",
+    limit: int = 100,
+) -> str:
+    """Resolve a NAME to tracks and play/queue them — no need to look up IDs.
+
+    query: the name to match (case-insensitive: exact > prefix > substring).
+    kind:  'artist' | 'album' | 'genre'.
+    mode:  'now' (replace current & play), 'queue' (append to end, default),
+           'next' (insert after the current track).
+    limit: max tracks to enqueue (default 100).
+
+    Resolution is done here in the MCP server over the catalog REST API
+    (there is no dedicated /search endpoint). Reports which entity it matched.
+    """
+    cmd_type = _MODE_CMD.get(mode)
+    if cmd_type is None:
+        return f"Unknown mode '{mode}'. Use 'now', 'queue', or 'next'."
+    try:
+        if kind == "artist":
+            artists = await _get("/api/music/artists")
+            m = _best_match(artists, "name", query)
+            if not m:
+                return f"No artist matching '{query}'."
+            label = f"artist '{m['name']}'"
+            tracks = await _get(f"/api/music/artists/{m['id']}/tracks")
+        elif kind == "album":
+            albums = await _get("/api/music/albums")
+            m = _best_match(albums, "title", query)
+            if not m:
+                return f"No album matching '{query}'."
+            artist = m.get("artist_name")
+            label = f"album '{m['title']}'" + (f" by {artist}" if artist else "")
+            detail = await _get(f"/api/music/albums/{m['id']}")
+            tracks = detail.get("tracks", [])
+        elif kind == "genre":
+            genres = await _get("/api/music/genres")
+            m = _best_match(genres, "name", query)
+            if not m:
+                return f"No genre matching '{query}'."
+            label = f"genre '{m['name']}'"
+            tracks = await _get(f"/api/music/genres/{quote(m['name'], safe='')}/tracks")
+        else:
+            return f"Unknown kind '{kind}'. Use 'artist', 'album', or 'genre'."
+    except PermissionError as e:
+        return str(e)
+
+    track_ids = [t["id"] for t in tracks][: max(0, limit)]
+    if not track_ids:
+        return f"Matched {label} but it has no tracks."
+    data = await _enqueue(cmd_type, {"track_ids": track_ids})
+    if isinstance(data, str):
+        return data
+    verb = {"now": "Playing", "queue": "Queued", "next": "Playing next"}[mode]
+    return (
+        f"{verb} {len(track_ids)} track(s) from {label} "
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
     )
 

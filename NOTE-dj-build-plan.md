@@ -27,8 +27,13 @@ Jarvis answers: (1) resolve track_ids client-side; (2) payloads as specified; (3
 - **Smoke-tested green (fresh server):** play_now[201,202] → queue[203] → play_next[204] (insert after current → 201,204,202,203) → reorder(1→3) → final 201,202,203,204; dj_now_playing lists all 4 with indices. On-device Media3 execution still = Todd's phone test.
 - ⚠️ Gotcha burned earlier: a stale uvicorn kept squatting the port so "restarted" servers silently hit OLD code. Always `taskkill /F /PID` the port's LISTEN pid (netstat -ano) or use a fresh port when re-testing.
 
-## Remaining
-- P3: dj_queue_by (pure MCP-side name→track_id resolution helper over the catalog REST API). No client/server changes expected.
+## P3 done (2026-07-03) — dj_queue_by (MCP-side name resolution)
+- New MCP tool `dj_queue_by(query, kind, mode, limit)`. Resolves a NAME → tracks entirely in the MCP server over the catalog REST API (no /search endpoint): kind='artist'|'album'|'genre', matched exact > prefix > substring (case-insensitive); mode='now'|'queue'|'next' maps to play_now/queue/play_next. Pure MCP-side — zero client/server changes.
+- Helpers: `_get`, `_best_match`, `_MODE_CMD`. 7 DJ tools total now register.
+- Smoke-tested against the real catalog (676 artists / 4100 albums / 73810 tracks): artist exact ('Complete Mozart Edition') + prefix ('various'→Various Artists), album ('All Time Top 1000' by Tryout), graceful no-match + bad-mode messages. All enqueue through the bus.
+
+## STATUS: assignment #1970 COMPLETE (STEP 1 + STEP 2 P2a/P2b/P3), all committed.
+Only remaining verification is on-device Media3 (Todd installs app-debug.apk and confirms play/skip/queue/reorder physically move audio). Commits: STEP1+P2a=91f8027, P2b=a6225b7, P3=(this commit).
 
 ## P1 — what shipped & how to run
 Server (verified — full pytest suite 214 passed, incl. 6 new playback tests):
