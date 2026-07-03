@@ -1,6 +1,23 @@
 # AUDIPLEX DJ — BUILD PLAN (assignment #1782 / PROCEED #1784)
 
-Status: **P1 COMPLETE** (server + MCP runtime-verified; Android written, compile pending). Awaiting direction for P2. cwd: Z:\Development\audiplex
+Status: **P1 COMPLETE + COMPILED + SMOKE-TESTED** (assignment #1970 STEP 1 done). Next: STEP 2 (P2a dj_skip → P2b Media3 queue ops → P3 dj_queue_by). cwd: Q:\Development\audiplex
+
+## STEP 1 done (2026-07-03, assignment #1970)
+- **Android compiles for the first time.** `./gradlew assembleDebug` → BUILD SUCCESSFUL (1m52s). APK: `android/app/build/outputs/apk/debug/app-debug.apk` (23.6 MB, versionCode 20). DjCommandClient.kt + P1 wiring all compiled clean.
+- **SDK path was NOT the blocker** — `local.properties sdk.dir=C:\Android\sdk` already exists (android-34, build-tools 34.0.0, JDK 21). The real blockers on this box (Athena):
+  1. Unix `./gradlew` under Git Bash mangles JVM opts → `Could not find or load main class "-Xmx64m"`. Use `gradlew.bat`.
+  2. `NoDefaultCurrentDirectoryInExePath` is set → cmd won't run a batch from cwd by bare name. Must prefix `.\`.
+  - **Working invocation:** `cmd //c "cd /d Q:\Development\audiplex\android & call .\gradlew.bat assembleDebug --console=plain"`
+- **bcrypt pin already committed** (commit 7c9a63e) — `passlib[bcrypt]` + `bcrypt<4.1` in `server/pyproject.toml`. Not "local only" as the old note said. Full `pytest` = **214 passed** (incl. 6 playback tests) with bcrypt 4.0.1.
+- **dj_play_now loop smoke-tested GREEN** (server + MCP + simulated Android): ran real `dj_play_now()`/`dj_now_playing()` MCP funcs against a live server on :8011 while a coroutine mimicked DjCommandClient (long-poll → report state). MCP enqueue → long-poll pickup → /state POST → dj_now_playing read-back all verified. Only unexercised leg = actual Media3 playback on Todd's phone (needs the device — Todd's on-phone smoke test).
+- Side effects: minted `dj-agent` service account (id=2) in server/audiplex.db; versionCode auto-bumped for each build.
+
+## P2a done (2026-07-03) — dj_skip, zero new Media3 ops
+- MCP: new `dj_skip()` tool → POST /command {type:"skip"}. Verified registered (dj_play_now, dj_now_playing, dj_skip) + smoke-tested green (MCP → server → client picks up type=skip).
+- Android: DjCommandClient dispatch now handles "skip" → `playbackManager.skipForward()` (music → existing `seekToNextMediaItem`, zero new queue ops). Rebuilt: BUILD SUCCESSFUL.
+- Server/bus: NO changes (PlaybackCommand.type is free-form str, payload defaults {}) — "no bus/architecture changes" held.
+- Changes are in the WORKING TREE, not committed (awaiting Todd/Jarvis on commit cadence). Files: audiplex_mcp/server.py, android/.../DjCommandClient.kt.
+- **P2b is gated:** net-new Media3 queue ops (addMediaItem/insertMediaItem/moveMediaItem) — plan-back sent before writing that code (open micro-decisions: payload schemas, resolve-on-client vs MCP, empty-queue behavior).
 
 ## P1 — what shipped & how to run
 Server (verified — full pytest suite 214 passed, incl. 6 new playback tests):

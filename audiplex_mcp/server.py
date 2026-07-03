@@ -58,6 +58,29 @@ async def dj_play_now(track_ids: list[int]) -> str:
 
 
 @mcp.tool()
+async def dj_skip() -> str:
+    """Skip to the next track in the Audiplex device's current queue.
+
+    No-op if nothing is queued after the current track. Use dj_now_playing
+    afterward to confirm what's playing.
+    """
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"{AUDIPLEX_URL}/api/playback/command",
+            headers=_headers(),
+            json={"type": "skip", "payload": {}},
+        )
+    if resp.status_code == 401:
+        return "Auth failed (401). Check AUDIPLEX_TOKEN."
+    resp.raise_for_status()
+    data = resp.json()
+    return (
+        f"Queued skip (command #{data.get('id')}, {data.get('pending')} pending). "
+        "The device skips to the next track when it next polls."
+    )
+
+
+@mcp.tool()
 async def dj_now_playing() -> str:
     """Report what the Audiplex device is currently playing — track, artist,
     play/pause state, and position — as last reported by the client."""

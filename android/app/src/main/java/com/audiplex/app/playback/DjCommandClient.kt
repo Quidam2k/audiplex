@@ -31,8 +31,8 @@ import kotlin.coroutines.coroutineContext
  *  - [reportLoop]: periodically POSTs now-playing state up so the agent can
  *    see what's playing via dj_now_playing.
  *
- * v1 handles only the 'play_now' command (zero new Media3 queue ops); the
- * incremental queue commands land in P2.
+ * Handles 'play_now' and 'skip' (both zero new Media3 queue ops); the
+ * incremental queue commands (queue/play_next/reorder) land in P2b.
  */
 @Singleton
 class DjCommandClient @Inject constructor(
@@ -100,7 +100,14 @@ class DjCommandClient @Inject constructor(
                     )
                 }
             }
-            else -> Unit // unknown command type — ignored in v1
+            "skip" -> {
+                // Advance to the next track in the queue. For music this maps to
+                // seekToNextMediaItem (an existing Media3 op — zero new queue ops).
+                withContext(Dispatchers.Main) {
+                    playbackManager.skipForward()
+                }
+            }
+            else -> Unit // unknown command type — ignored
         }
     }
 
