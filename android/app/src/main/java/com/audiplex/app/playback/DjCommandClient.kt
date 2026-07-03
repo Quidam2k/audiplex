@@ -5,6 +5,8 @@ import com.audiplex.app.data.SettingsStore
 import com.audiplex.app.data.api.DjCommandDto
 import com.audiplex.app.data.api.NowPlayingTrackDto
 import com.audiplex.app.data.api.PlaybackStateDto
+import com.audiplex.app.data.api.QueueTrackDto
+import com.audiplex.app.data.api.TrackSchema
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -31,8 +33,9 @@ import kotlin.coroutines.coroutineContext
  *  - [reportLoop]: periodically POSTs now-playing state up so the agent can
  *    see what's playing via dj_now_playing.
  *
- * Handles 'play_now' and 'skip' (both zero new Media3 queue ops); the
- * incremental queue commands (queue/play_next/reorder) land in P2b.
+ * Handles command types: play_now, skip, queue, play_next, reorder. The
+ * reportLoop also publishes the full queue (with indices) so the agent can
+ * DJ with visibility and issue index-based reorders.
  */
 @Singleton
 class DjCommandClient @Inject constructor(
@@ -80,16 +83,10 @@ class DjCommandClient @Inject constructor(
     }
 
     private suspend fun dispatch(cmd: DjCommandDto) {
+        val baseUrl = apiHolder.baseUrl
         when (cmd.type) {
             "play_now" -> {
-                val ids = cmd.payload?.trackIds.orEmpty()
-                if (ids.isEmpty()) return
-                val api = apiHolder.api ?: return
-                val baseUrl = apiHolder.baseUrl
-                // Resolve track IDs to full track metadata via the catalog API.
-                val tracks = ids.mapNotNull { id ->
-                    runCatching { api.getTrack(id) }.getOrNull()
-                }
+                val tracks = resolveTracks(cmd.payload?.trackIds.orEmpty())
                 if (tracks.isEmpty()) return
                 withContext(Dispatchers.Main) {
                     playbackManager.playTracks(
@@ -98,6 +95,27 @@ class DjCommandClient @Inject constructor(
                         title = "DJ Queue",
                         albumLookup = emptyMap(),
                     )
+                }
+            }
+            "queue" -> {
+                val tracks = resolveTracks(cmd.payload?.trackIds.orEmpty())
+                if (tracks.isEmpty()) return
+                withContext(Dispatchers.Main) {
+                    playbackManager.enqueueTracks(tracks, baseUrl)
+                }
+            }
+            "play_next" -> {
+                val tracks = resolveTracks(cmd.payload?.trackIds.orEmpty())
+                if (tracks.isEmpty()) return
+                withContext(Dispatchers.Main) {
+                    playbackManager.playNextTracks(tracks, baseUrl)
+                }
+            }
+            "reorder" -> {
+                val from = cmd.payload?.fromIndex ?: return
+                val to = cmd.payload?.toIndex ?: return
+                withContext(Dispatchers.Main) {
+                    playbackManager.moveTrack(from, to)
                 }
             }
             "skip" -> {
@@ -111,6 +129,13 @@ class DjCommandClient @Inject constructor(
         }
     }
 
+    /** Resolve DJ track IDs to full track metadata via the catalog API. */
+    private suspend fun resolveTracks(ids: List<Int>): List<TrackSchema> {
+        if (ids.isEmpty()) return emptyList()
+        val api = apiHolder.api ?: return emptyList()
+        return ids.mapNotNull { id -> runCatching { api.getTrack(id) }.getOrNull() }
+    }
+
     private suspend fun reportLoop() {
         var lastKey = ""
         while (coroutineContext[Job]?.isActive == true) {
@@ -119,6 +144,9 @@ class DjCommandClient @Inject constructor(
             val music = playbackManager.currentMusic.value
             val playing = playbackManager.isPlaying.value
             val track = music?.items?.getOrNull(music.currentIndex)?.track
+            val queue = music?.items?.mapIndexed { i, item ->
+                QueueTrackDto(index = i, id = item.track.id, title = item.track.title, artist = item.track.artistName)
+            } ?: emptyList()
             val state = PlaybackStateDto(
                 playing = playing,
                 track = track?.let { NowPlayingTrackDto(it.id, it.title, it.artistName) },
@@ -126,6 +154,7 @@ class DjCommandClient @Inject constructor(
                 durationMs = playbackManager.durationMs.value,
                 queueLength = music?.items?.size ?: 0,
                 queueIndex = music?.currentIndex ?: 0,
+                queue = queue,
             )
             // Always refresh while playing (position moves); otherwise only on
             // a meaningful state change so we don't spam the server when idle.

@@ -65,5 +65,6 @@ def get_state(user: User = Depends(get_current_user)):
         "duration_ms": 0,
         "queue_length": 0,
         "queue_index": 0,
+        "queue": [],
         "updated_at": None,
     }

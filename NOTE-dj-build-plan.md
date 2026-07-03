@@ -17,7 +17,18 @@ Status: **P1 COMPLETE + COMPILED + SMOKE-TESTED** (assignment #1970 STEP 1 done)
 - Android: DjCommandClient dispatch now handles "skip" → `playbackManager.skipForward()` (music → existing `seekToNextMediaItem`, zero new queue ops). Rebuilt: BUILD SUCCESSFUL.
 - Server/bus: NO changes (PlaybackCommand.type is free-form str, payload defaults {}) — "no bus/architecture changes" held.
 - Changes are in the WORKING TREE, not committed (awaiting Todd/Jarvis on commit cadence). Files: audiplex_mcp/server.py, android/.../DjCommandClient.kt.
-- **P2b is gated:** net-new Media3 queue ops (addMediaItem/insertMediaItem/moveMediaItem) — plan-back sent before writing that code (open micro-decisions: payload schemas, resolve-on-client vs MCP, empty-queue behavior).
+- **P2b is gated:** net-new Media3 queue ops — plan-back sent (#5214).
+
+## P2b done (2026-07-03) — queue/play_next/reorder + queue visibility (approved via #5214/PROCEED #1971)
+Jarvis answers: (1) resolve track_ids client-side; (2) payloads as specified; (3) start-playing on empty queue (play_now fallback); (4) Option A — expose a lightweight queue list in now-playing state so reorder is real (C rejected: breaks on duplicate tracks).
+- **Server:** schemas.py new `NowPlayingQueueItem` + `PlaybackState.queue: list[...] = []`; playback.py get_state default `queue: []`. No bus/arch change (bus stores the whole dict). Tests still 214 pass.
+- **MCP:** new tools dj_queue, dj_play_next, dj_reorder (+ `_enqueue` helper). dj_now_playing now lists the full queue with indices and a `>` marker on the current track. All 6 tools register.
+- **Android:** PlaybackManager new `enqueueTracks`/`playNextTracks`/`moveTrack` (net-new Media3 ops: addMediaItems, addMediaItems(index,...), moveMediaItem) + `toDjQueueItem`. moveTrack keeps currentIndex pinned to the playing item. DjCommandClient dispatches queue/play_next/reorder, `resolveTracks` helper, reportLoop now publishes the queue list. ApiModels: DjCommandPayload +from_index/+to_index, new QueueTrackDto, PlaybackStateDto +queue. BUILD SUCCESSFUL (versionCode 22 APK).
+- **Smoke-tested green (fresh server):** play_now[201,202] → queue[203] → play_next[204] (insert after current → 201,204,202,203) → reorder(1→3) → final 201,202,203,204; dj_now_playing lists all 4 with indices. On-device Media3 execution still = Todd's phone test.
+- ⚠️ Gotcha burned earlier: a stale uvicorn kept squatting the port so "restarted" servers silently hit OLD code. Always `taskkill /F /PID` the port's LISTEN pid (netstat -ano) or use a fresh port when re-testing.
+
+## Remaining
+- P3: dj_queue_by (pure MCP-side name→track_id resolution helper over the catalog REST API). No client/server changes expected.
 
 ## P1 — what shipped & how to run
 Server (verified — full pytest suite 214 passed, incl. 6 new playback tests):

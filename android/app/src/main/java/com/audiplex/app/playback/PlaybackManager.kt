@@ -349,6 +349,81 @@ class PlaybackManager @Inject constructor(
         )
     }
 
+    private fun toDjQueueItem(track: TrackSchema): MusicQueueItem = MusicQueueItem(
+        track = track,
+        albumId = track.albumId,
+        albumTitle = "Unknown",
+        albumHasCover = false
+    )
+
+    /**
+     * DJ: append tracks to the END of the current music queue. If no music
+     * queue is active, starts playback of the tracks (play_now fallback).
+     * Net-new Media3 op: addMediaItems.
+     */
+    fun enqueueTracks(tracks: List<TrackSchema>, baseUrl: String) {
+        if (tracks.isEmpty()) return
+        val music = _currentMusic.value
+        if (music == null || _playerKind.value != PlayerKind.Music) {
+            playTracks(tracks, baseUrl, title = "DJ Queue", albumLookup = emptyMap())
+            return
+        }
+        val newItems = tracks.map { toDjQueueItem(it) }
+        _currentMusic.value = music.copy(items = music.items + newItems)
+        ensureController { ctrl ->
+            ctrl.addMediaItems(newItems.map { buildMusicMediaItem(it) })
+        }
+    }
+
+    /**
+     * DJ: insert tracks immediately AFTER the currently-playing track. If no
+     * music queue is active, starts playback (play_now fallback).
+     * Net-new Media3 op: addMediaItems(index, ...).
+     */
+    fun playNextTracks(tracks: List<TrackSchema>, baseUrl: String) {
+        if (tracks.isEmpty()) return
+        val music = _currentMusic.value
+        if (music == null || _playerKind.value != PlayerKind.Music) {
+            playTracks(tracks, baseUrl, title = "DJ Queue", albumLookup = emptyMap())
+            return
+        }
+        val insertAt = (music.currentIndex + 1).coerceIn(0, music.items.size)
+        val newItems = tracks.map { toDjQueueItem(it) }
+        val updated = music.items.toMutableList().apply { addAll(insertAt, newItems) }
+        _currentMusic.value = music.copy(items = updated)
+        ensureController { ctrl ->
+            ctrl.addMediaItems(insertAt, newItems.map { buildMusicMediaItem(it) })
+        }
+    }
+
+    /**
+     * DJ: move a queued track from one position to another. No-op if either
+     * index is out of range or they're equal. Net-new Media3 op: moveMediaItem.
+     */
+    fun moveTrack(fromIndex: Int, toIndex: Int) {
+        val music = _currentMusic.value ?: return
+        val items = music.items
+        if (fromIndex !in items.indices || toIndex !in items.indices) return
+        if (fromIndex == toIndex) return
+        val moving = items[fromIndex]
+        val reordered = items.toMutableList().apply {
+            removeAt(fromIndex)
+            add(toIndex, moving)
+        }
+        // Keep currentIndex pointing at the same playing item after the shift.
+        val current = music.currentIndex
+        val newCurrent = when {
+            current == fromIndex -> toIndex
+            fromIndex < current && toIndex >= current -> current - 1
+            fromIndex > current && toIndex <= current -> current + 1
+            else -> current
+        }
+        _currentMusic.value = music.copy(items = reordered, currentIndex = newCurrent)
+        ensureController { ctrl ->
+            ctrl.moveMediaItem(fromIndex, toIndex)
+        }
+    }
+
     private fun playTrackList(
         items: List<MusicQueueItem>,
         baseUrl: String,

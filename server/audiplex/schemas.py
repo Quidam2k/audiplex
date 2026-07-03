@@ -235,6 +235,16 @@ class NowPlayingTrack(BaseModel):
     artist: str | None = None
 
 
+class NowPlayingQueueItem(BaseModel):
+    """One entry in the client's current queue, so the agent can DJ with
+    full visibility (and issue index-based reorders that mean something)."""
+
+    index: int
+    id: int
+    title: str | None = None
+    artist: str | None = None
+
+
 class PlaybackState(BaseModel):
     """Now-playing snapshot written by the client, read by the agent."""
 
@@ -244,3 +254,4 @@ class PlaybackState(BaseModel):
     duration_ms: int = 0
     queue_length: int = 0
     queue_index: int = 0
+    queue: list[NowPlayingQueueItem] = []

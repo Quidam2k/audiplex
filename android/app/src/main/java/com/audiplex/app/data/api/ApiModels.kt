@@ -281,8 +281,10 @@ data class FolderListing(
 
 @JsonClass(generateAdapter = true)
 data class DjCommandPayload(
-    // v1 'play_now' carries track_ids; future command types add fields here.
-    @Json(name = "track_ids") val trackIds: List<Int>? = null
+    // 'play_now'/'queue'/'play_next' carry track_ids; 'reorder' carries indices.
+    @Json(name = "track_ids") val trackIds: List<Int>? = null,
+    @Json(name = "from_index") val fromIndex: Int? = null,
+    @Json(name = "to_index") val toIndex: Int? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -301,11 +303,20 @@ data class NowPlayingTrackDto(
 )
 
 @JsonClass(generateAdapter = true)
+data class QueueTrackDto(
+    val index: Int,
+    val id: Int,
+    val title: String?,
+    val artist: String?
+)
+
+@JsonClass(generateAdapter = true)
 data class PlaybackStateDto(
     val playing: Boolean,
     val track: NowPlayingTrackDto?,
     @Json(name = "position_ms") val positionMs: Long,
     @Json(name = "duration_ms") val durationMs: Long,
     @Json(name = "queue_length") val queueLength: Int,
-    @Json(name = "queue_index") val queueIndex: Int
+    @Json(name = "queue_index") val queueIndex: Int,
+    val queue: List<QueueTrackDto> = emptyList()
 )
