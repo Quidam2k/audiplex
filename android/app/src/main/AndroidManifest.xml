@@ -37,6 +37,15 @@
             </intent-filter>
         </service>
 
+        <!-- WorkManager runs DownloadWorker in its own SystemForegroundService.
+             On Android 14 (targetSdk 34) setForeground(... DATA_SYNC) throws
+             MissingForegroundServiceTypeException unless the service itself
+             declares the type, so merge it onto the library's declaration. -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
