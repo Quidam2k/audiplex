@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     library_paths: list[str] = Field(default_factory=list)  # legacy shim
     database_url: str = "sqlite:///./audiplex.db"
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8100
     cover_cache_dir: str = "./covers"
     scan_on_startup: bool = True
     apk_output_dir: str = "../android/app/build/outputs/apk/debug"

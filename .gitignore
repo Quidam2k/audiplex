@@ -43,3 +43,11 @@ Thumbs.db
 
 # Junk
 nul
+pty_injection.log
+
+# Pantheon orchestrator files that land in this dir but aren't part of audiplex
+.mcp.json
+start_worker.bat
+
+# Personal handoff / debugging notes (machine-specific paths)
+NOTE-*.md
