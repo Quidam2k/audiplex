@@ -10,6 +10,10 @@ venv/
 # Server config (contains jwt_secret + machine-specific paths)
 server/config.yaml
 
+# DJ service-account JWT — single-source token file read by audiplex_mcp
+# when AUDIPLEX_TOKEN env is unset (rotation = re-mint + overwrite this file)
+.dj_token
+
 # Server runtime artifacts (regenerated from the library)
 server/audiplex.db
 server/*.db.pre-*-backup

@@ -8,6 +8,10 @@ Config via environment:
   AUDIPLEX_URL    base URL of the Audiplex server (e.g. http://100.x.y.z:8000)
   AUDIPLEX_TOKEN  service-account JWT — mint via:
                     cd server && python -m audiplex.create_service_token
+                  When unset/empty, falls back to reading a `.dj_token` file
+                  at the repo root (single source: rotation = re-mint +
+                  overwrite that one file instead of editing every agent's
+                  MCP config).
 
 Tools: dj_play_now, dj_skip, dj_queue, dj_play_next, dj_reorder,
 dj_queue_by, dj_now_playing. The agent can pass explicit track IDs (resolved
@@ -16,13 +20,28 @@ NAME to tracks MCP-side (there is no dedicated /search endpoint).
 """
 
 import os
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 
 AUDIPLEX_URL = os.environ.get("AUDIPLEX_URL", "http://localhost:8000").rstrip("/")
-AUDIPLEX_TOKEN = os.environ.get("AUDIPLEX_TOKEN", "")
+
+
+def _load_token() -> str:
+    """Env wins; otherwise fall back to the .dj_token file at the repo root."""
+    token = os.environ.get("AUDIPLEX_TOKEN", "")
+    if token:
+        return token
+    token_file = Path(__file__).resolve().parent.parent / ".dj_token"
+    try:
+        return token_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+AUDIPLEX_TOKEN = _load_token()
 
 mcp = FastMCP("audiplex-dj")
 
