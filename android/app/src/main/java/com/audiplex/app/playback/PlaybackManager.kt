@@ -517,6 +517,14 @@ class PlaybackManager @Inject constructor(
         controller?.play()
     }
 
+    /** Media3 player volume (0.0-1.0) — NOT device/stream volume, deliberately;
+     * device volume would fight the Pantheon companion's mic-hot media-ducking. */
+    fun setPlayerVolume(volume: Float) {
+        controller?.volume = volume.coerceIn(0f, 1f)
+    }
+
+    fun playerVolume(): Float = controller?.volume ?: 1f
+
     fun seekTo(positionMs: Long) {
         if (isMusic()) {
             controller?.seekTo(positionMs)

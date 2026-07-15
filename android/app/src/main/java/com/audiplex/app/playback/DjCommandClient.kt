@@ -33,9 +33,10 @@ import kotlin.coroutines.coroutineContext
  *  - [reportLoop]: periodically POSTs now-playing state up so the agent can
  *    see what's playing via dj_now_playing.
  *
- * Handles command types: play_now, skip, queue, play_next, reorder. The
- * reportLoop also publishes the full queue (with indices) so the agent can
- * DJ with visibility and issue index-based reorders.
+ * Handles command types: play_now, skip, queue, play_next, reorder, pause,
+ * resume, previous, seek, volume. The reportLoop also publishes the full
+ * queue (with indices) and the current player volume so the agent can DJ
+ * with visibility and issue index-based reorders.
  */
 @Singleton
 class DjCommandClient @Inject constructor(
@@ -125,6 +126,17 @@ class DjCommandClient @Inject constructor(
                     playbackManager.skipForward()
                 }
             }
+            "pause" -> withContext(Dispatchers.Main) { playbackManager.pause() }
+            "resume" -> withContext(Dispatchers.Main) { playbackManager.resume() }
+            "previous" -> withContext(Dispatchers.Main) { playbackManager.skipBack() }
+            "seek" -> {
+                val positionMs = cmd.payload?.positionMs ?: return
+                withContext(Dispatchers.Main) { playbackManager.seekTo(positionMs) }
+            }
+            "volume" -> {
+                val volume = cmd.payload?.volume ?: return
+                withContext(Dispatchers.Main) { playbackManager.setPlayerVolume(volume) }
+            }
             else -> Unit // unknown command type — ignored
         }
     }
@@ -155,6 +167,7 @@ class DjCommandClient @Inject constructor(
                 queueLength = music?.items?.size ?: 0,
                 queueIndex = music?.currentIndex ?: 0,
                 queue = queue,
+                volume = playbackManager.playerVolume(),
             )
             // Always refresh while playing (position moves); otherwise only on
             // a meaningful state change so we don't spam the server when idle.

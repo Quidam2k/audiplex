@@ -284,7 +284,10 @@ data class DjCommandPayload(
     // 'play_now'/'queue'/'play_next' carry track_ids; 'reorder' carries indices.
     @Json(name = "track_ids") val trackIds: List<Int>? = null,
     @Json(name = "from_index") val fromIndex: Int? = null,
-    @Json(name = "to_index") val toIndex: Int? = null
+    @Json(name = "to_index") val toIndex: Int? = null,
+    // 'seek' carries position_ms; 'volume' carries volume (0.0-1.0).
+    @Json(name = "position_ms") val positionMs: Long? = null,
+    val volume: Float? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -318,5 +321,6 @@ data class PlaybackStateDto(
     @Json(name = "duration_ms") val durationMs: Long,
     @Json(name = "queue_length") val queueLength: Int,
     @Json(name = "queue_index") val queueIndex: Int,
-    val queue: List<QueueTrackDto> = emptyList()
+    val queue: List<QueueTrackDto> = emptyList(),
+    val volume: Float? = null
 )
