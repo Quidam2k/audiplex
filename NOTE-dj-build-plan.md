@@ -1,6 +1,16 @@
 # AUDIPLEX DJ — BUILD PLAN (assignment #1782 / PROCEED #1784)
 
-Status: **P1 COMPLETE + COMPILED + SMOKE-TESTED** (assignment #1970 STEP 1 done). Next: STEP 2 (P2a dj_skip → P2b Media3 queue ops → P3 dj_queue_by). cwd: Q:\Development\audiplex
+Status: **P1-P3 + P2c ALL SHIPPED** (item #429, plan-429.json, 2026-07-15). Remaining: Todd's physical on-device smoke test (the true closing gate), production server restart on Solace, and Karen's MCP mount (blocked — see P2c section below). cwd: Q:\Development\audiplex
+
+## P2c done (2026-07-15) — transport commands (pause/resume/previous/seek/volume) + playlist/favorites selection (item #429 last mile)
+- **Server:** `PlaybackState.volume`; `Settings.dj_owner_username` (config.yaml, gitignored — set to "admin" locally); owner-resolved read-only `GET /api/playback/playlists`, `/playlists/{id}`, `/favorites` so the dj-agent service account can see Todd's library (his per-user `/api/music/` endpoints return empty for a different caller). pytest 214→219 passed.
+- **MCP:** `dj_pause`, `dj_resume`, `dj_previous`, `dj_seek(position_seconds)`, `dj_volume(level 0-100)` (Media3 player volume, NOT device volume — deliberate, see PlaybackManager risk in plan-429.json). `dj_queue_by` gains `kind='playlist'` and `kind='favorites'`, resolved via the new owner-scoped endpoints. `dj_now_playing` reports volume. 12 tools total register.
+- **Android:** `DjCommandClient` dispatches the five new command types onto existing `PlaybackManager` entry points (`pause()`, `resume()`, `skipBack()`, `seekTo()`); new `setPlayerVolume`/`playerVolume` (Media3 `controller.volume`). `reportLoop` publishes volume. BUILD SUCCESSFUL, versionCode 27→28.
+- **Smoke-tested green** (scratch in-process server + simulated Android client, see workflow in prior smoke-test sections): all 5 transport commands delivered with correct payloads, `dj_now_playing` volume line confirmed, playlist-by-name resolution confirmed end-to-end.
+- Commits: server+MCP=ae1fb93, Android=b4e8fc0. (A pre-existing, unrelated, already-complete local-first playback-position feature that was sitting uncommitted got its own commit first, f8ce3a8, to avoid entangling it with #429.)
+- **NOT done — blocked:** E3 (mount `audiplex-dj` in Karen's `.mcp.json`) was rejected by the Claude Code auto-mode permission classifier as "unauthorized persistence" (granting a new persona standing network access to issue DJ commands needs explicit sign-off, not just an assignment task). Someone with permission needs to add the block manually or explicitly approve it — see the exact JSON block in plan-429.json step E3 / jarvis/.mcp.json's existing audiplex-dj entry.
+- **NOT done — out of reach from Athena:** E2 (restart production server on :8100) — production runs on Solace (192.168.50.139), a separate physical machine from this worker (Athena, 192.168.50.217). No remote exec available; someone on Solace needs to re-run launch.bat (it self-kills the old PID).
+- Gemini-Karen's `.gemini/settings.json` has an empty `mcpServers` — flagged to Jarvis, not touched (per plan explicit instruction not to guess at Gemini-side config).
 
 ## STEP 1 done (2026-07-03, assignment #1970)
 - **Android compiles for the first time.** `./gradlew assembleDebug` → BUILD SUCCESSFUL (1m52s). APK: `android/app/build/outputs/apk/debug/app-debug.apk` (23.6 MB, versionCode 20). DjCommandClient.kt + P1 wiring all compiled clean.
