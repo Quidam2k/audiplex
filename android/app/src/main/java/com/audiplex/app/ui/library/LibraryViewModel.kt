@@ -9,6 +9,7 @@ import com.audiplex.app.data.api.AuthorSchema
 import com.audiplex.app.data.api.BookSummary
 import com.audiplex.app.data.api.ProgressSchema
 import com.audiplex.app.data.api.SeriesSchema
+import com.audiplex.app.data.download.PlaybackPositionRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -42,6 +43,7 @@ data class InProgressBook(
 class LibraryViewModel @Inject constructor(
     private val apiHolder: ApiServiceHolder,
     private val settingsStore: SettingsStore,
+    private val playbackPositionRepository: PlaybackPositionRepository,
     val favoritesStore: FavoritesStore
 ) : ViewModel() {
 
@@ -86,6 +88,12 @@ class LibraryViewModel @Inject constructor(
             val api = apiHolder.api ?: run {
                 _uiState.value = LibraryUiState.NoServer
                 return
+            }
+            // Opportunistic offline→online flush: we have connectivity now, so
+            // PUT any positions saved while offline. Runs in the background so
+            // it never delays the library render.
+            viewModelScope.launch {
+                try { playbackPositionRepository.flushUnsynced() } catch (_: Exception) { }
             }
             val books = api.getBooks(
                 author = filterAuthor,

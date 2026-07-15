@@ -17,6 +17,8 @@ import com.audiplex.app.data.api.PlayStatEvent
 import com.audiplex.app.data.api.PlaylistDetail
 import com.audiplex.app.data.api.ProgressUpdate
 import com.audiplex.app.data.api.TrackSchema
+import com.audiplex.app.data.db.PlaybackPositionDao
+import com.audiplex.app.data.db.PlaybackPositionEntity
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -53,7 +55,8 @@ data class MusicQueueState(
 class PlaybackManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val apiHolder: ApiServiceHolder,
-    private val downloadRepository: DownloadRepository
+    private val downloadRepository: DownloadRepository,
+    private val playbackPositionDao: PlaybackPositionDao
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var controllerFuture: ListenableFuture<MediaController>? = null
@@ -165,17 +168,34 @@ class PlaybackManager @Inject constructor(
                     return
                 }
                 val book = _currentBook.value ?: return
+                val finishedChapter = book.chapters.lastIndex.coerceAtLeast(0)
+                val now = System.currentTimeMillis()
                 scope.launch {
-                    try {
-                        apiHolder.api?.updateProgress(
-                            book.id,
-                            ProgressUpdate(
-                                positionSeconds = book.durationSeconds,
-                                chapterIndex = book.chapters.lastIndex.coerceAtLeast(0),
-                                isFinished = true
-                            )
+                    // Local first — record finished so resume/Continue is correct offline.
+                    playbackPositionDao.upsert(
+                        PlaybackPositionEntity(
+                            bookId = book.id,
+                            positionSeconds = book.durationSeconds,
+                            chapterIndex = finishedChapter,
+                            isFinished = true,
+                            updatedAt = now,
+                            syncedToServer = false
                         )
-                    } catch (_: Exception) { }
+                    )
+                    val api = apiHolder.api
+                    if (api != null) {
+                        try {
+                            api.updateProgress(
+                                book.id,
+                                ProgressUpdate(
+                                    positionSeconds = book.durationSeconds,
+                                    chapterIndex = finishedChapter,
+                                    isFinished = true
+                                )
+                            )
+                            playbackPositionDao.markSynced(book.id, now)
+                        } catch (_: Exception) { }
+                    }
                 }
             }
         }
@@ -656,17 +676,34 @@ class PlaybackManager @Inject constructor(
 
     private suspend fun syncProgress() {
         val book = _currentBook.value ?: return
-        val api = apiHolder.api ?: return
         val posSeconds = _positionMs.value / 1000.0
+        // 0-guard: a stalled/not-yet-ready player reports 0 — never let that
+        // clobber a good saved position with 0:00.
         if (posSeconds <= 0) return
+        val chapterIndex = _currentChapterIndex.value
+        val now = System.currentTimeMillis()
+        // Local first — instant and offline-proof.
+        playbackPositionDao.upsert(
+            PlaybackPositionEntity(
+                bookId = book.id,
+                positionSeconds = posSeconds,
+                chapterIndex = chapterIndex,
+                isFinished = false,
+                updatedAt = now,
+                syncedToServer = false
+            )
+        )
+        // Server best-effort; mark synced only on a successful PUT.
+        val api = apiHolder.api ?: return
         try {
             api.updateProgress(
                 book.id,
                 ProgressUpdate(
                     positionSeconds = posSeconds,
-                    chapterIndex = _currentChapterIndex.value
+                    chapterIndex = chapterIndex
                 )
             )
+            playbackPositionDao.markSynced(book.id, now)
         } catch (_: Exception) { }
     }
 

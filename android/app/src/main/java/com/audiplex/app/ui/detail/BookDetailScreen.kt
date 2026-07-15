@@ -103,12 +103,12 @@ fun BookDetailScreen(
                 BookDetailContent(
                     book = state.book,
                     baseUrl = viewModel.getBaseUrl(),
-                    hasProgress = state.progress != null,
-                    progressChapter = state.progress?.chapterIndex,
+                    hasProgress = state.resume.hasProgress,
+                    progressChapter = state.resume.chapterIndex.takeIf { state.resume.hasProgress },
                     downloadState = downloadState,
                     onPlay = {
-                        if (state.progress != null && !state.progress.isFinished) {
-                            viewModel.resume(state.book, state.progress)
+                        if (state.resume.hasProgress && !state.resume.isFinished) {
+                            viewModel.resume(state.book, state.resume)
                         } else {
                             viewModel.play(state.book)
                         }

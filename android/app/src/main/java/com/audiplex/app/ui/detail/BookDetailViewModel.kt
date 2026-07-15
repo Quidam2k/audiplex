@@ -4,9 +4,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.audiplex.app.data.ApiServiceHolder
 import com.audiplex.app.data.api.BookDetail
-import com.audiplex.app.data.api.ProgressSchema
 import com.audiplex.app.data.db.DownloadEntity
 import com.audiplex.app.data.download.DownloadRepository
+import com.audiplex.app.data.download.PlaybackPositionRepository
+import com.audiplex.app.data.download.ResumeInfo
 import com.audiplex.app.playback.PlaybackManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -23,7 +24,7 @@ sealed class BookDetailUiState {
     data object Loading : BookDetailUiState()
     data class Success(
         val book: BookDetail,
-        val progress: ProgressSchema?
+        val resume: ResumeInfo
     ) : BookDetailUiState()
     data class Error(val message: String) : BookDetailUiState()
 }
@@ -32,7 +33,8 @@ sealed class BookDetailUiState {
 class BookDetailViewModel @Inject constructor(
     private val apiHolder: ApiServiceHolder,
     private val playbackManager: PlaybackManager,
-    private val downloadRepository: DownloadRepository
+    private val downloadRepository: DownloadRepository,
+    private val playbackPositionRepository: PlaybackPositionRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow<BookDetailUiState>(BookDetailUiState.Loading)
@@ -52,10 +54,18 @@ class BookDetailViewModel @Inject constructor(
         viewModelScope.launch {
             _uiState.value = BookDetailUiState.Loading
             try {
-                val api = apiHolder.api ?: throw IllegalStateException("No server configured")
-                val book = api.getBook(bookId)
-                val progress = try { api.getProgress(bookId) } catch (_: Exception) { null }
-                _uiState.value = BookDetailUiState.Success(book, progress)
+                val api = apiHolder.api
+                // Offline-proof: fall back to cached download metadata if the
+                // network fetch fails (or no server is configured).
+                val book = try {
+                    api?.getBook(bookId) ?: throw IllegalStateException("No server configured")
+                } catch (e: Exception) {
+                    downloadRepository.getCachedBookDetail(bookId) ?: throw e
+                }
+                // Resume target comes from the local-first reconciler, not the
+                // raw server progress — so Continue is correct even offline.
+                val resume = playbackPositionRepository.resolveStartPosition(bookId)
+                _uiState.value = BookDetailUiState.Success(book, resume)
             } catch (e: Exception) {
                 _uiState.value = BookDetailUiState.Error(e.message ?: "Failed to load book")
             }
@@ -66,8 +76,8 @@ class BookDetailViewModel @Inject constructor(
         playbackManager.play(book, apiHolder.baseUrl, startSeconds)
     }
 
-    fun resume(book: BookDetail, progress: ProgressSchema) {
-        playbackManager.play(book, apiHolder.baseUrl, progress.positionSeconds)
+    fun resume(book: BookDetail, resume: ResumeInfo) {
+        playbackManager.play(book, apiHolder.baseUrl, resume.positionSeconds)
     }
 
     fun playFromChapter(book: BookDetail, chapterIndex: Int) {

@@ -88,6 +88,12 @@ class DownloadRepository @Inject constructor(
     fun getBookDetailFromJson(json: String): BookDetail? =
         try { moshi.adapter(BookDetail::class.java).fromJson(json) } catch (_: Exception) { null }
 
+    /** Cached book metadata from a download, for offline detail display. */
+    suspend fun getCachedBookDetail(bookId: Int): BookDetail? {
+        val entity = downloadDao.getById(bookId) ?: return null
+        return getBookDetailFromJson(entity.bookMetadataJson)
+    }
+
     fun totalStorageUsed(): Flow<Long> = downloadDao.observeTotalStorageUsed()
 
     private suspend fun enqueueWork(bookId: Int, baseUrl: String) {
