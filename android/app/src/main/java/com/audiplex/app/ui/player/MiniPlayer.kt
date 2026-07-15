@@ -44,6 +44,7 @@ fun MiniPlayer(
     val kind by viewModel.playerKind.collectAsState()
     val book by viewModel.currentBook.collectAsState()
     val music by viewModel.currentMusic.collectAsState()
+    val streamTitle by viewModel.currentStreamTitle.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
     val positionMs by viewModel.positionMs.collectAsState()
     val durationMs by viewModel.durationMs.collectAsState()
@@ -69,6 +70,16 @@ fun MiniPlayer(
                     effectiveDuration = if (durationMs > 0) durationMs else (item.track.durationSeconds * 1000).toLong()
                 )
             }
+        }
+        PlayerKind.Stream -> streamTitle?.let { title ->
+            // Endless live stream — no known duration, so no progress bar.
+            MiniInfo(
+                title = title,
+                subtitle = "Radio Free Luna",
+                coverUrl = null,
+                fallbackIcon = Icons.Default.MusicNote,
+                effectiveDuration = 0L
+            )
         }
         null -> null
     } ?: return

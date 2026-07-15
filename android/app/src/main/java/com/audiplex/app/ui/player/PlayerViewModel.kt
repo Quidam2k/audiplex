@@ -22,6 +22,7 @@ class PlayerViewModel @Inject constructor(
 
     val currentBook: StateFlow<BookDetail?> = playbackManager.currentBook
     val currentMusic: StateFlow<MusicQueueState?> = playbackManager.currentMusic
+    val currentStreamTitle: StateFlow<String?> = playbackManager.currentStreamTitle
     val playerKind: StateFlow<PlayerKind?> = playbackManager.playerKind
     val isPlaying: StateFlow<Boolean> = playbackManager.isPlaying
     val positionMs: StateFlow<Long> = playbackManager.positionMs
@@ -30,8 +31,9 @@ class PlayerViewModel @Inject constructor(
 
     val hasActiveBook: StateFlow<Boolean> = combine(
         playbackManager.currentBook,
-        playbackManager.currentMusic
-    ) { book, music -> book != null || music != null }
+        playbackManager.currentMusic,
+        playbackManager.currentStreamTitle
+    ) { book, music, streamTitle -> book != null || music != null || streamTitle != null }
         .stateIn(
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main),
             started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000),

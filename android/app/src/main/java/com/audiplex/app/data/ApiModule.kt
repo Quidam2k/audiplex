@@ -8,6 +8,7 @@ import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Response
@@ -18,17 +19,34 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 import javax.inject.Singleton
 
+/**
+ * The player's OkHttpClient is shared between the Retrofit API (audiplex
+ * server only) and Media3's OkHttpDataSource (any playable URL, including
+ * external streams like Radio Free Luna's /stream.mp3 via dj_play_stream).
+ * Bearer-tokening every request through that shared client would leak
+ * Todd's audiplex JWT to whatever external host a stream URL points at —
+ * so the token (and the 401 -> clearAuthToken side effect) only applies
+ * when the request host matches the configured audiplex server.
+ */
 class AuthInterceptor(private val settingsStore: SettingsStore) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val serverUrl = runBlocking { settingsStore.serverUrl.first() }
+        val audiplexHost = serverUrl.toHttpUrlOrNull()?.host
+        val isAudiplexHost = audiplexHost != null && request.url.host == audiplexHost
+        if (!isAudiplexHost) {
+            return chain.proceed(request)
+        }
+
         val token = runBlocking { settingsStore.authToken.first() }
-        val request = if (token.isNotBlank()) {
-            chain.request().newBuilder()
+        val authedRequest = if (token.isNotBlank()) {
+            request.newBuilder()
                 .addHeader("Authorization", "Bearer $token")
                 .build()
         } else {
-            chain.request()
+            request
         }
-        val response = chain.proceed(request)
+        val response = chain.proceed(authedRequest)
         if (response.code == 401) {
             runBlocking { settingsStore.clearAuthToken() }
         }

@@ -34,7 +34,7 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
 
-enum class PlayerKind { Audiobook, Music }
+enum class PlayerKind { Audiobook, Music, Stream }
 
 data class MusicQueueItem(
     val track: TrackSchema,
@@ -72,6 +72,9 @@ class PlaybackManager @Inject constructor(
 
     private val _playerKind = MutableStateFlow<PlayerKind?>(null)
     val playerKind: StateFlow<PlayerKind?> = _playerKind
+
+    private val _currentStreamTitle = MutableStateFlow<String?>(null)
+    val currentStreamTitle: StateFlow<String?> = _currentStreamTitle
 
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying
@@ -251,10 +254,42 @@ class PlaybackManager @Inject constructor(
             .build()
     }
 
+    /**
+     * Play an external HTTP audio stream (e.g. Radio Free Luna's /stream.mp3),
+     * replacing whatever is currently playing. Play/stop/switch-source only —
+     * no queue semantics apply to a stream item (endless, no duration/seek).
+     */
+    fun playStreamUrl(url: String, title: String) {
+        finalizeMusicIfActive()
+        _currentMusic.value = null
+        _currentBook.value = null
+        progressSyncJob?.cancel()
+        _playerKind.value = PlayerKind.Stream
+        _currentStreamTitle.value = title
+        lastReportedTrackIndex = -1
+
+        val item = MediaItem.Builder()
+            .setUri(url)
+            .setMediaId("stream:$url")
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(title)
+                    .setArtist("Radio Free Luna")
+                    .build()
+            )
+            .build()
+        ensureController { ctrl ->
+            ctrl.setMediaItem(item)
+            ctrl.prepare()
+            ctrl.play()
+        }
+    }
+
     private var localFilePath: String? = null
 
     fun play(book: BookDetail, baseUrl: String, startSeconds: Double = 0.0) {
         _currentMusic.value = null
+        _currentStreamTitle.value = null
         lastReportedTrackIndex = -1
         _currentBook.value = book
         _playerKind.value = PlayerKind.Audiobook
@@ -457,6 +492,7 @@ class PlaybackManager @Inject constructor(
         // Clear audiobook state, post final stop for any prior music
         finalizeMusicIfActive()
         _currentBook.value = null
+        _currentStreamTitle.value = null
         progressSyncJob?.cancel()
         currentBaseUrl = baseUrl
 

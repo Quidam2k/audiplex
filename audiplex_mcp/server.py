@@ -15,11 +15,15 @@ Config via environment:
 
 Tools: dj_play_now, dj_skip, dj_queue, dj_play_next, dj_reorder,
 dj_queue_by, dj_now_playing, dj_pause, dj_resume, dj_previous, dj_seek,
-dj_volume. The agent can pass explicit track IDs (resolved via the catalog
-REST API) or let dj_queue_by resolve an artist/album/genre/playlist/favorites
-NAME to tracks MCP-side (there is no dedicated /search endpoint). Playlist
-and favorites resolution go through /api/playback/ (owner-resolved reads),
-NOT /api/music/ — the latter is scoped to the caller and dj-agent has none.
+dj_volume, dj_play_stream. The agent can pass explicit track IDs (resolved
+via the catalog REST API) or let dj_queue_by resolve an artist/album/genre/
+playlist/favorites NAME to tracks MCP-side (there is no dedicated /search
+endpoint). Playlist and favorites resolution go through /api/playback/
+(owner-resolved reads), NOT /api/music/ — the latter is scoped to the
+caller and dj-agent has none. dj_play_stream routes an external HTTP audio
+stream (e.g. Radio Free Luna's /stream.mp3) to the device — see the
+token-leak guard in the Android AuthInterceptor before assuming this is
+safe to extend to other stream-carrying commands.
 """
 
 import os
@@ -220,6 +224,24 @@ async def dj_volume(level: int) -> str:
         return data
     return (
         f"Queued volume {level}% "
+        f"(command #{data.get('id')}, {data.get('pending')} pending)."
+    )
+
+
+@mcp.tool()
+async def dj_play_stream(url: str, title: str = "Live stream") -> str:
+    """Play an external HTTP audio stream on the Audiplex device, replacing
+    the current queue — this is how agents route Radio Free Luna (or any
+    other HTTP audio stream) to the phone, e.g.
+    url='http://<rfl-host>:8080/stream.mp3'. Use dj_play_now afterward to
+    switch back to music. Play/stop/switch-source only — the queue-ops
+    tools (dj_queue/dj_reorder/etc.) don't apply to a stream item.
+    """
+    data = await _enqueue("play_stream", {"url": url, "title": title})
+    if isinstance(data, str):
+        return data
+    return (
+        f"Playing stream '{title}' from {url} "
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
     )
 

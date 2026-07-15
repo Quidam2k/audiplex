@@ -64,6 +64,7 @@ fun PlayerScreen(
     val kind by viewModel.playerKind.collectAsState()
     val book by viewModel.currentBook.collectAsState()
     val music by viewModel.currentMusic.collectAsState()
+    val streamTitle by viewModel.currentStreamTitle.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
     val positionMs by viewModel.positionMs.collectAsState()
     val durationMs by viewModel.durationMs.collectAsState()
@@ -129,12 +130,28 @@ fun PlayerScreen(
                     detail = track?.albumTitle
                 )
             }
+            PlayerKind.Stream -> {
+                val title = streamTitle ?: return
+                CoverArt(
+                    coverUrl = null,
+                    contentDescription = title,
+                    fallbackIcon = Icons.Default.MusicNote
+                )
+                Spacer(Modifier.height(24.dp))
+                TitleBlock(
+                    title = title,
+                    subtitle = "Radio Free Luna",
+                    detail = "Live stream"
+                )
+            }
             null -> Unit
         }
 
         Spacer(Modifier.weight(1f))
 
-        // Seek bar — for music, scoped to current track; for audiobook, scoped to whole book
+        // Seek bar — for music, scoped to current track; for audiobook, scoped to whole book.
+        // A stream is endless/live with no known duration, so it has no seek bar (Slider is
+        // skipped below for Stream — the 1L here is just an unused fallback for the range calc).
         val effectiveDuration = when (kind) {
             PlayerKind.Music -> durationMs.coerceAtLeast(1L)
             PlayerKind.Audiobook -> {
@@ -142,12 +159,13 @@ fun PlayerScreen(
                 if (durationMs > 0) durationMs
                 else (b?.durationSeconds?.let { (it * 1000).toLong() } ?: 1L)
             }
+            PlayerKind.Stream -> 1L
             null -> 1L
         }
         var isSeeking by remember { mutableStateOf(false) }
         var seekPosition by remember { mutableFloatStateOf(0f) }
 
-        Column(modifier = Modifier.padding(horizontal = 24.dp)) {
+        if (kind != PlayerKind.Stream) Column(modifier = Modifier.padding(horizontal = 24.dp)) {
             Slider(
                 value = if (isSeeking) seekPosition else positionMs.toFloat(),
                 onValueChange = {

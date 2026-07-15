@@ -287,7 +287,10 @@ data class DjCommandPayload(
     @Json(name = "to_index") val toIndex: Int? = null,
     // 'seek' carries position_ms; 'volume' carries volume (0.0-1.0).
     @Json(name = "position_ms") val positionMs: Long? = null,
-    val volume: Float? = null
+    val volume: Float? = null,
+    // 'play_stream' carries an external HTTP audio stream URL + display title.
+    val url: String? = null,
+    val title: String? = null
 )
 
 @JsonClass(generateAdapter = true)

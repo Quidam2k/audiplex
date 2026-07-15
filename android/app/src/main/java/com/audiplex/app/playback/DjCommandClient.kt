@@ -34,9 +34,11 @@ import kotlin.coroutines.coroutineContext
  *    see what's playing via dj_now_playing.
  *
  * Handles command types: play_now, skip, queue, play_next, reorder, pause,
- * resume, previous, seek, volume. The reportLoop also publishes the full
- * queue (with indices) and the current player volume so the agent can DJ
- * with visibility and issue index-based reorders.
+ * resume, previous, seek, volume, play_stream. The reportLoop also publishes
+ * the full queue (with indices) and the current player volume so the agent
+ * can DJ with visibility and issue index-based reorders. play_stream routes
+ * an external HTTP audio stream (e.g. Radio Free Luna) to the device —
+ * queue ops don't apply to it, and the reportLoop reports title-only state.
  */
 @Singleton
 class DjCommandClient @Inject constructor(
@@ -137,6 +139,11 @@ class DjCommandClient @Inject constructor(
                 val volume = cmd.payload?.volume ?: return
                 withContext(Dispatchers.Main) { playbackManager.setPlayerVolume(volume) }
             }
+            "play_stream" -> {
+                val url = cmd.payload?.url ?: return
+                val title = cmd.payload?.title ?: "Live stream"
+                withContext(Dispatchers.Main) { playbackManager.playStreamUrl(url, title) }
+            }
             else -> Unit // unknown command type — ignored
         }
     }
@@ -155,13 +162,21 @@ class DjCommandClient @Inject constructor(
             val api = apiHolder.api ?: continue
             val music = playbackManager.currentMusic.value
             val playing = playbackManager.isPlaying.value
+            val streamTitle = playbackManager.currentStreamTitle.value
             val track = music?.items?.getOrNull(music.currentIndex)?.track
+            // A stream has no track id/queue — report title only (id -1 is a
+            // client-side sentinel; the agent only reads title/artist for it).
+            val trackDto = if (streamTitle != null) {
+                NowPlayingTrackDto(-1, streamTitle, "Radio Free Luna")
+            } else {
+                track?.let { NowPlayingTrackDto(it.id, it.title, it.artistName) }
+            }
             val queue = music?.items?.mapIndexed { i, item ->
                 QueueTrackDto(index = i, id = item.track.id, title = item.track.title, artist = item.track.artistName)
             } ?: emptyList()
             val state = PlaybackStateDto(
                 playing = playing,
-                track = track?.let { NowPlayingTrackDto(it.id, it.title, it.artistName) },
+                track = trackDto,
                 positionMs = playbackManager.positionMs.value,
                 durationMs = playbackManager.durationMs.value,
                 queueLength = music?.items?.size ?: 0,
@@ -171,7 +186,7 @@ class DjCommandClient @Inject constructor(
             )
             // Always refresh while playing (position moves); otherwise only on
             // a meaningful state change so we don't spam the server when idle.
-            val key = "${state.playing}:${track?.id}:${state.queueIndex}"
+            val key = "${state.playing}:${trackDto?.id}:${state.queueIndex}"
             if (playing || key != lastKey) {
                 lastKey = key
                 runCatching { api.postPlaybackState(state) }
