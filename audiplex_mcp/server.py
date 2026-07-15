@@ -14,9 +14,12 @@ Config via environment:
                   MCP config).
 
 Tools: dj_play_now, dj_skip, dj_queue, dj_play_next, dj_reorder,
-dj_queue_by, dj_now_playing. The agent can pass explicit track IDs (resolved
-via the catalog REST API) or let dj_queue_by resolve an artist/album/genre
-NAME to tracks MCP-side (there is no dedicated /search endpoint).
+dj_queue_by, dj_now_playing, dj_pause, dj_resume, dj_previous, dj_seek,
+dj_volume. The agent can pass explicit track IDs (resolved via the catalog
+REST API) or let dj_queue_by resolve an artist/album/genre/playlist/favorites
+NAME to tracks MCP-side (there is no dedicated /search endpoint). Playlist
+and favorites resolution go through /api/playback/ (owner-resolved reads),
+NOT /api/music/ — the latter is scoped to the caller and dj-agent has none.
 """
 
 import os
@@ -166,6 +169,61 @@ async def dj_reorder(from_index: int, to_index: int) -> str:
     )
 
 
+@mcp.tool()
+async def dj_pause() -> str:
+    """Pause playback on the Audiplex device."""
+    data = await _enqueue("pause", {})
+    if isinstance(data, str):
+        return data
+    return f"Queued pause (command #{data.get('id')}, {data.get('pending')} pending)."
+
+
+@mcp.tool()
+async def dj_resume() -> str:
+    """Resume playback on the Audiplex device."""
+    data = await _enqueue("resume", {})
+    if isinstance(data, str):
+        return data
+    return f"Queued resume (command #{data.get('id')}, {data.get('pending')} pending)."
+
+
+@mcp.tool()
+async def dj_previous() -> str:
+    """Go back to the previous track in the Audiplex device's current queue."""
+    data = await _enqueue("previous", {})
+    if isinstance(data, str):
+        return data
+    return f"Queued previous (command #{data.get('id')}, {data.get('pending')} pending)."
+
+
+@mcp.tool()
+async def dj_seek(position_seconds: int) -> str:
+    """Seek to an absolute position (in seconds) in the current track."""
+    data = await _enqueue("seek", {"position_ms": position_seconds * 1000})
+    if isinstance(data, str):
+        return data
+    return (
+        f"Queued seek to {position_seconds}s "
+        f"(command #{data.get('id')}, {data.get('pending')} pending)."
+    )
+
+
+@mcp.tool()
+async def dj_volume(level: int) -> str:
+    """Set the Audiplex app's player volume, 0-100. This is Media3 player
+    volume, which multiplies with the phone's device volume — it does NOT
+    change the device/stream volume."""
+    if not 0 <= level <= 100:
+        return f"level must be 0-100 (got {level})."
+    data = await _enqueue("volume", {"volume": level / 100.0})
+    if isinstance(data, str):
+        return data
+    return (
+        f"Queued volume {level}% "
+        f"(command #{data.get('id')}, {data.get('pending')} pending)."
+    )
+
+
 async def _get(path: str):
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.get(f"{AUDIPLEX_URL}{path}", headers=_headers())
@@ -202,7 +260,11 @@ async def dj_queue_by(
     """Resolve a NAME to tracks and play/queue them — no need to look up IDs.
 
     query: the name to match (case-insensitive: exact > prefix > substring).
-    kind:  'artist' | 'album' | 'genre'.
+           Ignored for kind='favorites' (there's exactly one favorites list).
+    kind:  'artist' | 'album' | 'genre' | 'playlist' | 'favorites'.
+           playlist/favorites resolve against the configured DJ owner's
+           library (dj_owner_username), not the caller's own — the dj-agent
+           service account has none of its own.
     mode:  'now' (replace current & play), 'queue' (append to end, default),
            'next' (insert after the current track).
     limit: max tracks to enqueue (default 100).
@@ -237,8 +299,21 @@ async def dj_queue_by(
                 return f"No genre matching '{query}'."
             label = f"genre '{m['name']}'"
             tracks = await _get(f"/api/music/genres/{quote(m['name'], safe='')}/tracks")
+        elif kind == "playlist":
+            playlists = await _get("/api/playback/playlists")
+            m = _best_match(playlists, "name", query)
+            if not m:
+                return f"No playlist matching '{query}'."
+            label = f"playlist '{m['name']}'"
+            detail = await _get(f"/api/playback/playlists/{m['id']}")
+            tracks = detail.get("tracks", [])
+        elif kind == "favorites":
+            favorites = await _get("/api/playback/favorites?entity_type=track")
+            label = "favorite tracks"
+            track_ids_str = [f["entity_key"] for f in favorites]
+            tracks = [{"id": int(tid)} for tid in track_ids_str if tid.isdigit()]
         else:
-            return f"Unknown kind '{kind}'. Use 'artist', 'album', or 'genre'."
+            return f"Unknown kind '{kind}'. Use 'artist', 'album', 'genre', 'playlist', or 'favorites'."
     except PermissionError as e:
         return str(e)
 
@@ -280,6 +355,8 @@ async def dj_now_playing() -> str:
         f"[{pos // 60}:{pos % 60:02d}/{dur // 60}:{dur % 60:02d}] "
         f"(queue {idx + 1}/{s.get('queue_length', 0)})"
     ]
+    if s.get("volume") is not None:
+        lines.append(f"volume: {round(s['volume'] * 100)}%")
     queue = s.get("queue") or []
     if queue:
         lines.append("Queue:")

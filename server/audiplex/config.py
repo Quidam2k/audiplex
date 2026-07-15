@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     apk_output_dir: str = "../android/app/build/outputs/apk/debug"
     jwt_secret: str = ""
     token_expiry_hours: int = 720
+    dj_owner_username: str = "admin"
 
     @model_validator(mode="after")
     def _ensure_jwt_secret(self):

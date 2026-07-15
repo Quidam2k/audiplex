@@ -255,3 +255,4 @@ class PlaybackState(BaseModel):
     queue_length: int = 0
     queue_index: int = 0
     queue: list[NowPlayingQueueItem] = []
+    volume: float | None = None

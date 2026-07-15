@@ -3,8 +3,13 @@
 import asyncio
 
 import pytest
+from fastapi import Depends
 
 from audiplex import routers
+from audiplex.auth import get_current_user, hash_password
+from audiplex.config import get_settings
+from audiplex.database import get_db
+from audiplex.models import Playlist, PlaylistTrack, User
 from audiplex.playback_bus import bus
 
 
@@ -85,3 +90,71 @@ class TestPlaybackState:
         assert data["track"]["artist"] == "Miles Davis"
         assert data["queue_index"] == 2
         assert "updated_at" in data
+
+    def test_volume_round_trips(self, client):
+        payload = {
+            "playing": True,
+            "track": None,
+            "position_ms": 0,
+            "duration_ms": 0,
+            "queue_length": 0,
+            "queue_index": 0,
+            "volume": 0.4,
+        }
+        resp = client.post("/api/playback/state", json=payload)
+        assert resp.status_code == 200
+        assert resp.json()["volume"] == 0.4
+
+        resp = client.get("/api/playback/state")
+        assert resp.json()["volume"] == 0.4
+
+    def test_state_without_volume_defaults_none(self, client):
+        resp = client.get("/api/playback/state")
+        assert resp.json()["volume"] is None
+
+
+class TestOwnerResolvedLibraryReads:
+    """The dj-agent service account has no playlists/favorites of its own —
+    these endpoints must resolve to settings.dj_owner_username regardless."""
+
+    @pytest.fixture
+    def dj_agent_client(self, client, db_session, monkeypatch):
+        """Same TestClient, but authenticated as a second user ('dj-agent')
+        while settings.dj_owner_username points at the original 'testuser'."""
+        monkeypatch.setattr(get_settings(), "dj_owner_username", "testuser")
+
+        agent = User(
+            username="dj-agent",
+            password_hash=hash_password("unused"),
+            display_name="DJ Agent",
+            is_admin=False,
+        )
+        db_session.add(agent)
+        db_session.commit()
+        db_session.refresh(agent)
+
+        def override_as_agent(db=Depends(get_db)):
+            return db.query(User).filter(User.username == "dj-agent").first()
+
+        client.app.dependency_overrides[get_current_user] = override_as_agent
+        yield client
+        client.app.dependency_overrides[get_current_user] = lambda db=Depends(get_db): db.query(User).first()
+
+    def test_owner_playlists_visible_to_dj_agent(self, dj_agent_client, db_session, sample_playlist):
+        # sample_playlist is owned by the original 'testuser' (the configured owner).
+        resp = dj_agent_client.get("/api/playback/playlists")
+        assert resp.status_code == 200
+        names = [p["name"] for p in resp.json()]
+        assert "Test Playlist" in names
+
+    def test_owner_playlist_detail_visible_to_dj_agent(self, dj_agent_client, sample_playlist, sample_track):
+        resp = dj_agent_client.get(f"/api/playback/playlists/{sample_playlist.id}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["id"] == sample_playlist.id
+        assert [t["id"] for t in data["tracks"]] == [sample_track.id]
+
+    def test_missing_owner_404s(self, client, monkeypatch):
+        monkeypatch.setattr(get_settings(), "dj_owner_username", "nobody-configured")
+        resp = client.get("/api/playback/playlists")
+        assert resp.status_code == 404
