@@ -42,7 +42,7 @@ def _read_metadata(apk_dir: Path) -> dict:
 
 
 @router.get("/version")
-def get_version():
+def get_version(user: User = Depends(get_current_user)):
     apk_dir = _resolve_apk_dir()
     info = _read_metadata(apk_dir)
     apk_path = apk_dir / info["outputFile"]
@@ -57,7 +57,7 @@ def get_version():
 
 
 @router.get("/download")
-def download_apk():
+def download_apk(user: User = Depends(get_current_user)):
     apk_dir = _resolve_apk_dir()
     info = _read_metadata(apk_dir)
     apk_path = apk_dir / info["outputFile"]

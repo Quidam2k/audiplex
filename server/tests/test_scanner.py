@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+from audiplex.config import LibraryRoot
 from audiplex.models import Book, Chapter
 from audiplex.scanner import scan_library
 from audiplex.utils.metadata import BookMetadata
@@ -134,6 +135,31 @@ class TestScanLibrary:
         result = scan_library(db_session, [str(tmp_path / "nope")], str(tmp_path / "covers"))
         assert len(result.errors) == 1
         assert "does not exist" in result.errors[0]
+
+    def test_music_only_scan_preserves_audiobooks(self, db_session, sample_book, music_root_layout):
+        """A music-only (or misconfigured) scan must not sweep Book rows —
+        mirrors the existing has_music_root guard on the album sweep.
+        Regression test for the audiobook-deletion bug Codex flagged (#535):
+        the Book sweep had no has_audiobook_root guard, so scanning only a
+        music root would silently delete every audiobook."""
+        assert db_session.query(Book).count() == 1
+
+        with patch("audiplex.scanners.music.mutagen.File") as mock_file:
+            audio = MagicMock()
+            audio.info.length = 300.0
+            audio.get.side_effect = lambda key, default=None: default
+            audio.__contains__ = lambda self, key: False
+            mock_file.return_value = audio
+
+            result = scan_library(
+                db_session,
+                [LibraryRoot(path=str(music_root_layout), category="music")],
+                str(music_root_layout / "covers"),
+            )
+
+        assert result.errors == []
+        assert result.removed == 0
+        assert db_session.query(Book).count() == 1
 
     def test_scan_normalizes_coauthor_strings(self, db_session, tmp_path):
         """Co-author rolls collapse to the primary author so they group together."""

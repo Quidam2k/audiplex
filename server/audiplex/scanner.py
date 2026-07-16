@@ -190,15 +190,18 @@ def scan_library(db: Session, library_roots, cover_cache_dir: str) -> ScanResult
     book_found_paths: set[str] = set()
     album_found_paths: set[str] = set()
     has_music_root = False
+    has_audiobook_root = False
 
     for root in roots:
         if root.category == "audiobook_clean":
             partial, partial_paths = _scan_libation(db, root.path, cover_cache_dir)
             book_found_paths |= partial_paths
+            has_audiobook_root = True
         elif root.category == "audiobook_misc":
             from audiplex.scanners.audiobook_misc import scan_misc
             partial, partial_paths = scan_misc(db, root.path, cover_cache_dir)
             book_found_paths |= partial_paths
+            has_audiobook_root = True
         elif root.category == "music":
             from audiplex.scanners.music import scan_music
             partial, partial_paths = scan_music(db, root.path, cover_cache_dir)
@@ -214,15 +217,19 @@ def scan_library(db: Session, library_roots, cover_cache_dir: str) -> ScanResult
 
     removed = 0
 
-    # Sweep books no longer present in any audiobook root.
-    try:
-        for book in db.query(Book).all():
-            if book.file_path not in book_found_paths:
-                db.delete(book)
-                removed += 1
-    except Exception as e:
-        errors.append(f"Error sweeping removed books: {e}")
-        logger.error("Error sweeping removed books", exc_info=True)
+    # Sweep books no longer present in any audiobook root. Only when at
+    # least one audiobook root was scanned — otherwise (e.g. a music-only
+    # or misconfigured scan) we'd delete the entire audiobook library, the
+    # same rationale as the has_music_root guard on the album sweep below.
+    if has_audiobook_root:
+        try:
+            for book in db.query(Book).all():
+                if book.file_path not in book_found_paths:
+                    db.delete(book)
+                    removed += 1
+        except Exception as e:
+            errors.append(f"Error sweeping removed books: {e}")
+            logger.error("Error sweeping removed books", exc_info=True)
 
     # Re-derive series/series_sequence from series_raw on every scan.
     # The hash-skip in _scan_libation means existing rows wouldn't otherwise
