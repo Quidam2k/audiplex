@@ -4,6 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.hilt.work.HiltWorker
@@ -67,8 +68,8 @@ class DownloadWorker @AssistedInject constructor(
         try {
             setForeground(createForegroundInfo(entity.title, 0, entity.fileSize))
 
-            var existingBytes = if (file.exists()) file.length() else 0L
-            if (entity.fileSize > 0 && existingBytes >= entity.fileSize) {
+            var existingBytes = if (file != null && file.exists()) file.length() else 0L
+            if (!isContentUri && entity.fileSize > 0 && existingBytes >= entity.fileSize) {
                 downloadDao.updateProgress(bookId, existingBytes)
                 downloadDao.updateStatus(bookId, DownloadEntity.Status.COMPLETED)
                 return@withContext Result.success()
@@ -101,10 +102,23 @@ class DownloadWorker @AssistedInject constructor(
                 var totalWritten = existingBytes
                 var lastProgressUpdate = totalWritten
 
-                body.byteStream().use { input ->
+                val output = if (isContentUri) {
+                    applicationContext.contentResolver
+                        .openOutputStream(Uri.parse(entity.localFilePath), "w")
+                        ?: run {
+                            downloadDao.updateStatus(
+                                bookId, DownloadEntity.Status.FAILED, "Cannot open destination"
+                            )
+                            return@withContext Result.failure()
+                        }
+                } else {
                     // Append mode when resuming — FileOutputStream(file) would
                     // truncate and leave a zero-filled hole before the new bytes.
-                    FileOutputStream(file, existingBytes > 0).use { output ->
+                    FileOutputStream(file, existingBytes > 0)
+                }
+
+                body.byteStream().use { input ->
+                    output.use { out ->
                         val buffer = ByteArray(CHUNK_SIZE)
                         while (true) {
                             if (isStopped) {
@@ -114,7 +128,7 @@ class DownloadWorker @AssistedInject constructor(
                             }
                             val bytesRead = input.read(buffer)
                             if (bytesRead == -1) break
-                            output.write(buffer, 0, bytesRead)
+                            out.write(buffer, 0, bytesRead)
                             totalWritten += bytesRead
 
                             if (totalWritten - lastProgressUpdate >= PROGRESS_UPDATE_THRESHOLD) {
@@ -126,12 +140,18 @@ class DownloadWorker @AssistedInject constructor(
                     }
                 }
 
+                // Only now is the file complete — clear IS_PENDING so other
+                // apps (the Pantheon companion) can see it.
+                if (isContentUri) {
+                    MeditationStore.publish(applicationContext, entity.localFilePath)
+                }
+
                 downloadDao.updateProgress(bookId, totalWritten)
                 downloadDao.updateStatus(bookId, DownloadEntity.Status.COMPLETED)
                 Result.success()
             }
         } catch (e: Exception) {
-            val currentBytes = if (file.exists()) file.length() else 0L
+            val currentBytes = if (file != null && file.exists()) file.length() else 0L
             downloadDao.updateProgress(bookId, currentBytes)
             downloadDao.updateStatus(bookId, DownloadEntity.Status.FAILED, e.message)
             Result.retry()

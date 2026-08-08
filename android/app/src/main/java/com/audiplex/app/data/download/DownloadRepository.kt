@@ -1,6 +1,7 @@
 package com.audiplex.app.data.download
 
 import android.content.Context
+import android.net.Uri
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
@@ -19,10 +20,10 @@ import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
-@Singleton
 /** Book.category value for standalone meditation sessions (#839). */
 const val CATEGORY_MEDITATION = "meditation"
 
+@Singleton
 class DownloadRepository @Inject constructor(
     @ApplicationContext private val context: Context,
     private val downloadDao: DownloadDao,
@@ -69,7 +70,7 @@ class DownloadRepository @Inject constructor(
         WorkManager.getInstance(context).cancelUniqueWork(workName(bookId))
         val entity = downloadDao.getById(bookId)
         if (entity != null) {
-            File(entity.localFilePath).delete()
+            deleteLocalCopy(entity.localFilePath)
         }
         downloadDao.delete(bookId)
     }
@@ -78,7 +79,7 @@ class DownloadRepository @Inject constructor(
         val all = downloadDao.getAll()
         for (entity in all) {
             WorkManager.getInstance(context).cancelUniqueWork(workName(entity.bookId))
-            File(entity.localFilePath).delete()
+            deleteLocalCopy(entity.localFilePath)
         }
         for (entity in all) {
             downloadDao.delete(entity.bookId)
@@ -92,9 +93,28 @@ class DownloadRepository @Inject constructor(
     suspend fun getLocalPath(bookId: Int): String? {
         val entity = downloadDao.getById(bookId) ?: return null
         if (entity.status != DownloadEntity.Status.COMPLETED) return null
+        if (MeditationStore.isContentUri(entity.localFilePath)) {
+            // A MediaStore row the user may have deleted from another app.
+            return if (contentUriExists(entity.localFilePath)) entity.localFilePath else null
+        }
         val file = File(entity.localFilePath)
         if (!file.exists()) return null
         return entity.localFilePath
+    }
+
+    private fun deleteLocalCopy(pathOrUri: String) {
+        if (MeditationStore.isContentUri(pathOrUri)) {
+            MeditationStore.delete(context, pathOrUri)
+        } else {
+            File(pathOrUri).delete()
+        }
+    }
+
+    private fun contentUriExists(uriString: String): Boolean = try {
+        context.contentResolver.openFileDescriptor(Uri.parse(uriString), "r")
+            ?.use { true } ?: false
+    } catch (_: Exception) {
+        false
     }
 
     fun getBookDetailFromJson(json: String): BookDetail? =

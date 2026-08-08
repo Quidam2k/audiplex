@@ -12,6 +12,7 @@ import com.audiplex.app.data.ApiServiceHolder
 import com.audiplex.app.data.api.AlbumDetail
 import com.audiplex.app.data.api.AudiplexApi
 import com.audiplex.app.data.download.DownloadRepository
+import com.audiplex.app.data.download.MeditationStore
 import com.audiplex.app.data.api.BookDetail
 import com.audiplex.app.data.api.PlayStatEvent
 import com.audiplex.app.data.api.PlaylistDetail
