@@ -165,6 +165,47 @@ class TestScanMeditation:
         assert len(result.errors) == 1
 
 
+class TestMeditationApi:
+    """The Android "download all" action reads exactly this endpoint. (#839)"""
+
+    def test_category_filter_returns_only_meditations(self, client, db_session, sample_book):
+        db_session.add(Book(
+            title="Ocean Waves",
+            author=None,
+            category="meditation",
+            duration_seconds=600.0,
+            file_path=r"Q:\meditations\audio\Ocean Waves.m4a",
+            file_size=9_800_000,
+        ))
+        db_session.commit()
+
+        resp = client.get("/api/library/books", params={"category": "meditation"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["title"] == "Ocean Waves"
+        assert body[0]["category"] == "meditation"
+
+        # ...and the audiobook listing is unaffected by their presence.
+        assert len(client.get("/api/library/books").json()) == 2
+
+    def test_meditation_detail_has_no_track_urls(self, client, db_session):
+        """Empty track_urls is what keeps the client on the whole-file stream."""
+        book = Book(
+            title="Daily Calm",
+            category="meditation",
+            duration_seconds=600.0,
+            file_path=r"Q:\meditations\audio\Daily Calm.m4a",
+            file_size=9_300_000,
+        )
+        db_session.add(book)
+        db_session.commit()
+
+        body = client.get(f"/api/library/books/{book.id}").json()
+        assert body["track_urls"] == []
+        assert body["file_size"] == 9_300_000
+
+
 class TestScanLibraryDispatch:
     def test_meditation_root_routes_to_meditation_scanner(self, db_session, tmp_path):
         """A meditation root must dispatch, and its books must survive the sweep."""
