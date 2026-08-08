@@ -202,6 +202,13 @@ def scan_library(db: Session, library_roots, cover_cache_dir: str) -> ScanResult
             partial, partial_paths = scan_misc(db, root.path, cover_cache_dir)
             book_found_paths |= partial_paths
             has_audiobook_root = True
+        elif root.category == "meditation":
+            # #839 — meditations are Book rows like the audiobook scanners, so
+            # they feed the same found-paths sweep.
+            from audiplex.scanners.meditation import scan_meditation
+            partial, partial_paths = scan_meditation(db, root.path, cover_cache_dir)
+            book_found_paths |= partial_paths
+            has_audiobook_root = True
         elif root.category == "music":
             from audiplex.scanners.music import scan_music
             partial, partial_paths = scan_music(db, root.path, cover_cache_dir)
