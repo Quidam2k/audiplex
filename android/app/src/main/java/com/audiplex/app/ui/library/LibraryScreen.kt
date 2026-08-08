@@ -63,6 +63,7 @@ import coil3.compose.AsyncImage
 import com.audiplex.app.data.api.AudiplexApi
 import com.audiplex.app.data.api.BookSummary
 import com.audiplex.app.ui.common.ItemActionSheet
+import com.audiplex.app.ui.meditations.MeditationsTab // #839
 import com.audiplex.app.ui.common.ItemKind
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -187,7 +188,7 @@ private fun LibraryContent(
     onRefresh: () -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
-    val tabs = listOf("Books", "Authors", "Series")
+    val tabs = listOf("Books", "Authors", "Series", "Meditations") // #839
 
     // Active author/series filter chip
     val activeFilter = state.filterAuthor ?: state.filterSeries
@@ -301,6 +302,8 @@ private fun LibraryContent(
                     selectedTab = 0
                 }
             )
+            // #839 — meditations get their own tab; the bulk download lives there.
+            3 -> MeditationsTab(onMeditationClick = onBookClick)
         }
     }
 }

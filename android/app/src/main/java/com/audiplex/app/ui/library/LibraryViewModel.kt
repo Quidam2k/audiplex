@@ -9,6 +9,7 @@ import com.audiplex.app.data.api.AuthorSchema
 import com.audiplex.app.data.api.BookSummary
 import com.audiplex.app.data.api.ProgressSchema
 import com.audiplex.app.data.api.SeriesSchema
+import com.audiplex.app.data.download.CATEGORY_MEDITATION // #839
 import com.audiplex.app.data.download.PlaybackPositionRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -95,17 +96,23 @@ class LibraryViewModel @Inject constructor(
             viewModelScope.launch {
                 try { playbackPositionRepository.flushUnsynced() } catch (_: Exception) { }
             }
+            // #839 — meditations are Books too, but they have their own tab.
+            // Filter them out here so ten meditations don't get mixed into the
+            // audiobook list (and out of in-progress, below, via allBooks).
             val books = api.getBooks(
                 author = filterAuthor,
                 series = filterSeries
-            )
+            ).filterNot { it.category == CATEGORY_MEDITATION } // #839
             val authors = api.getAuthors()
             val series = api.getSeries()
             val progressList = try { api.getAllProgress() } catch (_: Exception) { emptyList() }
 
             val progressMap = progressList.associateBy { it.bookId }
             val allBooks = if (filterAuthor != null || filterSeries != null) {
-                try { api.getBooks() } catch (_: Exception) { books }
+                try {
+                    // #839 — keep meditations out of "continue listening" too.
+                    api.getBooks().filterNot { it.category == CATEGORY_MEDITATION }
+                } catch (_: Exception) { books }
             } else books
 
             val inProgress = allBooks

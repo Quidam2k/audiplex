@@ -54,8 +54,13 @@ class DownloadWorker @AssistedInject constructor(
         if (bookId < 0) return@withContext Result.failure()
 
         val entity = downloadDao.getById(bookId) ?: return@withContext Result.failure()
-        val file = File(entity.localFilePath)
-        file.parentFile?.mkdirs()
+
+        // #839 — meditations land in shared storage as a MediaStore content://
+        // Uri rather than a file path. They are ~9 MB, so they are written in
+        // one pass with no Range/resume; the audiobook path below is unchanged.
+        val isContentUri = MeditationStore.isContentUri(entity.localFilePath)
+        val file = if (isContentUri) null else File(entity.localFilePath)
+        file?.parentFile?.mkdirs()
 
         downloadDao.updateStatus(bookId, DownloadEntity.Status.DOWNLOADING)
 

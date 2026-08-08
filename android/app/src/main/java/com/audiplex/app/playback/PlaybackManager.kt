@@ -310,8 +310,12 @@ class PlaybackManager @Inject constructor(
                     ctrl.setMediaItems(items, startChapterIdx, withinMs)
                     _durationMs.value = (book.durationSeconds * 1000).toLong()
                 } else {
-                    val uri = localFilePath?.let { android.net.Uri.fromFile(File(it)).toString() }
-                        ?: AudiplexApi.streamUrl(baseUrl, book.id)
+                    // Meditations are stored as a MediaStore content:// Uri
+                    // (#839); everything else is a plain file path.
+                    val uri = localFilePath?.let { path ->
+                        if (MeditationStore.isContentUri(path)) path
+                        else android.net.Uri.fromFile(File(path)).toString()
+                    } ?: AudiplexApi.streamUrl(baseUrl, book.id)
                     ctrl.setMediaItem(buildMediaItem(uri, book, book.title), startMs)
                 }
                 ctrl.prepare()

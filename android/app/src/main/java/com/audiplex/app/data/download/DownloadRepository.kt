@@ -20,6 +20,9 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
+/** Book.category value for standalone meditation sessions (#839). */
+const val CATEGORY_MEDITATION = "meditation"
+
 class DownloadRepository @Inject constructor(
     @ApplicationContext private val context: Context,
     private val downloadDao: DownloadDao,
@@ -29,7 +32,16 @@ class DownloadRepository @Inject constructor(
     private val downloadsDir = context.getExternalFilesDir("downloads")
 
     suspend fun startDownload(book: BookDetail, baseUrl: String) {
-        val filePath = File(downloadsDir, "${book.id}.m4b").absolutePath
+        // #839 — meditations go to shared storage so the Pantheon companion can
+        // read them; everything else keeps the app-private path. On API < 29
+        // createDestination returns null and meditations fall back to private
+        // storage too (no cross-app read there, same as before this change).
+        val filePath = if (book.category == CATEGORY_MEDITATION) {
+            MeditationStore.createDestination(context, book.title)
+                ?: File(downloadsDir, "${book.id}.m4a").absolutePath
+        } else {
+            File(downloadsDir, "${book.id}.m4b").absolutePath
+        }
         val metadataJson = moshi.adapter(BookDetail::class.java).toJson(book)
         val entity = DownloadEntity(
             bookId = book.id,
