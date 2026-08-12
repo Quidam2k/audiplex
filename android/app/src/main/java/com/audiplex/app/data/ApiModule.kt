@@ -6,11 +6,16 @@ import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.Response
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
@@ -28,29 +33,89 @@ import javax.inject.Singleton
  * so the token (and the 401 -> clearAuthToken side effect) only applies
  * when the request host matches the configured audiplex server.
  */
-class AuthInterceptor(private val settingsStore: SettingsStore) : Interceptor {
+class AuthInterceptor(
+    private val settingsStore: AuthTokenStore,
+    scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+) : Interceptor {
+
+    /**
+     * Token and server host are mirrored here so the hot path doesn't
+     * runBlocking on DataStore twice per request. The mirrors are kept current
+     * by collectors; a null mirror means they haven't emitted yet (very early
+     * startup), and only then do we block for a first read.
+     */
+    @Volatile
+    private var cachedToken: String? = null
+
+    @Volatile
+    private var cachedHost: String? = null
+
+    init {
+        scope.launch { settingsStore.authToken.collect { cachedToken = it } }
+        scope.launch {
+            settingsStore.serverUrl.collect { cachedHost = it.toHttpUrlOrNull()?.host ?: "" }
+        }
+    }
+
+    private fun currentToken(): String {
+        cachedToken?.let { return it }
+        val token = runBlocking { settingsStore.authToken.first() }
+        cachedToken = token
+        return token
+    }
+
+    private fun currentHost(): String {
+        cachedHost?.let { return it }
+        val host = runBlocking { settingsStore.serverUrl.first() }.toHttpUrlOrNull()?.host ?: ""
+        cachedHost = host
+        return host
+    }
+
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val serverUrl = runBlocking { settingsStore.serverUrl.first() }
-        val audiplexHost = serverUrl.toHttpUrlOrNull()?.host
-        val isAudiplexHost = audiplexHost != null && request.url.host == audiplexHost
-        if (!isAudiplexHost) {
+        val audiplexHost = currentHost()
+        if (audiplexHost.isEmpty() || request.url.host != audiplexHost) {
             return chain.proceed(request)
         }
 
-        val token = runBlocking { settingsStore.authToken.first() }
+        val token = currentToken()
         val authedRequest = if (token.isNotBlank()) {
             request.newBuilder()
-                .addHeader("Authorization", "Bearer $token")
+                .header("Authorization", "Bearer $token")
                 .build()
         } else {
             request
         }
         val response = chain.proceed(authedRequest)
-        if (response.code == 401) {
-            runBlocking { settingsStore.clearAuthToken() }
+
+        // The server hands back a renewed token once one is past halfway
+        // through its life, so an app that gets used never reaches the expiry
+        // cliff that used to log Todd out roughly monthly.
+        response.header(REFRESH_TOKEN_HEADER)?.takeIf { it.isNotBlank() }?.let { renewed ->
+            cachedToken = renewed
+            runBlocking { settingsStore.setAuthToken(renewed) }
+        }
+
+        if (response.code == 401 && !isCredentialSubmission(request)) {
+            // A real rejection of a stored token: end the session, but record
+            // WHY so the login screen can explain itself.
+            cachedToken = ""
+            runBlocking { settingsStore.expireSession() }
         }
         return response
+    }
+
+    /**
+     * Login and registration answer 401 to mean "those credentials are wrong",
+     * not "your stored session is dead". Clearing the token on those replies
+     * meant one fat-fingered password wiped a perfectly good session.
+     */
+    private fun isCredentialSubmission(request: Request): Boolean =
+        CREDENTIAL_PATHS.any { request.url.encodedPath.endsWith(it) }
+
+    companion object {
+        const val REFRESH_TOKEN_HEADER = "X-Refresh-Token"
+        private val CREDENTIAL_PATHS = listOf("/api/auth/login", "/api/auth/register")
     }
 }
 

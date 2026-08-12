@@ -18,13 +18,14 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 @Singleton
 class SettingsStore @Inject constructor(
     @ApplicationContext private val context: Context
-) {
+) : AuthTokenStore {
     private val serverUrlKey = stringPreferencesKey("server_url")
     private val downloadOnCellularKey = booleanPreferencesKey("download_on_cellular")
     private val authTokenKey = stringPreferencesKey("auth_token")
     private val usernameKey = stringPreferencesKey("username")
+    private val sessionExpiredKey = booleanPreferencesKey("session_expired")
 
-    val serverUrl: Flow<String> = context.dataStore.data.map { prefs ->
+    override val serverUrl: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[serverUrlKey] ?: ""
     }
 
@@ -32,12 +33,22 @@ class SettingsStore @Inject constructor(
         prefs[downloadOnCellularKey] ?: false
     }
 
-    val authToken: Flow<String> = context.dataStore.data.map { prefs ->
+    override val authToken: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[authTokenKey] ?: ""
     }
 
     val username: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[usernameKey] ?: ""
+    }
+
+    /**
+     * True when the session ended because the server rejected our token,
+     * rather than because the user chose to sign out. Lets the login screen
+     * explain itself instead of appearing for no visible reason — the old
+     * behavior, which is how a silently-expiring token looked like a bug.
+     */
+    val sessionExpired: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[sessionExpiredKey] ?: false
     }
 
     suspend fun setServerUrl(url: String) {
@@ -52,15 +63,35 @@ class SettingsStore @Inject constructor(
         }
     }
 
-    suspend fun setAuthToken(token: String) {
+    override suspend fun setAuthToken(token: String) {
         context.dataStore.edit { prefs ->
             prefs[authTokenKey] = token
+            // Any successfully obtained token settles the expiry notice.
+            prefs.remove(sessionExpiredKey)
         }
     }
 
     suspend fun clearAuthToken() {
         context.dataStore.edit { prefs ->
             prefs.remove(authTokenKey)
+            prefs.remove(sessionExpiredKey)
+        }
+    }
+
+    /**
+     * Drop the token because the server rejected it, flagging the reason so
+     * the login screen can say "session expired" rather than just appearing.
+     */
+    override suspend fun expireSession() {
+        context.dataStore.edit { prefs ->
+            prefs.remove(authTokenKey)
+            prefs[sessionExpiredKey] = true
+        }
+    }
+
+    suspend fun clearSessionExpired() {
+        context.dataStore.edit { prefs ->
+            prefs.remove(sessionExpiredKey)
         }
     }
 

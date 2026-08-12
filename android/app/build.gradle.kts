@@ -113,4 +113,9 @@ dependencies {
     // Image loading
     implementation(libs.coil.compose)
     implementation(libs.coil.network)
+
+    // Testing (JVM unit tests — ./gradlew test)
+    testImplementation(libs.junit)
+    testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.coroutines.test)
 }

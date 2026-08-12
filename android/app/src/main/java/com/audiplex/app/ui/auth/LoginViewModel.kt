@@ -29,6 +29,14 @@ class LoginViewModel @Inject constructor(
         .map { token -> token.isNotBlank() }
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
+    /** True when we're here because the server rejected the stored token. */
+    val sessionExpired: StateFlow<Boolean> = settingsStore.sessionExpired
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** Last signed-in username, so an expired session doesn't make the user retype it. */
+    val lastUsername: StateFlow<String> = settingsStore.username
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "")
+
     private val _error = MutableStateFlow<AuthError?>(null)
     val error: StateFlow<AuthError?> = _error
 

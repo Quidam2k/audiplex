@@ -17,6 +17,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,6 +39,8 @@ fun LoginScreen(
     val isLoggedIn by viewModel.isLoggedIn.collectAsState()
     val error by viewModel.error.collectAsState()
     val loading by viewModel.loading.collectAsState()
+    val sessionExpired by viewModel.sessionExpired.collectAsState()
+    val lastUsername by viewModel.lastUsername.collectAsState()
 
     if (isLoggedIn == true) {
         onLoginSuccess()
@@ -48,6 +51,14 @@ fun LoginScreen(
     var password by rememberSaveable { mutableStateOf("") }
     var isRegisterMode by rememberSaveable { mutableStateOf(false) }
     var displayName by rememberSaveable { mutableStateOf("") }
+
+    // Prefill the username we were last signed in as, so a session that ended
+    // on its own costs the user one password entry rather than a puzzle.
+    LaunchedEffect(lastUsername) {
+        if (username.isBlank() && lastUsername.isNotBlank()) {
+            username = lastUsername
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -69,6 +80,15 @@ fun LoginScreen(
             text = if (isRegisterMode) "Create Account" else "Sign In",
             style = MaterialTheme.typography.titleMedium
         )
+
+        if (sessionExpired && !isRegisterMode) {
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = "Your session expired. Please sign in again.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
 
         Spacer(Modifier.height(32.dp))
 
