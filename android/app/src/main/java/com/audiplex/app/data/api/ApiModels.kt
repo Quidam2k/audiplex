@@ -290,7 +290,14 @@ data class DjCommandPayload(
     val volume: Float? = null,
     // 'play_stream' carries an external HTTP audio stream URL + display title.
     val url: String? = null,
-    val title: String? = null
+    val title: String? = null,
+    // 'announce' carries a synthesized DJ voice-break clip (item #431).
+    // clipId is an epoch-ms id, so it must be a Long — it does NOT fit in Int.
+    @Json(name = "clip_id") val clipId: Long? = null,
+    @Json(name = "clip_url") val clipUrl: String? = null,
+    @Json(name = "duration_seconds") val durationSeconds: Double? = null,
+    // 'next' (play after the current track) or 'now' (interrupt).
+    val mode: String? = null
 )
 
 @JsonClass(generateAdapter = true)

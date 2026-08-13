@@ -65,6 +65,9 @@ class PlaybackManager @Inject constructor(
     private var progressSyncJob: Job? = null
     private var positionUpdateJob: Job? = null
 
+    /** Synthetic ids for non-catalog queue items (DJ voice breaks, #431). */
+    private var nextSyntheticTrackId: Int = -1
+
     private val _currentBook = MutableStateFlow<BookDetail?>(null)
     val currentBook: StateFlow<BookDetail?> = _currentBook
 
@@ -453,6 +456,89 @@ class PlaybackManager @Inject constructor(
         _currentMusic.value = music.copy(items = updated)
         ensureController { ctrl ->
             ctrl.addMediaItems(insertAt, newItems.map { buildMusicMediaItem(it) })
+        }
+    }
+
+    /**
+     * DJ: insert a synthesized voice-break clip into the queue (item #431).
+     *
+     * The clip is NOT a catalog track, so it gets a synthetic negative id and
+     * its MediaItem URI is built directly from [clipUrl] — buildMusicMediaItem
+     * would derive the URI from track.id, which is meaningless here. Negative
+     * ids keep the break out of catalog lookups, play-stats and favorites;
+     * guard `id < 0` in any new code that walks the queue.
+     *
+     * Auth is free: ExoPlayer streams through the authed OkHttpDataSource.
+     *
+     * @param playNow true = interrupt and speak immediately; false = speak
+     *   after the current track finishes, which is how a real DJ break lands.
+     */
+    fun insertVoiceClip(
+        clipUrl: String,
+        clipId: Long,
+        title: String,
+        durationSeconds: Double?,
+        playNow: Boolean
+    ) {
+        val clipItem = MusicQueueItem(
+            track = TrackSchema(
+                // Session-unique negative id. Deliberately NOT -clipId: clipId
+                // is epoch-ms and overflows Int.
+                id = nextSyntheticTrackId--,
+                title = title,
+                albumId = -1,
+                artistId = -1,
+                artistName = "DJ",
+                discNumber = 0,
+                trackNumber = 0,
+                durationSeconds = durationSeconds ?: 0.0
+            ),
+            albumId = -1,
+            albumTitle = "DJ break",
+            albumHasCover = false
+        )
+        val mediaItem = MediaItem.Builder()
+            .setUri(clipUrl)
+            .setMediaId("djclip:$clipId")
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(title)
+                    .setArtist("DJ")
+                    .build()
+            )
+            .build()
+
+        val music = _currentMusic.value
+        if (music == null || _playerKind.value != PlayerKind.Music) {
+            // Nothing to break between — just speak it.
+            finalizeMusicIfActive()
+            _currentBook.value = null
+            progressSyncJob?.cancel()
+            _playerKind.value = PlayerKind.Music
+            lastReportedTrackIndex = -1
+            _currentMusic.value = MusicQueueState(
+                items = listOf(clipItem),
+                albumId = null,
+                playlistId = null,
+                title = "DJ break",
+                currentIndex = 0
+            )
+            ensureController { ctrl ->
+                ctrl.setMediaItem(mediaItem)
+                ctrl.prepare()
+                ctrl.play()
+            }
+            return
+        }
+
+        val insertAt = (music.currentIndex + 1).coerceIn(0, music.items.size)
+        val updated = music.items.toMutableList().apply { add(insertAt, clipItem) }
+        // _currentMusic and the Media3 timeline must move in lockstep or
+        // dj_reorder indices and now-playing reporting drift apart.
+        _currentMusic.value = music.copy(items = updated)
+        ensureController { ctrl ->
+            ctrl.addMediaItems(insertAt, listOf(mediaItem))
+            if (playNow) ctrl.seekToNextMediaItem()
         }
     }
 

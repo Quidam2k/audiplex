@@ -144,6 +144,27 @@ class DjCommandClient @Inject constructor(
                 val title = cmd.payload?.title ?: "Live stream"
                 withContext(Dispatchers.Main) { playbackManager.playStreamUrl(url, title) }
             }
+            "announce" -> {
+                // DJ voice break (#431). clip_url is relative so the clip is
+                // fetched from OUR configured base URL, not whatever host the
+                // agent happened to reach the server on.
+                val clipUrl = cmd.payload?.clipUrl ?: return
+                val clipId = cmd.payload.clipId ?: return
+                val absolute = if (clipUrl.startsWith("http"))
+                    clipUrl
+                else
+                    baseUrl.trimEnd('/') + clipUrl
+                val title = cmd.payload.title ?: "DJ break"
+                withContext(Dispatchers.Main) {
+                    playbackManager.insertVoiceClip(
+                        clipUrl = absolute,
+                        clipId = clipId,
+                        title = title,
+                        durationSeconds = cmd.payload.durationSeconds,
+                        playNow = cmd.payload.mode == "now"
+                    )
+                }
+            }
             else -> Unit // unknown command type — ignored
         }
     }
