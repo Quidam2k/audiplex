@@ -19,7 +19,15 @@ Config via environment:
 
 Tools: dj_library, dj_tracks, dj_search, dj_play_now, dj_skip, dj_queue,
 dj_play_next, dj_reorder, dj_queue_by, dj_now_playing, dj_pause, dj_resume,
-dj_previous, dj_seek, dj_volume, dj_play_stream, dj_break_brief, dj_announce.
+dj_previous, dj_seek, dj_volume, dj_play_stream, dj_break_brief, dj_announce,
+dj_recommend, dj_rate, dj_taste.
+
+dj_recommend/dj_rate/dj_taste are the discovery + taste lane (item #2945): the
+DJ proposes music the library DOESN'T have, Todd's spoken reaction is relayed
+back through dj_rate, and dj_taste feeds the accumulated signal into later
+picks. State lives in a local SQLite file (DJ_TASTE_DB, default
+data/dj/taste.db) rather than audiplex.db — see the section comment above
+dj_recommend for why the existing tables can't carry it.
 
 dj_library/dj_tracks/dj_search are the catalog-browse lane (item #2943): they
 let the agent survey the library and pick tracks UNPROMPTED instead of only
@@ -44,9 +52,11 @@ token-leak guard in the Android AuthInterceptor before assuming this is
 safe to extend to other stream-carrying commands.
 """
 
+import contextlib
 import datetime
 import os
 import re
+import sqlite3
 from pathlib import Path
 from urllib.parse import quote
 
@@ -884,6 +894,276 @@ async def dj_search(query: str, limit: int = 30, include_longform: bool = False)
     if hidden:
         lines.append(f"({hidden} long-form item(s) hidden — include_longform=True to see them.)")
     lines.append("Pass these IDs to dj_play_now / dj_queue / dj_play_next.")
+    return "\n".join(lines)
+
+
+# --- Discovery + taste loop (item #2945, phase A) ---------------------------
+#
+# Lets the DJ propose music that ISN'T in the library yet and learn from how
+# those proposals land. Three reasons this is MCP-side SQLite rather than a
+# server table: a recommendation has no track row to hang off (play_stats.
+# track_id is a FK to tracks, and the whole point is that the track isn't
+# there yet); Favorite is binary with no room for a verdict or set context;
+# and keeping it out of audiplex.db means no migration and no :8100 restart
+# while Todd is listening.
+#
+# Feedback arrives VOICE-RELAYED through the agent — Todd says "yeah, that one
+# was good" out loud and the agent calls dj_rate. There is deliberately no app
+# UI for this yet; thumbs in the Android client cost a build, a versionCode
+# bump and an in-app update round-trip, which is a lot to spend before we know
+# the signal is worth anything.
+
+TASTE_DB = Path(
+    os.environ.get("DJ_TASTE_DB")
+    or Path(__file__).resolve().parent.parent / "data" / "dj" / "taste.db"
+)
+
+# Feedback is dictated and relayed, so it arrives as whatever Todd actually
+# said. Anything not recognised as praise is treated as 'meh' — the failure we
+# care about is a lukewarm reaction being logged as a win.
+_GOOD_WORDS = {
+    "good", "great", "yes", "yeah", "yep", "love", "loved", "like", "liked",
+    "nice", "banger", "keep", "more", "up", "1", "true",
+}
+_MEH_WORDS = {
+    "meh", "no", "nope", "nah", "not", "bad", "skip", "pass", "down", "0",
+    "false", "not-as-good", "notasgood", "worse",
+}
+
+
+@contextlib.contextmanager
+def _taste_db():
+    """Open (creating on first use) the taste store; commit and close on exit.
+
+    Closing matters: this process is long-lived, and sqlite3's own connection
+    context manager commits the transaction but leaves the handle open.
+    """
+    TASTE_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(TASTE_DB)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS recs (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at   TEXT NOT NULL,
+            title        TEXT NOT NULL,
+            artist       TEXT NOT NULL DEFAULT '',
+            why          TEXT NOT NULL DEFAULT '',
+            set_context  TEXT NOT NULL DEFAULT '',
+            now_playing  TEXT NOT NULL DEFAULT '',
+            verdict      TEXT,
+            note         TEXT NOT NULL DEFAULT '',
+            rated_at     TEXT
+        )"""
+        )
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _now() -> str:
+    return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def _normalize_verdict(verdict: str) -> str:
+    """'good' if it reads as praise, else 'meh'. Never guesses in favour of good."""
+    words = re.findall(r"[a-z0-9]+", (verdict or "").lower())
+    if any(w in _MEH_WORDS for w in words):
+        return "meh"
+    return "good" if any(w in _GOOD_WORDS for w in words) else "meh"
+
+
+def _rec_label(row: sqlite3.Row) -> str:
+    artist = (row["artist"] or "").strip()
+    return f"{artist} - {row['title']}" if artist else row["title"]
+
+
+async def _current_context() -> str:
+    """What's playing right now, best-effort — the context a rec was made in."""
+    try:
+        state = await _get("/api/playback/state")
+    except Exception:
+        return ""
+    track = state.get("track") or {}
+    if not track.get("title"):
+        return ""
+    artist = (track.get("artist") or "").strip()
+    title = _clean_title(track.get("title"))
+    return f"{artist} - {title}" if artist else title
+
+
+@mcp.tool()
+async def dj_recommend(
+    title: str,
+    artist: str = "",
+    why: str = "",
+    set_context: str = "",
+) -> str:
+    """Propose a track that is NOT in the library yet, and log the proposal.
+
+    Use this when you want to suggest something new — a track that would fit
+    the set but that dj_search can't find because Audiplex doesn't have it.
+    Logging it is what makes the suggestion learnable: dj_rate records how it
+    landed and dj_taste feeds that back into your later picks.
+
+    This QUEUES NOTHING and DOWNLOADS NOTHING. It records the idea and returns
+    a short rec id to quote out loud ("that's rec 7") so Todd's reaction can be
+    tied back to it.
+
+    why: one line on why it fits — the reasoning is the part worth learning
+         from, so say "same era as what's playing", not "good song".
+    set_context: what you're going for right now (e.g. "late-night wind-down").
+         What's actually playing is captured automatically.
+    """
+    name = (title or "").strip()
+    if not name:
+        return "Give a track title to recommend."
+    playing = await _current_context()
+    with _taste_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO recs (created_at, title, artist, why, set_context, now_playing)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (_now(), name, (artist or "").strip(), (why or "").strip(),
+             (set_context or "").strip(), playing),
+        )
+        rec_id = cur.lastrowid
+    label = f"{artist.strip()} - {name}" if artist.strip() else name
+    lines = [f"Logged rec {rec_id}: {label}"]
+    if playing:
+        lines.append(f"  (proposed over: {playing})")
+    lines.append(
+        f'Say the id out loud so it can be rated — then dj_rate({rec_id}, "good"|"meh"). '
+        "Nothing was queued or downloaded."
+    )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def dj_rate(rec_id: int = 0, verdict: str = "", note: str = "") -> str:
+    """Record how a recommendation landed. This is the human half of the loop.
+
+    rec_id: the id from dj_recommend. Leave it out (or pass 0) to rate the most
+        recent UNRATED rec — which is the normal case, because Todd reacts to
+        the thing you just suggested ("yeah, that one was good") without
+        quoting a number.
+    verdict: 'good' or 'meh'. Relay what he actually said; common phrasings are
+        understood. Anything not clearly positive is recorded as 'meh' — a
+        lukewarm reaction must not be banked as a win.
+    note: his own words, if he gave a reason. This is the most useful column in
+        the table — "too slow for a workout" teaches more than a bare 'meh'.
+    """
+    with _taste_db() as conn:
+        if rec_id:
+            row = conn.execute("SELECT * FROM recs WHERE id = ?", (rec_id,)).fetchone()
+            if not row:
+                return f"No rec {rec_id}. dj_taste() lists the recent ones."
+        else:
+            row = conn.execute(
+                "SELECT * FROM recs WHERE verdict IS NULL ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if not row:
+                return (
+                    "No unrated recommendation to rate. Pass an explicit rec_id, "
+                    "or dj_taste() to see what's been logged."
+                )
+        v = _normalize_verdict(verdict)
+        # Keep the old note when this call doesn't carry one: correcting a
+        # verdict must not wipe the reason he gave the first time, which is the
+        # highest-signal thing in the table.
+        new_note = (note or "").strip() or row["note"]
+        conn.execute(
+            "UPDATE recs SET verdict = ?, note = ?, rated_at = ? WHERE id = ?",
+            (v, new_note, _now(), row["id"]),
+        )
+    was = f" (was already rated '{row['verdict']}')" if row["verdict"] else ""
+    tail = f' — "{note.strip()}"' if (note or "").strip() else ""
+    return (
+        f"Rec {row['id']} ({_rec_label(row)}) rated {v}{tail}.{was}\n"
+        "dj_taste() folds this into your next picks."
+    )
+
+
+@mcp.tool()
+async def dj_taste(limit: int = 20) -> str:
+    """Read back what's been learned about Todd's taste — check this BEFORE
+    recommending, so picks improve instead of repeating.
+
+    Three things: the verdicts on your past recommendations (with his own
+    words, which carry the most signal), recs still awaiting a reaction, and
+    the library-side play history.
+    """
+    limit = max(1, min(limit, 200))
+    with _taste_db() as conn:
+        rated = conn.execute(
+            "SELECT * FROM recs WHERE verdict IS NOT NULL ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        unrated = conn.execute(
+            "SELECT * FROM recs WHERE verdict IS NULL ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        totals = dict(
+            conn.execute(
+                "SELECT verdict, COUNT(*) FROM recs WHERE verdict IS NOT NULL"
+                " GROUP BY verdict"
+            ).fetchall()
+        )
+
+    lines: list[str] = []
+    if not rated and not unrated:
+        lines.append(
+            "No recommendations logged yet — nothing learned. Use dj_recommend() "
+            "when you suggest something that isn't in the library, then dj_rate() "
+            "when Todd reacts."
+        )
+    else:
+        lines.append(
+            f"Rated recs: {totals.get('good', 0)} good / {totals.get('meh', 0)} meh."
+        )
+    for row in rated:
+        bits = [f"  [{row['verdict']}] {row['id']}: {_rec_label(row)}"]
+        if row["note"]:
+            bits.append(f'      he said: "{row["note"]}"')
+        if row["why"]:
+            bits.append(f"      your reasoning: {row['why']}")
+        ctx = row["set_context"] or row["now_playing"]
+        if ctx:
+            bits.append(f"      context: {ctx}")
+        lines += bits
+    if unrated:
+        lines.append(f"Awaiting a reaction ({len(unrated)}) — ask about these:")
+        lines += [f"  {row['id']}: {_rec_label(row)}" for row in unrated]
+
+    # Library-side signal. Both endpoints are scoped to the CALLING user, and
+    # the DJ calls as dj-agent, which has never played anything — so an empty
+    # result here means "not visible to me", NOT "Todd doesn't listen to music".
+    # Saying so is the whole point; a silent [] would read as the opposite.
+    try:
+        played = await _get("/api/music/most-played?limit=10")
+        skipped = await _get("/api/music/likely-skips?limit=10")
+    except Exception as e:
+        lines.append(f"(Library play history unavailable: {e})")
+        return "\n".join(lines)
+
+    if played:
+        lines.append("Most-played in the library:")
+        lines += [f"  {_track_line(t)}" for t in played]
+    if skipped:
+        lines.append("Often skipped early — avoid these:")
+        lines += [
+            f"  {_track_line(t.get('track', t))}"
+            f"  ({t.get('early_skip_count')} early skips of {t.get('total_starts')} starts)"
+            for t in skipped
+        ]
+    if not played and not skipped:
+        lines.append(
+            "No library play history visible: /api/music/most-played and "
+            "/likely-skips are scoped to the CALLING user and the DJ calls as "
+            "dj-agent, which has no listening history of its own. Todd's plays "
+            "are recorded under his own account and are not readable here — "
+            "treat this as no data, not as dislike."
+        )
     return "\n".join(lines)
 
 

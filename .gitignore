@@ -55,3 +55,6 @@ start_worker.bat
 
 # Personal handoff / debugging notes (machine-specific paths)
 NOTE-*.md
+
+# DJ taste store — Todd's personal ratings of recommendations, not repo content
+data/dj/
