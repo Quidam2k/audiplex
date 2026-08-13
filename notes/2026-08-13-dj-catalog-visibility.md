@@ -1,7 +1,8 @@
 # DJ catalog visibility (#2943) — investigation
 
 Date: 2026-08-13. Worker: worker-audiplex-dj-visibility--20260813-200204-329b.
-Status: plan-back submitted (event 8892, HIGH crit), holding for PROCEED. No code written.
+Status: **SHIPPED** — commit `4fd02cd`, pushed to master. Plan-back #8892
+approved by jarvis + karen (#2944). Awaiting Jarvis's MCP reload + live DJ test.
 
 ## Method
 Read-only only: GETs against the LIVE :8100 server with `.dj_token`, plus
@@ -59,6 +60,38 @@ MCP-side. `audiplex-dj` is a stdio subprocess spawned by the *client*
 appear only after an MCP reconnect / session restart **on Jarvis's side**.
 Open item for Jarvis: confirm his mount's `AUDIPLEX_URL` targets the same
 instance the app uses (localhost:8100 on this box serves the real library).
+
+## Shipped (commit 4fd02cd)
+
+`audiplex_mcp/server.py` only — 15 tools became 18.
+
+- `dj_library(kind=overview|folders|artists|albums|genres|playlists)`
+- `dj_tracks(folder|album|artist|playlist, offset, limit)` — paged
+- `dj_search(query, limit, include_longform=False)`
+- `dj_queue_by` gained `kind='folder'`
+
+Per Jarvis's review note, `dj_search` **hides long-form by default** and says
+how many it hid; `include_longform=True` surfaces them deliberately.
+
+### Verification (all against the live server; nothing bounced)
+- 18 tools register; `dj_library()` names the folder and 206 tracks unprompted
+  and correctly reports the axes as *untagged*, not empty.
+- Paging works (`offset`/`limit`, next-page footer).
+- `dj_search('ashnikko')` → the 4 Ashnikko IDs, titles cleaned.
+- Long-form: the 9.7h focus loops and the 1.8h Lex Fridman podcast flag
+  correctly, hide from search by default, and return with `include_longform`.
+- `dj_queue_by(kind='folder')` verified with `_enqueue` **stubbed**, so no
+  command reached Todd's device mid-test.
+- `server/` pytest: **270 passed** (use `C:\Python311\python.exe` — the repo's
+  interpreter, the one `launch.bat` uses; a bare `python` lacks `passlib`).
+- Confirmed working against `192.168.50.139:8100`, Jarvis's actual mount URL.
+
+### Gotcha for the next worker
+`orch_safe_commit.py`'s marker filter silently dropped the `import re` hunk and
+its own #676 check caught the would-be `NameError`. A whole-feature change
+needs `--allow-unmarked <path>`. Also: `$TMPDIR` is unset in this Bash tool —
+a heredoc to `"$TMPDIR/msg.txt"` writes to `/msg.txt` and fails. Use the
+scratchpad path.
 
 ## Deliberately out of scope
 Retagging the 206 untagged files so artists/albums/genres populate properly is
