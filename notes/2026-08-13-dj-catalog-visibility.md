@@ -190,9 +190,93 @@ degraded paths (nothing playing, and a 401) log the rec anyway rather than
 failing. `server` pytest **276 passed** — unchanged, as expected for an
 MCP-only change.
 
+## #2945 phase B — approval-gated ingest SHIPPED
+
+`audiplex_mcp/server.py` (+ requirements, README) — 21 tools became 23. Still
+MCP-only: no server change, no `:8100` restart, Todd's app untouched.
+
+- `dj_find_candidates(query, limit, rec_id)` — yt-dlp **search only, downloads
+  nothing**. Returns numbered candidates, flags long-form, and flags anything
+  the library already appears to have. Optionally links back to a `dj_recommend`
+  id so the taste loop and the download stay connected.
+- `dj_ingest(candidate_id, approval, ...)` — downloads, tags, files, rescans.
+
+### The approval gate
+Two tools, not one, deliberately: `dj_ingest` takes a **candidate id that a
+search produced** — never a bare URL — plus `approval`, Todd's actual words,
+which is required and stored. So the DJ can't go from "I like this song" to a
+file on disk without a candidate having been read out loud first, and every
+download carries an audit row. *(Deviation from the plan-back, which said
+`dj_ingest(url, ...)`: an id from a prior search is a stronger gate than a URL
+the agent can synthesise.)*
+
+### The finding that reshaped this: the scanner is PATH-FIRST
+Its own docstring says it — `<root>/Artists & Albums/<Genre>/<Artist>/<Album>/`
+yields genre + artist + album **from the path**; tags supply only per-track
+title and year. `_artist_from_path` returns the album folder's *parent* name.
+
+So the plan's "write proper title/artist tags with mutagen" would **not** have
+fixed anything on its own: a perfectly-tagged file dropped loose in `q:\music`
+joins the same album named "music" whose artist is the parent of the root —
+i.e. the empty string. That is the actual mechanism behind the degenerate
+206-file dump, and behind Marillion landing as "Various Artists" (a folder
+directly under the root gets `VARIOUS_ARTISTS` by rule).
+
+Ingest therefore builds `<root>/<Artist>/<Album>/` — or the genre layout when a
+genre is supplied — **and** writes the tags. Album defaults to `Singles`, so an
+artist's singles accumulate in one album folder rather than one album per song.
+
+### Guards
+Empty `approval`; unknown candidate id; already-ingested candidate; long-form
+(15min+, checked on the search estimate **and again on the real file**, which is
+the one that counts); missing artist (blank artist = the untagged pile, the
+exact thing this exists to stop); duplicate already in the library; destination
+file exists. Downloads stage in `data/dj/staging` and only move into the library
+once they are a real tagged `.m4a` — a half-written file inside a music root
+would be visible to the rescan we fire at the end. Tagging/move failures keep
+the file and say where; download failures clean up after themselves.
+
+### Verification
+- Guards: all seven refusal paths fire with the right message.
+- Live search: real results, artist/title split correct, and the duplicate flag
+  correctly matched a clean "Ashnikko - Daisy" against the library's
+  `Ashnikko - Daisy (Official Video) (128kbit_AAC)`.
+- **Full end-to-end**, into a *temp* root (Todd's library untouched — testing
+  must not bypass the very gate being built): Kevin MacLeod CC track searched →
+  downloaded → converted → tagged → filed → rescan endpoint called → staging
+  clean.
+- **The design claim, proven rather than assumed**: ran the real `scan_music`
+  over the produced layout — `artist='Kevin MacLeod' album='Singles'
+  genre='Comedy'`, title from tags. The opposite of the nameless-artist dump.
+- Missing-dependency path returns an actionable message instead of crashing.
+- `server` pytest **276 passed**, unchanged as expected for an MCP-only change.
+
+### Two bugs caught in test, both real
+1. **yt-dlp printed progress to stdout** — and this process speaks JSON-RPC over
+   stdout, so an ingest would have corrupted the MCP transport mid-set. `quiet`
+   does not cover it; `logtostderr` + `noprogress` do. Verified stdout is clean.
+2. A failed download **left its staging dir behind**. Now cleaned up.
+
+Also widened the shared cruft regex to strip a bare `(Lyrics)`, so a lyrics
+upload no longer dodges the duplicate check.
+
+### Notes for whoever picks this up
+- `pip install --user yt-dlp` done (2026.7.4, per Jarvis's Q3 authorisation);
+  ffmpeg was already at `C:\ProgramData\chocolatey\bin`. Both are now in
+  `audiplex_mcp/requirements.txt` and both are imported **lazily**, so the other
+  21 tools still work if they're missing.
+- Year tag is only written when yt-dlp actually reports `release_year` —
+  upload_date is not release year and a wrong year is worse than none.
+- Adding a second single to an existing `<Artist>/Singles/` folder changes that
+  folder's hash, so the scanner re-inserts its tracks and **their track ids
+  change**. Anything holding ids across an ingest should re-resolve them.
+- Ingest only fixes files from here forward; the existing 217 stay untagged
+  until the separate retagging item runs.
+
 ## Still in flight
 
-#2945 has PROCEED (#2949): phase A **done**; phase B next in a fresh session.
+#2945 phase C (server-side taste table + app thumbs) remains deliberately
+unbuilt — it only earns its keep if the loop proves useful.
 
 **#2945 — DJ discovery + feedback loop** (plan-back event 8898). Premise
 corrections: there is **no existing yt-dlp scrape path** in this repo (only my

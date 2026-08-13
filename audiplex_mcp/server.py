@@ -52,11 +52,14 @@ token-leak guard in the Android AuthInterceptor before assuming this is
 safe to extend to other stream-carrying commands.
 """
 
+import asyncio
 import contextlib
 import datetime
 import os
 import re
+import shutil
 import sqlite3
+import sys
 from pathlib import Path
 from urllib.parse import quote
 
@@ -571,7 +574,7 @@ _CRUFT = re.compile(
         \(\s*\d+\s*kbit_[A-Za-z0-9]+\s*\)      # (128kbit_AAC), (152kbit_Opus)
       | [\(\[]\s*(?:official\s+)?
           (?:music\s+video|lyric\s+video|lyrics?\s+video|video|audio|
-             visuali[sz]er|hd\s+video)
+             visuali[sz]er|hd\s+video|lyrics?)
         \s*[\)\]]
       | [\(\[]\s*official\s*[\)\]]
     )""",
@@ -956,6 +959,21 @@ def _taste_db():
             rated_at     TEXT
         )"""
         )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS candidates (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at    TEXT NOT NULL,
+            query         TEXT NOT NULL DEFAULT '',
+            url           TEXT NOT NULL,
+            title         TEXT NOT NULL DEFAULT '',
+            artist        TEXT NOT NULL DEFAULT '',
+            duration      REAL,
+            rec_id        INTEGER,
+            approval      TEXT NOT NULL DEFAULT '',
+            ingested_at   TEXT,
+            ingested_path TEXT NOT NULL DEFAULT ''
+        )"""
+        )
         yield conn
         conn.commit()
     finally:
@@ -1163,6 +1181,433 @@ async def dj_taste(limit: int = 20) -> str:
             "dj-agent, which has no listening history of its own. Todd's plays "
             "are recorded under his own account and are not readable here — "
             "treat this as no data, not as dislike."
+        )
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# Ingest (#2945 phase B) — find a track, get Todd's yes, download it TAGGED.
+#
+# Two tools on purpose. dj_find_candidates SEARCHES and downloads nothing;
+# dj_ingest only accepts a candidate id that search produced, plus what Todd
+# actually said when he approved it. So the DJ cannot go from "I like this
+# song" to a file on disk without a candidate having been read out loud first,
+# and every download carries an audit row saying who approved it and how.
+#
+# WHERE the file lands is the whole ballgame, and it is not where you'd guess.
+# The music scanner is PATH-FIRST (server/audiplex/scanners/music.py): album
+# title is the folder name and artist is the folder's PARENT — tags only supply
+# per-track title and year. That is exactly why the existing dump is degenerate:
+# 206 files sitting loose in q:\music make one album called "music" whose
+# artist is the parent of the root, i.e. the empty string. Writing perfect tags
+# on a file dropped in beside them would change NOTHING about the browse axes.
+# So ingest builds <root>/<Artist>/<Album>/ (or the scanner's genre layout,
+# <root>/Artists & Albums/<Genre>/<Artist>/<Album>/, when a genre is given) and
+# writes the tags as well, since title/year still come from them.
+
+FFMPEG_FALLBACK = r"C:\ProgramData\chocolatey\bin\ffmpeg.exe"
+GENRE_PARENT = "Artists & Albums"
+
+# Downloads land here first and are only moved into the library once they are
+# a real, tagged .m4a. A half-written file inside a music root would otherwise
+# be visible to the very rescan we fire at the end.
+STAGING_DIR = TASTE_DB.parent / "staging"
+
+_ARTIST_TITLE_SEP = re.compile(r"\s+[-–—]\s+")
+_ILLEGAL_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _split_artist_title(raw_title: str, uploader: str = "") -> tuple[str, str]:
+    """Best-effort "Artist - Title" split off a YouTube title.
+
+    Falls back to the channel name with the " - Topic" suffix that YouTube's
+    auto-generated artist channels carry stripped off.
+    """
+    cleaned = _clean_title(raw_title or "")
+    parts = _ARTIST_TITLE_SEP.split(cleaned, maxsplit=1)
+    if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+        return parts[0].strip(), parts[1].strip()
+    channel = re.sub(r"\s*-\s*Topic\s*$", "", uploader or "", flags=re.IGNORECASE)
+    return channel.strip(), cleaned
+
+
+def _plain(err: Exception) -> str:
+    """yt-dlp colours its errors; ANSI escapes are noise in a relayed message."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", str(err)).strip()
+
+
+def _safe_name(name: str, fallback: str = "Unknown") -> str:
+    """A path segment Windows will actually accept."""
+    cleaned = _ILLEGAL_FILENAME.sub("", name or "").strip().rstrip(". ")
+    return cleaned[:120] or fallback
+
+
+def _match_key(*parts: str) -> str:
+    """Order-insensitive word key, for spotting a track we already have."""
+    words = re.findall(r"[a-z0-9]+", _clean_title(" ".join(parts)).lower())
+    return " ".join(sorted(words))
+
+
+def _require(module: str, package: str):
+    try:
+        return __import__(module)
+    except ImportError:
+        raise RuntimeError(
+            f"{module} is not installed for this interpreter "
+            f"({sys.executable}). Install it with: pip install --user {package}"
+        ) from None
+
+
+def _search_youtube(query: str, limit: int) -> list[dict]:
+    """Metadata-only search. Downloads nothing (`extract_flat` + no download)."""
+    _require("yt_dlp", "yt-dlp")
+    from yt_dlp import YoutubeDL
+
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        # This process speaks JSON-RPC over stdout. yt-dlp's progress output
+        # goes there by default and would corrupt the MCP transport mid-set,
+        # so force every byte it emits onto stderr.
+        "logtostderr": True,
+        "noprogress": True,
+        "skip_download": True,
+        "extract_flat": True,
+        "socket_timeout": 20,
+    }
+    with YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+    return [e for e in (info or {}).get("entries") or [] if e]
+
+
+def _download_audio(url: str, dest_dir: Path) -> tuple[Path, dict]:
+    """Download `url` as audio into an EMPTY `dest_dir`; return (file, info)."""
+    _require("yt_dlp", "yt-dlp")
+    from yt_dlp import YoutubeDL
+
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "logtostderr": True,  # keep yt-dlp off stdout — see _search_youtube
+        "noprogress": True,
+        "socket_timeout": 30,
+        "format": "bestaudio[ext=m4a]/bestaudio/best",
+        "outtmpl": str(dest_dir / "dl.%(ext)s"),
+        "postprocessors": [
+            {"key": "FFmpegExtractAudio", "preferredcodec": "m4a", "preferredquality": "0"}
+        ],
+    }
+    ffmpeg = shutil.which("ffmpeg") or (
+        FFMPEG_FALLBACK if Path(FFMPEG_FALLBACK).exists() else None
+    )
+    if ffmpeg:
+        opts["ffmpeg_location"] = ffmpeg
+
+    with YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True) or {}
+
+    produced = sorted(dest_dir.glob("dl.*"))
+    m4a = [p for p in produced if p.suffix.lower() == ".m4a"]
+    if not m4a:
+        got = ", ".join(p.name for p in produced) or "nothing"
+        raise RuntimeError(
+            f"Download produced {got}, not an .m4a — ffmpeg conversion likely "
+            "failed. Left in staging rather than putting an untaggable file in "
+            "the library."
+        )
+    return m4a[0], info
+
+
+def _write_tags(path: Path, title: str, artist: str, album: str, year=None) -> None:
+    """Write the APPROVED metadata over whatever the source file carried.
+
+    Deliberately not "keep the source tags if present": the existing library
+    shows where that leads — Marillion's tracks all claim "Various Artists"
+    and Barracuda carries no artist at all.
+    """
+    _require("mutagen", "mutagen")
+    from mutagen.mp4 import MP4
+
+    audio = MP4(str(path))
+    audio["\xa9nam"] = [title]
+    audio["\xa9ART"] = [artist]
+    audio["aART"] = [artist]
+    audio["\xa9alb"] = [album]
+    if year:
+        audio["\xa9day"] = [str(year)]
+    audio.save()
+
+
+async def _music_root() -> Path:
+    roots = (await _get("/api/music/roots")).get("roots") or []
+    usable = [r for r in roots if r.get("exists") and r.get("path")]
+    if not usable:
+        raise RuntimeError("No readable music root is configured on the server.")
+    return Path(usable[0]["path"])
+
+
+@mcp.tool()
+async def dj_find_candidates(query: str, limit: int = 5, rec_id: int = 0) -> str:
+    """Find real, downloadable sources for a track the library does NOT have —
+    so a recommendation can become something Todd can actually play.
+
+    THIS DOWNLOADS NOTHING. It searches and returns candidates with a candidate
+    id each. Read the best one out to Todd; if he says yes, and only then, call
+    dj_ingest with that id. That two-step is the approval gate — dj_ingest will
+    not take a bare URL.
+
+    query: what to search for — "artist track name" works best.
+    rec_id: the dj_recommend id this came from, if any, so the taste loop and
+        the download stay connected.
+    """
+    q = (query or "").strip()
+    if not q:
+        return "Give something to search for — 'artist track name'."
+    limit = max(1, min(limit, 10))
+
+    try:
+        entries = await asyncio.to_thread(_search_youtube, q, limit)
+    except Exception as e:
+        return f"Search failed: {_plain(e)}"
+    if not entries:
+        return f"No results for '{q}'."
+
+    try:
+        library = await _all_music_tracks()
+        have = {_match_key(t.get("title") or "") for t in library}
+    except Exception:
+        have = set()
+
+    lines = [f"Candidates for '{q}' — nothing downloaded:"]
+    with _taste_db() as conn:
+        for e in entries:
+            url = e.get("url") or e.get("webpage_url") or (
+                f"https://www.youtube.com/watch?v={e['id']}" if e.get("id") else ""
+            )
+            if not url:
+                continue
+            raw = e.get("title") or "(untitled)"
+            artist, title = _split_artist_title(
+                raw, e.get("channel") or e.get("uploader") or ""
+            )
+            dur = e.get("duration")
+            cur = conn.execute(
+                "INSERT INTO candidates (created_at, query, url, title, artist,"
+                " duration, rec_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (_now(), q, url, title, artist, dur, rec_id or None),
+            )
+            label = f"{artist} - {title}" if artist else title
+            flags = []
+            if isinstance(dur, (int, float)) and dur >= LONGFORM_SECONDS:
+                flags.append("LONG-FORM — almost certainly not the song")
+            if _match_key(artist, title) in have or _match_key(title) in have:
+                flags.append("library already has something matching this")
+            tail = f"  [{'; '.join(flags)}]" if flags else ""
+            lines.append(f"  {cur.lastrowid} | {label} | {_fmt_duration(dur)}{tail}")
+
+    lines.append(
+        "Say the one you mean out loud and get Todd's yes, then "
+        'dj_ingest(<id>, approval="<what he said>").'
+    )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def dj_ingest(
+    candidate_id: int,
+    approval: str,
+    artist: str = "",
+    title: str = "",
+    album: str = "",
+    genre: str = "",
+    allow_longform: bool = False,
+    allow_duplicate: bool = False,
+) -> str:
+    """Download an APPROVED candidate into the library, properly tagged, and
+    rescan so it's immediately playable.
+
+    ONLY call this after Todd has said yes to a specific candidate from
+    dj_find_candidates. `approval` is what he actually said — it is required,
+    recorded, and it is the only evidence that a human authorised the download.
+    Never fill it in on his behalf.
+
+    artist/title/album/genre: override the search metadata when it's wrong —
+        and check it, because YouTube titles are frequently wrong. These become
+        the FOLDER LAYOUT as well as the tags, which is what makes the track
+        browsable by artist instead of joining the untagged pile: with a genre
+        it lands in `Artists & Albums/<Genre>/<Artist>/<Album>/`, without one in
+        `<Artist>/<Album>/`. Album defaults to "Singles".
+    allow_longform: required to ingest anything 15+ minutes — normally a sign
+        the candidate is a mix or a full album upload, not the song.
+    allow_duplicate: required if the library already looks to have this track.
+    """
+    said = (approval or "").strip()
+    if not said:
+        return (
+            "Refusing: `approval` is empty. Ask Todd first and pass what he "
+            "said — this tool downloads a file and adds it to his library."
+        )
+    with _taste_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM candidates WHERE id = ?", (candidate_id,)
+        ).fetchone()
+    if not row:
+        return (
+            f"No candidate {candidate_id}. Run dj_find_candidates first and use "
+            "an id it returned — this tool won't take a bare URL."
+        )
+    if row["ingested_at"]:
+        return (
+            f"Candidate {candidate_id} was already ingested on {row['ingested_at']}"
+            f" → {row['ingested_path']}"
+        )
+
+    dur = row["duration"]
+    if (
+        not allow_longform
+        and isinstance(dur, (int, float))
+        and dur >= LONGFORM_SECONDS
+    ):
+        return (
+            f"Refusing: that candidate is {_fmt_duration(dur)} — long enough to "
+            "be a mix or a full-album upload rather than the track. Check it's "
+            "really what you want, then pass allow_longform=True."
+        )
+
+    final_artist = (artist or row["artist"] or "").strip()
+    final_title = (title or row["title"] or "").strip()
+    if not final_title:
+        return "Refusing: no title to tag this with. Pass title=..."
+    if not final_artist:
+        return (
+            "Refusing: no artist. The artist is the folder name the scanner "
+            "reads, so a blank one lands this in the untagged pile — the exact "
+            "thing this is meant to stop. Pass artist=..."
+        )
+    final_album = (album or "").strip() or "Singles"
+
+    if not allow_duplicate:
+        try:
+            have = {_match_key(t.get("title") or "") for t in await _all_music_tracks()}
+        except Exception:
+            have = set()
+        if _match_key(final_artist, final_title) in have or _match_key(final_title) in have:
+            return (
+                f"Refusing: the library already looks to have '{final_artist} - "
+                f"{final_title}'. dj_search to check; pass allow_duplicate=True "
+                "if it really is a different recording."
+            )
+
+    try:
+        root = await _music_root()
+    except Exception as e:
+        return f"Can't resolve the music root: {e}"
+
+    parts = [_safe_name(final_artist), _safe_name(final_album)]
+    if genre.strip():
+        parts = [GENRE_PARENT, _safe_name(genre.strip())] + parts
+    dest_dir = root.joinpath(*parts)
+    dest = dest_dir / f"{_safe_name(final_title, 'track')}.m4a"
+    if dest.exists():
+        return f"Refusing: {dest} already exists. Nothing downloaded."
+
+    staging = STAGING_DIR / f"c{candidate_id}"
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
+
+    try:
+        downloaded, info = await asyncio.to_thread(_download_audio, row["url"], staging)
+    except Exception as e:
+        # Nothing here is worth keeping — partial fragments only. (Tagging and
+        # move failures below deliberately DO keep the file.)
+        shutil.rmtree(staging, ignore_errors=True)
+        return f"Download failed, nothing added to the library: {_plain(e)}"
+
+    # Duration is only trustworthy now — search gave a flat estimate, and the
+    # long-form guard is worth nothing if the real file turns out to be an hour.
+    real_dur = info.get("duration")
+    if (
+        not allow_longform
+        and isinstance(real_dur, (int, float))
+        and real_dur >= LONGFORM_SECONDS
+    ):
+        shutil.rmtree(staging, ignore_errors=True)
+        return (
+            f"Discarded: the downloaded file is {_fmt_duration(real_dur)}, not "
+            "the short track the search suggested. Nothing was added. Pass "
+            "allow_longform=True if you really want it."
+        )
+
+    try:
+        await asyncio.to_thread(
+            _write_tags, downloaded, final_title, final_artist, final_album,
+            info.get("release_year"),
+        )
+    except Exception as e:
+        return (
+            f"Tagging failed: {e}. File left in {staging} and NOT added — an "
+            "untagged file is what we're trying to stop shipping."
+        )
+
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(downloaded), str(dest))
+    except OSError as e:
+        return f"Could not move into the library: {e}. File is still in {staging}."
+    shutil.rmtree(staging, ignore_errors=True)
+
+    with _taste_db() as conn:
+        conn.execute(
+            "UPDATE candidates SET approval = ?, ingested_at = ?, ingested_path = ?"
+            " WHERE id = ?",
+            (said, _now(), str(dest), candidate_id),
+        )
+
+    lines = [
+        f"Ingested: {final_artist} - {final_title}"
+        f" ({_fmt_duration(real_dur or dur)})",
+        f"  {dest}",
+        f'  tagged artist/title/album, approved by Todd: "{said}"',
+    ]
+
+    # Music-roots-only rescan: this is the endpoint the DJ token is allowed to
+    # call (#2947). Without it the file is on disk but invisible to the catalog.
+    try:
+        async with httpx.AsyncClient(timeout=180) as client:
+            resp = await client.post(
+                f"{AUDIPLEX_URL}/api/library/scan/music", headers=_headers()
+            )
+        resp.raise_for_status()
+        scan = resp.json()
+        lines.append(
+            f"  rescan: added={scan.get('added')} updated={scan.get('updated')}"
+            f" removed={scan.get('removed')}"
+        )
+        for err in (scan.get("errors") or [])[:3]:
+            lines.append(f"  scan warning: {err}")
+    except Exception as e:
+        lines.append(
+            f"  RESCAN FAILED ({e}) — the file is in place but the catalog "
+            "hasn't picked it up, so it isn't playable yet."
+        )
+        return "\n".join(lines)
+
+    found = []
+    try:
+        found = [
+            t for t in await _all_music_tracks()
+            if _match_key(t.get("title") or "") == _match_key(final_title)
+        ]
+    except Exception:
+        pass
+    if found:
+        lines.append(f"  now playable: {_track_line(found[0])}")
+    else:
+        lines.append(
+            "  NOTE: rescan ran but the track isn't showing in the catalog yet."
         )
     return "\n".join(lines)
 

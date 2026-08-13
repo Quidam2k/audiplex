@@ -19,14 +19,30 @@ v1 is **single-device** and **music-first**. Commands wait in a server-side
 queue until the client polls, so a command issued while the app is asleep
 runs on its next wake (cold-start Option A).
 
-## Tools (v1)
+## Tools
 
-- `dj_play_now(track_ids: list[int])` — replace the queue and play these tracks now.
-- `dj_now_playing()` — what's playing right now.
+Playback — `dj_play_now`, `dj_queue`, `dj_play_next`, `dj_skip`, `dj_previous`,
+`dj_pause`, `dj_resume`, `dj_seek`, `dj_volume`, `dj_reorder`, `dj_now_playing`,
+`dj_play_stream`, `dj_queue_by`.
 
-Resolve track names → IDs via the catalog API (`GET /api/music/albums`,
-`/api/music/artists/{id}/tracks`, etc.). A dedicated `dj_search` and the
-incremental queue tools (`dj_queue`, `dj_play_next`, `dj_skip`) arrive in P3.
+Voice — `dj_announce`, `dj_break_brief`.
+
+Browsing (#2943) — `dj_library`, `dj_tracks`, `dj_search`. Note the live library
+is a flat untagged dump, so the artist/album/genre axes are degenerate and the
+real metadata is in the track titles; `dj_library` says so rather than letting
+the agent conclude the library is empty.
+
+Taste loop (#2945 phase A) — `dj_recommend` logs a track the library doesn't
+have, `dj_rate` records how it landed, `dj_taste` reads the signal back.
+Feedback is voice-relayed through the agent; there is no app UI for it.
+Stored MCP-side in `data/dj/taste.db` (`DJ_TASTE_DB`), gitignored.
+
+Ingest (#2945 phase B) — `dj_find_candidates` searches for a real source and
+downloads **nothing**; `dj_ingest` takes a candidate id from that search plus
+Todd's actual words of approval, then downloads, tags, files it under
+`<Artist>/<Album>/` (or `Artists & Albums/<Genre>/<Artist>/<Album>/`) and
+rescans. The folder layout is not cosmetic — the scanner is path-first, so it
+is what makes the track browsable by artist. Needs `ffmpeg` on PATH.
 
 ## Setup
 
