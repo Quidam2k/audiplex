@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8100
     cover_cache_dir: str = "./covers"
+    dj_clip_dir: str = "./dj_clips"
     scan_on_startup: bool = True
     apk_output_dir: str = "../android/app/build/outputs/apk/debug"
     jwt_secret: str = ""

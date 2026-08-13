@@ -63,4 +63,46 @@ incremental queue tools (`dj_queue`, `dj_play_next`, `dj_skip`) arrive in P3.
 }
 ```
 
-Run from the repo root (`Z:\Development\audiplex`) so `audiplex_mcp` is importable.
+Run from the repo root (`Q:\Development\audiplex`) so `audiplex_mcp` is importable.
+
+## DJ voice breaks (item #431)
+
+Two extra tools let the agent talk between songs instead of only pushing
+buttons:
+
+- **`dj_break_brief()`** — read-only. Returns the current daypart's persona
+  directive, local time, optional weather, and the now-playing snapshot.
+- **`dj_announce(text, mode='next', title='DJ break')`** — synthesizes the
+  agent's copy to audio, uploads it to `POST /api/dj/clips`, and queues an
+  `announce` command. `mode='next'` plays the break after the current song
+  (how a real break lands); `mode='now'` interrupts.
+
+The agent writes the copy — nothing here generates prose. See
+[`DJ_PERSONA.md`](DJ_PERSONA.md) for the on-air protocol and writing rules.
+
+Speech uses any **OpenAI-compatible** `POST /v1/audio/speech` endpoint, which
+keeps Audiplex decoupled from any particular TTS project:
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `DJ_TTS_URL` | — | base URL or full endpoint (required for `dj_announce`) |
+| `DJ_TTS_MODEL` | `tts-1` | model name |
+| `DJ_TTS_VOICE` | `alloy` | voice id |
+| `DJ_TTS_FORMAT` | `wav` | `wav` or `mp3` |
+| `DJ_TTS_API_KEY` | — | optional bearer token |
+| `DJ_TTS_CMD` | — | generic subprocess fallback with `{text}`/`{out}` |
+| `DJ_PERSONA_NAME` | `the DJ` | on-air name |
+| `DJ_LAT` / `DJ_LON` | — | optional keyless Open-Meteo weather line |
+
+Only `dj_announce` needs a TTS backend; the other 13 tools work without one,
+and `dj_break_brief` warns when it's unconfigured.
+
+## Verifying the whole lane
+
+```bash
+cd server && C:\Python311\python.exe tests/dj_e2e_harness.py
+```
+
+Spins up a real server on a throwaway port plus a fake OpenAI-compatible TTS
+and drives all 15 tools through the real command bus with a simulated device.
+Never touches the production instance on :8100.

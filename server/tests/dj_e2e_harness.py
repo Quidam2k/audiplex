@@ -121,6 +121,7 @@ def build_fixture(tmp: Path) -> dict:
         "scan_on_startup": False,       # never scan a real library
         "library_roots": [],
         "cover_cache_dir": (tmp / "covers").as_posix(),
+        "dj_clip_dir": (tmp / "dj_clips").as_posix(),
         "dj_owner_username": "admin",   # playlist/favorites resolution target
         "host": "127.0.0.1",
     }
@@ -234,6 +235,69 @@ def wait_ready(port: int, proc: subprocess.Popen, tmp: Path, timeout: float = 45
     )
 
 
+# ------------------------------------------------------------- fake TTS
+
+class FakeTts:
+    """A minimal OpenAI-compatible /v1/audio/speech endpoint.
+
+    Exercises the REAL primary TTS path (locked decision: OpenAI-compatible
+    URL, no Pantheon dependency) without needing a model on the box, and
+    captures the request so the payload shape is asserted rather than assumed.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[dict] = []
+        self.wav = self._silent_wav()
+        self.port = free_port()
+        self._srv = None
+
+    @staticmethod
+    def _silent_wav(seconds: float = 0.4, rate: int = 8000) -> bytes:
+        import io
+        import wave
+
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(b"\x00\x00" * int(rate * seconds))
+        return buf.getvalue()
+
+    def start(self) -> str:
+        import json as _json
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length)
+                try:
+                    outer.requests.append(_json.loads(body))
+                except Exception:
+                    outer.requests.append({"_unparsed": body[:200].decode(errors="replace")})
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Length", str(len(outer.wav)))
+                self.end_headers()
+                self.wfile.write(outer.wav)
+
+            def log_message(self, *a):  # keep the harness output clean
+                pass
+
+        self._srv = ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
+        threading.Thread(target=self._srv.serve_forever, daemon=True).start()
+        return f"http://127.0.0.1:{self.port}"
+
+    def stop(self) -> None:
+        if self._srv:
+            self._srv.shutdown()
+            self._srv.server_close()
+
+
 # ------------------------------------------------------- simulated device
 
 class SimulatedDevice:
@@ -301,6 +365,22 @@ class SimulatedDevice:
             else:
                 at = self.index + 1
                 self.queue[at:at] = new
+        elif ctype == "announce":
+            # Mirrors PlaybackManager.insertVoiceClip: a synthetic negative-id
+            # item built from the clip URL directly, inserted after the current
+            # track (mode 'next') or played immediately (mode 'now').
+            clip = {
+                "id": -int(payload.get("clip_id", 0)),
+                "title": payload.get("title", "DJ break"),
+                "artist": "DJ",
+                "duration_ms": int((payload.get("duration_seconds") or 0) * 1000),
+                "clip_url": payload.get("clip_url"),
+            }
+            if not self.queue or payload.get("mode") == "now":
+                self.queue.insert(self.index if self.queue else 0, clip)
+                self.playing, self.position_ms = True, 0
+            else:
+                self.queue.insert(self.index + 1, clip)
         elif ctype == "reorder":
             f, t = payload.get("from_index", 0), payload.get("to_index", 0)
             if 0 <= f < len(self.queue) and 0 <= t < len(self.queue):
@@ -387,7 +467,7 @@ async def wait_applied(dev: SimulatedDevice, target: int, timeout: float = 12.0)
     return False
 
 
-async def run_scenario(dev: SimulatedDevice, dj, ids: dict, rep: Report) -> None:
+async def run_scenario(dev: SimulatedDevice, dj, ids: dict, rep: Report, tts: "FakeTts") -> None:
     jazz, classical = ids["jazz"], ids["classical"]
     n = 0
 
@@ -493,6 +573,68 @@ async def run_scenario(dev: SimulatedDevice, dj, ids: dict, rep: Report) -> None
     rep.check([i["id"] for i in dev.queue] == jazz,
               "switched back from the stream to music")
 
+    print("\n-- DJ voice breaks (#431) ------------------------------------")
+
+    brief = await dj.dj_break_brief()
+    rep.check("Daypart:" in brief and "Directive:" in brief,
+              "dj_break_brief returns a dayparted persona directive",
+              brief.splitlines()[1] if brief.count("\n") else brief[:80])
+    rep.check("Now playing:" in brief,
+              "dj_break_brief includes the now-playing snapshot")
+    rep.check("Style:" in brief and "no markdown" in brief,
+              "dj_break_brief carries the spoken-copy style rules")
+    rep.check("WARNING: no TTS backend" not in brief,
+              "dj_break_brief sees the configured TTS backend")
+
+    copy = "You're listening to the late shift. That was Miles Davis. Stay with me."
+    before = [i["id"] for i in dev.queue]
+    cur_id = dev.queue[dev.index]["id"]
+    out = await step(dj.dj_announce(copy, "next", "Test break"), "dj_announce")
+    rep.check("voice break" in out, "dj_announce reports a queued break", out)
+
+    rep.check(len(dev.queue) == len(before) + 1,
+              "announce inserted exactly one item", f"queue={[i['id'] for i in dev.queue]}")
+    rep.check(dev.queue[dev.index]["id"] == cur_id,
+              "announce did NOT interrupt the current track (mode='next')")
+    clip_item = dev.queue[dev.index + 1]
+    rep.check(clip_item["id"] < 0,
+              "the break is a synthetic negative-id item (won't hit the catalog)",
+              f"id={clip_item['id']}")
+    rep.check(clip_item["title"] == "Test break", "the break carries its title")
+
+    # The TTS request shape is the contract with any OpenAI-compatible server.
+    rep.check(len(tts.requests) == 1, f"TTS was called once ({len(tts.requests)})")
+    if tts.requests:
+        req = tts.requests[-1]
+        rep.check(req.get("input") == copy, "TTS received the agent's exact copy")
+        rep.check({"model", "input", "voice", "response_format"} <= set(req),
+                  "TTS payload matches the OpenAI speech contract",
+                  f"keys={sorted(req)}")
+
+    # The clip must actually be fetchable by the device, with range support.
+    clip_url = clip_item["clip_url"]
+    rep.check(bool(clip_url) and clip_url.startswith("/api/dj/clips/"),
+              "the break carries a relative clip URL the client can resolve",
+              str(clip_url))
+    async with httpx.AsyncClient(timeout=15) as c:
+        got = await c.get(f"{dev.base}{clip_url}", headers=dev.headers)
+        rep.check(got.status_code == 200 and got.content == tts.wav,
+                  "the device can fetch the exact synthesized audio back",
+                  f"status={got.status_code} bytes={len(got.content)}")
+        ranged = await c.get(f"{dev.base}{clip_url}",
+                             headers={**dev.headers, "Range": "bytes=0-49"})
+        rep.check(ranged.status_code == 206 and len(ranged.content) == 50,
+                  "clip serving supports range requests (ExoPlayer needs this)",
+                  f"status={ranged.status_code}")
+
+    npa = await dj.dj_now_playing()
+    rep.check("Test break" in npa, "dj_now_playing shows the break in the queue")
+
+    bad = await dj.dj_announce("hi", "sideways")
+    rep.check("Unknown mode" in bad, "dj_announce rejects a bad mode", bad)
+    empty = await dj.dj_announce("   ")
+    rep.check("nothing to announce" in empty, "dj_announce guards empty copy", empty)
+
     print("\n-- guards ----------------------------------------------------")
 
     empty = await dj.dj_play_now([])
@@ -502,7 +644,7 @@ async def run_scenario(dev: SimulatedDevice, dj, ids: dict, rep: Report) -> None
 
     expected_types = {
         "play_now", "queue", "play_next", "reorder", "skip", "previous",
-        "pause", "resume", "seek", "volume", "play_stream",
+        "pause", "resume", "seek", "volume", "play_stream", "announce",
     }
     rep.check(expected_types.issubset(set(dev.seen)),
               "every command type was dispatched by the client",
@@ -524,6 +666,9 @@ async def amain() -> int:
     print(f"  port     : {port}  (production :8100 untouched)")
 
     fixture = build_fixture(tmp)
+    tts = FakeTts()
+    tts_url = tts.start()
+    print(f"  fake TTS : {tts_url}  (OpenAI-compatible /v1/audio/speech)")
     proc = start_server(tmp, port)
     dev_task = None
     dev = None
@@ -537,6 +682,13 @@ async def amain() -> int:
         # previous run already imported it).
         os.environ["AUDIPLEX_URL"] = base
         os.environ["AUDIPLEX_TOKEN"] = fixture["token"]
+        # tts_backend reads its env per call, so these can be set after import.
+        os.environ["DJ_TTS_URL"] = tts_url
+        os.environ["DJ_TTS_FORMAT"] = "wav"
+        os.environ["DJ_PERSONA_NAME"] = "the DJ"   # persona-agnostic until Todd names it
+        os.environ.pop("DJ_TTS_CMD", None)
+        os.environ.pop("DJ_LAT", None)             # keep the harness offline
+        os.environ.pop("DJ_LON", None)
         if str(REPO_ROOT) not in sys.path:
             sys.path.insert(0, str(REPO_ROOT))
         dj = importlib.import_module("audiplex_mcp.server")
@@ -550,9 +702,10 @@ async def amain() -> int:
             "dj_play_now", "dj_skip", "dj_queue", "dj_play_next", "dj_reorder",
             "dj_pause", "dj_resume", "dj_previous", "dj_seek", "dj_volume",
             "dj_play_stream", "dj_queue_by", "dj_now_playing",
+            "dj_break_brief", "dj_announce",
         }
         rep.check(expected_tools.issubset(names),
-                  f"all 13 DJ tools register ({len(names)} found)",
+                  f"all 15 DJ tools register ({len(names)} found)",
                   f"missing={sorted(expected_tools - names)}")
 
         idle = await dj.dj_now_playing()
@@ -564,7 +717,7 @@ async def amain() -> int:
         rep.check(len(dev.catalog) == 5, "simulated device loaded the catalog",
                   f"{len(dev.catalog)} tracks")
 
-        await run_scenario(dev, dj, fixture["ids"], rep)
+        await run_scenario(dev, dj, fixture["ids"], rep, tts)
     except Exception as e:
         rep.check(False, "harness ran to completion", f"{type(e).__name__}: {e}")
         import traceback
@@ -578,6 +731,7 @@ async def amain() -> int:
                 await dev_task
             except (asyncio.CancelledError, Exception):
                 pass
+        tts.stop()
         proc.terminate()
         try:
             proc.wait(timeout=10)

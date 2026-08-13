@@ -13,9 +13,16 @@ Config via environment:
                   overwrite that one file instead of editing every agent's
                   MCP config).
 
+  DJ_TTS_URL      OpenAI-compatible speech endpoint for voice breaks — see
+                  tts_backend.py for the full TTS config surface. Only
+                  dj_announce needs it; the other tools work without it.
+
 Tools: dj_play_now, dj_skip, dj_queue, dj_play_next, dj_reorder,
 dj_queue_by, dj_now_playing, dj_pause, dj_resume, dj_previous, dj_seek,
-dj_volume, dj_play_stream. The agent can pass explicit track IDs (resolved
+dj_volume, dj_play_stream, dj_break_brief, dj_announce. The last two are the
+DJ-persona lane (item #431): dj_break_brief hands the agent a dayparted
+brief, the agent writes the copy, dj_announce synthesizes and queues it as a
+voice break. The agent can pass explicit track IDs (resolved
 via the catalog REST API) or let dj_queue_by resolve an artist/album/genre/
 playlist/favorites NAME to tracks MCP-side (there is no dedicated /search
 endpoint). Playlist and favorites resolution go through /api/playback/
@@ -26,12 +33,15 @@ token-leak guard in the Android AuthInterceptor before assuming this is
 safe to extend to other stream-carrying commands.
 """
 
+import datetime
 import os
 from pathlib import Path
 from urllib.parse import quote
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+
+from audiplex_mcp import dj_persona, tts_backend
 
 AUDIPLEX_URL = os.environ.get("AUDIPLEX_URL", "http://localhost:8000").rstrip("/")
 
@@ -243,6 +253,126 @@ async def dj_play_stream(url: str, title: str = "Live stream") -> str:
     return (
         f"Playing stream '{title}' from {url} "
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
+    )
+
+
+@mcp.tool()
+async def dj_break_brief() -> str:
+    """Get everything you need to WRITE a DJ voice break: the current daypart's
+    persona directive, the local time, optional weather, and what's playing.
+
+    Read-only — this queues nothing. Use it, write 2-4 sentences of on-air copy
+    in the register it describes, then pass that copy to dj_announce. Roughly
+    one break per 3-5 songs.
+    """
+    now = datetime.datetime.now()
+    part = dj_persona.time_of_day(now)
+    persona = dj_persona.DAYPART_PERSONAS[part]
+
+    lines = [
+        f"You are {dj_persona.persona_name()}, on air.",
+        f"Daypart: {part} ({persona['name']}) — local time "
+        f"{now.strftime('%I:%M %p').lstrip('0')}, {now.strftime('%A')}.",
+        "",
+        f"Directive: {persona['directive']}",
+        "",
+        f"Style: {dj_persona.STYLE_RULES}",
+    ]
+
+    weather = await dj_persona.weather_line()
+    if weather:
+        lines += ["", f"Outside right now: {weather}."]
+
+    try:
+        state = await _get("/api/playback/state")
+    except (PermissionError, httpx.HTTPError):
+        state = None
+    if state and state.get("track"):
+        t = state["track"]
+        lines += ["", f"Now playing: {t.get('title')} - {t.get('artist')}"]
+        upcoming = [
+            f"{i.get('title')} - {i.get('artist')}"
+            for i in (state.get("queue") or [])
+            if i.get("index", -1) > state.get("queue_index", 0)
+        ][:3]
+        if upcoming:
+            lines.append("Coming up: " + "; ".join(upcoming))
+    else:
+        lines += ["", "Nothing is playing right now."]
+
+    if not tts_backend.is_configured():
+        lines += [
+            "",
+            "WARNING: no TTS backend is configured, so dj_announce will fail. "
+            "Set DJ_TTS_URL to an OpenAI-compatible speech endpoint.",
+        ]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def dj_announce(text: str, mode: str = "next", title: str = "DJ break") -> str:
+    """Speak a DJ voice break on the device: synthesizes YOUR copy to audio,
+    uploads it, and drops it into the queue.
+
+    text:  the on-air copy to speak. Write it yourself with dj_break_brief
+           first — every character is synthesized, so no markdown, emoji, or
+           bracketed stage directions.
+    mode:  'next' (default — plays after the current song finishes, which is
+           how a real DJ break lands) or 'now' (interrupt and speak
+           immediately).
+    title: label shown in the queue (default "DJ break").
+    """
+    if mode not in ("next", "now"):
+        return f"Unknown mode '{mode}'. Use 'next' or 'now'."
+    text = (text or "").strip()
+    if not text:
+        return "No text given; nothing to announce."
+
+    try:
+        clip_path = await tts_backend.synthesize(text)
+    except tts_backend.TtsNotConfigured as e:
+        return f"TTS is not configured: {e}"
+    except tts_backend.TtsFailed as e:
+        return f"Speech synthesis failed: {e}"
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            with open(clip_path, "rb") as fh:
+                resp = await client.post(
+                    f"{AUDIPLEX_URL}/api/dj/clips",
+                    headers=_headers(),
+                    files={"file": (clip_path.name, fh, "application/octet-stream")},
+                    data={"title": title},
+                )
+        if resp.status_code == 401:
+            return "Auth failed (401) uploading the clip. Check AUDIPLEX_TOKEN."
+        if resp.status_code >= 400:
+            return f"Clip upload failed ({resp.status_code}): {resp.text[:300]}"
+        clip = resp.json()
+    except httpx.HTTPError as e:
+        return f"Clip upload failed: {e}"
+    finally:
+        clip_path.unlink(missing_ok=True)
+
+    data = await _enqueue(
+        "announce",
+        {
+            "clip_id": clip["clip_id"],
+            "clip_url": clip["url"],
+            "title": title,
+            "duration_seconds": clip.get("duration_seconds"),
+            "mode": mode,
+        },
+    )
+    if isinstance(data, str):
+        return data
+    secs = clip.get("duration_seconds")
+    length = f"{secs:.1f}s" if isinstance(secs, (int, float)) else "unknown length"
+    when = "after the current track" if mode == "next" else "immediately"
+    return (
+        f"Queued a {length} voice break to play {when} "
+        f"(clip #{clip['clip_id']}, command #{data.get('id')}, "
+        f"{data.get('pending')} pending)."
     )
 
 

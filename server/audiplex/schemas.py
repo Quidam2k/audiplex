@@ -245,6 +245,19 @@ class NowPlayingQueueItem(BaseModel):
     artist: str | None = None
 
 
+class DjClipCreated(BaseModel):
+    """Ack for an uploaded DJ voice-break clip (item #431).
+
+    clip_id is the clip's epoch-ms filename stem; url is the path the device
+    fetches it from (relative, so the client resolves it against its own
+    configured base URL rather than whatever host the agent happened to use).
+    """
+
+    clip_id: int
+    url: str
+    duration_seconds: float | None = None
+
+
 class PlaybackState(BaseModel):
     """Now-playing snapshot written by the client, read by the agent."""
 
