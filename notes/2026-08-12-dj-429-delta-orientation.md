@@ -1,7 +1,8 @@
 # DJ control (#429/#431/#439) — orientation & DELTA (assignment #2922, 2026-08-12)
 
 Worker: worker-audiplex-dj-control--20260812-224422-00b7. Host: **Solace** (production box).
-Status: plan-back #8824 submitted (high criticality), awaiting signoff. **Nothing built.**
+Status: plan-back #8824 APPROVED (jarvis + karen, PROCEED #2925). **Both milestones BUILT and GREEN.**
+See "BUILD RESULTS" at the bottom for what shipped.
 
 ## Headline
 **#429 is already 100% code-complete. There is no #429 build work left.**
@@ -71,3 +72,76 @@ no-transcoding rule — plan-431 flags this correctly).
 - Reading `pantheon.db` suggestions needs UTF-8 stdout wrapping (cp1252 blows up on `↔`).
 - Windows Python can't open Git-Bash-style `/q/...` paths — use `Q:\...`.
 - Recursive grep across all of `Q:\Pantheon` times out (>120s); scope it to subdirs.
+
+---
+
+# BUILD RESULTS (post-signoff, 2026-08-12)
+
+Approved rulings applied: OQ1 resolved empirically by Jarvis (tools ARE mounted —
+he called `dj_now_playing` live from his session; the staging config I found was a
+red herring, Jarvis runs from the jarvis persona project). OQ3 = OpenAI-compatible
+TTS URL, **no Pantheon dependency** — so plan-431's `dj_synth.py` Pantheon shim was
+DROPPED entirely. OQ2 (persona name/voice) is Todd's; everything is persona-agnostic
+via env vars so his answer needs no code change.
+
+## Milestone 1 — e2e harness (commit 56c8c5e)
+`server/tests/dj_e2e_harness.py`. Real uvicorn on a throwaway port, real JWT through
+real auth, real bus, REAL MCP tool functions. Only the device is simulated (mirrors
+PlaybackManager/Media3 queue math). **69/69 checks pass.**
+Run: `cd server && C:\Python311\python.exe tests/dj_e2e_harness.py`
+
+Proved behaviors nobody had actually checked: play_next inserts AFTER the current
+track; reorder keeps the playing item pinned; seek converts s->ms; volume converts
+0-100 -> 0.0-1.0 and rejects out-of-range; queue_by resolves artist-by-prefix /
+album / genre / **owner's** playlist+favorites; graceful no-match & bad-mode;
+play_stream swaps and play_now switches back; no phantom commands.
+
+## Milestone 2 — #431 DJ voice breaks (commits 50a2e59 server+MCP, 1dee9b0 Android)
+- **Server:** `routers/dj_voice.py` — POST /api/dj/clips (multipart) + range-capable
+  GET /api/dj/clips/{id}; `dj_clip_dir` setting; `DjClipCreated` schema. Clips are
+  disk files keyed by epoch-ms, pruned after 7 days. **No schema change**; `announce`
+  rides the existing free-form command type so the bus is untouched.
+- **MCP:** `dj_break_brief` (dayparted directive + time + optional weather +
+  now-playing) and `dj_announce`. **15 tools** now register. `tts_backend.py` =
+  OpenAI-compatible `/v1/audio/speech`, `DJ_TTS_CMD` a generic subprocess fallback.
+  `dj_persona.py` ports RFL's DAYPART_PERSONAS + hour boundaries (NOT its LLM loop —
+  the agent is the DJ brain). `DJ_PERSONA.md` = on-air protocol + writing rules.
+- **Android:** `PlaybackManager.insertVoiceClip` + `announce` dispatch in
+  `DjCommandClient`. BUILD SUCCESSFUL, **versionCode 33**.
+- **Tests:** 10 new server tests (pytest 260 -> **270**); harness grew an announce leg
+  with a fake OpenAI-compatible TTS server, asserting the TTS payload contract, that
+  the break inserts after the current track without interrupting, that it's a
+  synthetic negative-id item, and that the device can fetch the exact audio back
+  with range support.
+
+## PLAN BUG FOUND AND FIXED
+plan-431 specced the synthetic track id as `-clipId`, but `clip_id` is epoch-ms
+(~1.8e12) and `TrackSchema.id` is an **Int** — that overflows. Used a
+session-monotonic negative counter instead; the real clipId still rides in the
+mediaId as `djclip:<id>`.
+
+## Constraints honored
+Live :8100 verified HTTP 200 before AND after all work — never touched. Harness picks
+a free port and hard-refuses 8100. The harness writes an explicit jwt_secret into its
+temp config because `get_settings()` PERSISTS a generated one and the live
+`server/config.yaml` is a candidate path.
+
+## BLOCKER — Radio Free Luna push (needs a human)
+The 3-line README pointer is committed locally (d3e76fb) but **NOT pushed**: RFL was
+already **ahead 8, behind 3** before I touched it, and README.md diverges upstream.
+Reconciling 8 commits I didn't write is not this assignment. Someone who knows that
+repo's state should pull/rebase and push. Audiplex itself is fully pushed.
+
+## Remaining (not code)
+Todd's on-device gate — now narrowed to "does Media3 physically move audio", since the
+plumbing is machine-verified. Checklist updated at
+`Q:\Pantheon\notes\2026-07-14-audiplex-dj-test-checklist.md` with the announce leg.
+For voice breaks on-device, `DJ_TTS_URL` must be set in the audiplex-dj MCP env.
+
+## Environment gotchas (cost real time)
+1. Bare `python` in a Pantheon worker shell = `Q:\Pantheon\.venv-omnivoice`, which
+   LACKS passlib. Audiplex needs **C:\Python311\python.exe** (what launch.bat uses).
+2. `get_settings()` persists a generated jwt_secret to config.yaml — see above.
+3. Reading pantheon.db suggestions needs UTF-8 stdout wrapping (cp1252 chokes on ↔).
+4. Windows Python can't open Git-Bash `/q/...` paths — use `Q:\...`.
+5. Recursive grep over all of `Q:\Pantheon` times out (>120s); scope it.
