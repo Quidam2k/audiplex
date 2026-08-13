@@ -17,15 +17,26 @@ Config via environment:
                   tts_backend.py for the full TTS config surface. Only
                   dj_announce needs it; the other tools work without it.
 
-Tools: dj_play_now, dj_skip, dj_queue, dj_play_next, dj_reorder,
-dj_queue_by, dj_now_playing, dj_pause, dj_resume, dj_previous, dj_seek,
-dj_volume, dj_play_stream, dj_break_brief, dj_announce. The last two are the
-DJ-persona lane (item #431): dj_break_brief hands the agent a dayparted
-brief, the agent writes the copy, dj_announce synthesizes and queues it as a
-voice break. The agent can pass explicit track IDs (resolved
-via the catalog REST API) or let dj_queue_by resolve an artist/album/genre/
-playlist/favorites NAME to tracks MCP-side (there is no dedicated /search
-endpoint). Playlist and favorites resolution go through /api/playback/
+Tools: dj_library, dj_tracks, dj_search, dj_play_now, dj_skip, dj_queue,
+dj_play_next, dj_reorder, dj_queue_by, dj_now_playing, dj_pause, dj_resume,
+dj_previous, dj_seek, dj_volume, dj_play_stream, dj_break_brief, dj_announce.
+
+dj_library/dj_tracks/dj_search are the catalog-browse lane (item #2943): they
+let the agent survey the library and pick tracks UNPROMPTED instead of only
+taking requests. They matter more than they look, because the live library is
+a flat yt-dlp dump with no embedded tags — every track scanned into one album
+under a nameless artist with no genres — so the artist/album/genre axes are
+degenerate and only the track TITLES carry real information. dj_library says
+so explicitly rather than letting an agent conclude the library is empty.
+Browse is resolved MCP-side over the existing library-global catalog REST
+(/api/music/folders, /folders/tracks, /artists, /albums, /genres, /roots);
+there is still no server-side /search endpoint and none was added.
+
+dj_break_brief and dj_announce are the DJ-persona lane (item #431):
+dj_break_brief hands the agent a dayparted brief, the agent writes the copy,
+dj_announce synthesizes and queues it as a voice break. The agent can pass
+explicit track IDs or let dj_queue_by resolve an artist/album/genre/folder/
+playlist/favorites NAME to tracks MCP-side. Playlist and favorites resolution go through /api/playback/
 (owner-resolved reads), NOT /api/music/ — the latter is scoped to the
 caller and dj-agent has none. dj_play_stream routes an external HTTP audio
 stream (e.g. Radio Free Luna's /stream.mp3) to the device — see the
@@ -35,6 +46,7 @@ safe to extend to other stream-carrying commands.
 
 import datetime
 import os
+import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -413,10 +425,12 @@ async def dj_queue_by(
 
     query: the name to match (case-insensitive: exact > prefix > substring).
            Ignored for kind='favorites' (there's exactly one favorites list).
-    kind:  'artist' | 'album' | 'genre' | 'playlist' | 'favorites'.
-           playlist/favorites resolve against the configured DJ owner's
-           library (dj_owner_username), not the caller's own — the dj-agent
-           service account has none of its own.
+    kind:  'artist' | 'album' | 'genre' | 'folder' | 'playlist' | 'favorites'.
+           For 'folder', query is a folder PATH as returned by dj_library —
+           this is the one that works on an untagged library, where the
+           artist/genre axes are empty. playlist/favorites resolve against the
+           configured DJ owner's library (dj_owner_username), not the caller's
+           own — the dj-agent service account has none of its own.
     mode:  'now' (replace current & play), 'queue' (append to end, default),
            'next' (insert after the current track).
     limit: max tracks to enqueue (default 100).
@@ -459,13 +473,19 @@ async def dj_queue_by(
             label = f"playlist '{m['name']}'"
             detail = await _get(f"/api/playback/playlists/{m['id']}")
             tracks = detail.get("tracks", [])
+        elif kind == "folder":
+            tracks = await _get(f"/api/music/folders/tracks?path={quote(query, safe='')}")
+            label = f"folder '{query}'"
         elif kind == "favorites":
             favorites = await _get("/api/playback/favorites?entity_type=track")
             label = "favorite tracks"
             track_ids_str = [f["entity_key"] for f in favorites]
             tracks = [{"id": int(tid)} for tid in track_ids_str if tid.isdigit()]
         else:
-            return f"Unknown kind '{kind}'. Use 'artist', 'album', 'genre', 'playlist', or 'favorites'."
+            return (
+                f"Unknown kind '{kind}'. Use 'artist', 'album', 'genre', "
+                "'folder', 'playlist', or 'favorites'."
+            )
     except PermissionError as e:
         return str(e)
 
@@ -517,6 +537,353 @@ async def dj_now_playing() -> str:
             lines.append(
                 f"{marker}{item.get('index')}: {item.get('title')} - {item.get('artist')}"
             )
+    return "\n".join(lines)
+
+
+# --- Catalog browsing (item #2943) -----------------------------------------
+#
+# Why these are title-first rather than artist/album-first: the live library is
+# a flat yt-dlp dump. All 206 tracks scanned into ONE album ("music", q:/music)
+# under one artist whose name is the EMPTY STRING, with no genres at all — the
+# files carry no embedded tags. So /artists, /albums and /genres are degenerate
+# and a DJ browsing them alone learns nothing. The real metadata lives in the
+# track TITLE strings, which is why dj_tracks + dj_search carry the weight and
+# dj_library's job is partly to say "this axis is empty because the files are
+# untagged" instead of letting the agent conclude the library is empty.
+
+LONGFORM_SECONDS = 15 * 60
+
+# yt-dlp leaves the encoding tag and the "official video" family in filenames.
+# Stripped for DISPLAY ONLY — track IDs and the server's stored titles are
+# untouched, so anything shown here can be passed straight back as an ID.
+_CRUFT = re.compile(
+    r"""\s*(?:
+        \(\s*\d+\s*kbit_[A-Za-z0-9]+\s*\)      # (128kbit_AAC), (152kbit_Opus)
+      | [\(\[]\s*(?:official\s+)?
+          (?:music\s+video|lyric\s+video|lyrics?\s+video|video|audio|
+             visuali[sz]er|hd\s+video)
+        \s*[\)\]]
+      | [\(\[]\s*official\s*[\)\]]
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _clean_title(title: str) -> str:
+    """Strip yt-dlp noise for readability. Cosmetic only."""
+    cleaned = _CRUFT.sub("", title or "")
+    return re.sub(r"\s{2,}", " ", cleaned).strip(" -–—") or (title or "")
+
+
+def _fmt_duration(seconds) -> str:
+    if not isinstance(seconds, (int, float)) or seconds <= 0:
+        return "?:??"
+    total = int(seconds)
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _is_longform(track: dict) -> bool:
+    dur = track.get("duration_seconds")
+    return isinstance(dur, (int, float)) and dur >= LONGFORM_SECONDS
+
+
+def _track_line(track: dict) -> str:
+    """`id | title | m:ss` (+ artist when known, + LONG-FORM warning)."""
+    artist = (track.get("artist_name") or "").strip()
+    title = _clean_title(track.get("title") or "(untitled)")
+    label = f"{artist} - {title}" if artist else title
+    flag = "  [LONG-FORM — not a song, do not put in a music set]" if _is_longform(track) else ""
+    return f"{track.get('id')} | {label} | {_fmt_duration(track.get('duration_seconds'))}{flag}"
+
+
+async def _all_music_tracks() -> list[dict]:
+    """Every track under every music root, de-duplicated by id."""
+    listing = await _get("/api/music/folders")
+    seen: dict[int, dict] = {}
+    for folder in listing.get("folders") or []:
+        path = folder.get("path")
+        if not path:
+            continue
+        for t in await _get(f"/api/music/folders/tracks?path={quote(path, safe='')}"):
+            seen[t["id"]] = t
+    return list(seen.values())
+
+
+@mcp.tool()
+async def dj_library(kind: str = "overview", path: str | None = None) -> str:
+    """Survey what's actually IN the library, so you can pick music yourself
+    instead of waiting to be told what to play. Read-only; queues nothing.
+
+    kind: 'overview'  (default) — one-shot orientation: music folders with
+                       track counts, plus how much each browse axis is worth.
+          'folders'   — browse the folder tree; pass `path` to descend.
+          'artists' | 'albums' | 'genres' | 'playlists' — list that axis.
+
+    START HERE, then use dj_search / dj_tracks to get the track IDs you feed to
+    dj_play_now / dj_queue / dj_play_next.
+    """
+    try:
+        if kind == "overview":
+            roots, artists, albums, genres = (
+                await _get("/api/music/roots"),
+                await _get("/api/music/artists"),
+                await _get("/api/music/albums"),
+                await _get("/api/music/genres"),
+            )
+            try:
+                playlists = await _get("/api/playback/playlists")
+            except httpx.HTTPError:
+                playlists = []
+            listing = await _get("/api/music/folders")
+            folders = listing.get("folders") or []
+            total = sum(f.get("track_count", 0) for f in folders)
+
+            lines = [f"MUSIC LIBRARY — {total} track(s) across {len(folders)} folder(s)."]
+            for f in folders:
+                lines.append(
+                    f"  {f.get('name')}  ({f.get('track_count')} tracks, "
+                    f"{f.get('album_count')} album(s))  path={f.get('path')}"
+                )
+            missing = [r["path"] for r in roots.get("roots", []) if not r.get("exists")]
+            if missing:
+                lines.append(f"  (configured but not on disk right now: {', '.join(missing)})")
+
+            named_artists = [a for a in artists if (a.get("name") or "").strip()]
+            tagged_albums = [a for a in albums if (a.get("artist_name") or "").strip()]
+            lines += [
+                "",
+                "Browse axes:",
+                f"  artists:   {len(artists)} ({len(named_artists)} actually named)",
+                f"  albums:    {len(albums)} ({len(tagged_albums)} with an artist tag)",
+                f"  genres:    {len(genres)}",
+                f"  playlists: {len(playlists)}"
+                + (
+                    "  -> " + ", ".join(
+                        f"{p.get('name')} ({p.get('track_count', 0)} tracks)" for p in playlists
+                    )
+                    if playlists
+                    else ""
+                ),
+            ]
+            if len(named_artists) < len(artists) or not genres or not tagged_albums:
+                lines += [
+                    "",
+                    "NOTE: the artist/album/genre axes are mostly EMPTY because these files "
+                    "carry no embedded tags (a flat yt-dlp dump) — NOT because the library is "
+                    "empty. There are real tracks here; the artist and song names live in the "
+                    "TRACK TITLES. Use dj_search('<artist or song>') or dj_tracks(folder=...) "
+                    "to see them, and don't rely on dj_queue_by(kind='artist'/'genre').",
+                ]
+            if not playlists or all(p.get("track_count", 0) == 0 for p in playlists):
+                lines.append(
+                    "NOTE: no non-empty playlists and no favorites exist yet, so "
+                    "dj_queue_by(kind='playlist'/'favorites') has nothing to resolve."
+                )
+            lines += ["", "Next: dj_tracks(folder=...) to page the list, or dj_search('...') to find something."]
+            return "\n".join(lines)
+
+        if kind == "folders":
+            listing = await _get(
+                "/api/music/folders" + (f"?path={quote(path, safe='')}" if path else "")
+            )
+            lines = [f"Folder: {listing.get('path') or '(music roots)'}"]
+            if listing.get("parent"):
+                lines.append(f"Parent: {listing['parent']}")
+            for f in listing.get("folders") or []:
+                lines.append(
+                    f"  [dir] {f.get('name')}  ({f.get('track_count')} tracks)  "
+                    f"path={f.get('path')}"
+                )
+            for a in listing.get("albums") or []:
+                lines.append(
+                    f"  [album] {a.get('title')}  ({a.get('track_count')} tracks)  "
+                    f"id={a.get('id')}"
+                )
+            if len(lines) == 1:
+                lines.append("  (nothing here)")
+            lines.append("Use dj_tracks(folder='<path>') to list the tracks.")
+            return "\n".join(lines)
+
+        if kind == "artists":
+            artists = await _get("/api/music/artists")
+            if not artists:
+                return "No artists. Try dj_tracks/dj_search — the files may be untagged."
+            lines = [f"{len(artists)} artist(s):"]
+            for a in artists:
+                name = (a.get("name") or "").strip()
+                lines.append(
+                    f"  {a.get('id')} | {name}" if name
+                    else f"  {a.get('id')} | (NO NAME — untagged files; use dj_search instead)"
+                )
+            return "\n".join(lines)
+
+        if kind == "albums":
+            albums = await _get("/api/music/albums")
+            if not albums:
+                return "No albums in the library."
+            lines = [f"{len(albums)} album(s):"]
+            for a in albums:
+                artist = (a.get("artist_name") or "").strip() or "unknown artist"
+                lines.append(
+                    f"  {a.get('id')} | {a.get('title')} — {artist} "
+                    f"({a.get('track_count')} tracks)"
+                )
+            return "\n".join(lines)
+
+        if kind == "genres":
+            genres = await _get("/api/music/genres")
+            if not genres:
+                return (
+                    "No genres — these files carry no genre tags. This does NOT mean the "
+                    "library is empty; use dj_library() or dj_search() instead."
+                )
+            return f"{len(genres)} genre(s):\n" + "\n".join(
+                f"  {g.get('name')} ({g.get('track_count', '?')} tracks)" for g in genres
+            )
+
+        if kind == "playlists":
+            playlists = await _get("/api/playback/playlists")
+            if not playlists:
+                return "No playlists in the owner's library."
+            return f"{len(playlists)} playlist(s):\n" + "\n".join(
+                f"  {p.get('id')} | {p.get('name')} ({p.get('track_count', 0)} tracks)"
+                for p in playlists
+            )
+
+        return (
+            f"Unknown kind '{kind}'. Use 'overview', 'folders', 'artists', "
+            "'albums', 'genres', or 'playlists'."
+        )
+    except PermissionError as e:
+        return str(e)
+
+
+@mcp.tool()
+async def dj_tracks(
+    folder: str | None = None,
+    album: str | None = None,
+    artist: str | None = None,
+    playlist: str | None = None,
+    offset: int = 0,
+    limit: int = 50,
+) -> str:
+    """List actual tracks with their IDs, so you can choose what to play.
+
+    Give exactly one of folder (path from dj_library), album, artist or
+    playlist (names, matched loosely) — or none, to page the whole library.
+    Paged via offset/limit; the footer tells you how to get the next page.
+
+    Each line is `id | title | length`. Long items (podcasts, hours-long focus
+    loops) are flagged LONG-FORM — never drop those into a music set.
+    """
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    try:
+        if folder:
+            tracks = await _get(f"/api/music/folders/tracks?path={quote(folder, safe='')}")
+            label = f"folder '{folder}'"
+        elif album:
+            albums = await _get("/api/music/albums")
+            m = _best_match(albums, "title", album)
+            if not m:
+                return f"No album matching '{album}'."
+            tracks = (await _get(f"/api/music/albums/{m['id']}")).get("tracks", [])
+            label = f"album '{m['title']}'"
+        elif artist:
+            artists = await _get("/api/music/artists")
+            m = _best_match(artists, "name", artist)
+            if not m:
+                return f"No artist matching '{artist}'. These files are largely untagged — try dj_search('{artist}')."
+            tracks = await _get(f"/api/music/artists/{m['id']}/tracks")
+            label = f"artist '{m['name'] or '(unnamed)'}'"
+        elif playlist:
+            playlists = await _get("/api/playback/playlists")
+            m = _best_match(playlists, "name", playlist)
+            if not m:
+                return f"No playlist matching '{playlist}'."
+            tracks = (await _get(f"/api/playback/playlists/{m['id']}")).get("tracks", [])
+            label = f"playlist '{m['name']}'"
+        else:
+            tracks = await _all_music_tracks()
+            label = "the whole music library"
+    except PermissionError as e:
+        return str(e)
+
+    if not tracks:
+        return f"{label} has no tracks."
+
+    page = tracks[offset : offset + limit]
+    if not page:
+        return f"{label} has {len(tracks)} track(s); offset {offset} is past the end."
+
+    shown_end = offset + len(page)
+    lines = [f"{label} — {len(tracks)} track(s), showing {offset + 1}-{shown_end}:"]
+    lines += [f"  {_track_line(t)}" for t in page]
+    long_here = sum(1 for t in page if _is_longform(t))
+    if long_here:
+        lines.append(f"({long_here} flagged LONG-FORM above — keep them out of music sets.)")
+    if shown_end < len(tracks):
+        lines.append(f"More: repeat with offset={shown_end}.")
+    lines.append("Pass any of these IDs to dj_play_now / dj_queue / dj_play_next.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def dj_search(query: str, limit: int = 30, include_longform: bool = False) -> str:
+    """Find tracks by name — the fastest way to turn an idea into track IDs.
+
+    Matches every whitespace-separated term in `query` against the track title
+    and artist (case-insensitive, in any order), so 'ashnikko daisy' works.
+    Exact and prefix matches sort first.
+
+    include_longform: False by default, which hides hours-long podcasts and
+    focus loops so a music search returns music. Set True to find those on
+    purpose (it reports how many it hid).
+    """
+    q = (query or "").strip()
+    if not q:
+        return "Give a search query — e.g. dj_search('ashnikko')."
+    terms = q.lower().split()
+    try:
+        tracks = await _all_music_tracks()
+    except PermissionError as e:
+        return str(e)
+
+    def haystack(t: dict) -> str:
+        return f"{t.get('title') or ''} {t.get('artist_name') or ''}".lower()
+
+    matches = [t for t in tracks if all(term in haystack(t) for term in terms)]
+    hidden = 0
+    if not include_longform:
+        kept = [t for t in matches if not _is_longform(t)]
+        hidden = len(matches) - len(kept)
+        matches = kept
+
+    if not matches:
+        msg = f"No tracks matching '{q}'."
+        if hidden:
+            msg += f" ({hidden} long-form item(s) matched but were hidden — retry with include_longform=True.)"
+        else:
+            msg += " Try fewer or different words, or dj_library() to see what's there."
+        return msg
+
+    ql = q.lower()
+    matches.sort(
+        key=lambda t: (
+            0 if _clean_title(t.get("title") or "").lower() == ql
+            else 1 if haystack(t).strip().startswith(ql)
+            else 2,
+            (t.get("title") or "").lower(),
+        )
+    )
+    page = matches[: max(1, limit)]
+    lines = [f"{len(matches)} match(es) for '{q}'" + (f", showing {len(page)}" if len(page) < len(matches) else "") + ":"]
+    lines += [f"  {_track_line(t)}" for t in page]
+    if hidden:
+        lines.append(f"({hidden} long-form item(s) hidden — include_longform=True to see them.)")
+    lines.append("Pass these IDs to dj_play_now / dj_queue / dj_play_next.")
     return "\n".join(lines)
 
 
