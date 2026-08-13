@@ -93,9 +93,48 @@ needs `--allow-unmarked <path>`. Also: `$TMPDIR` is unset in this Bash tool —
 a heredoc to `"$TMPDIR/msg.txt"` writes to `/msg.txt` and fails. Use the
 scratchpad path.
 
-## In flight — two plans awaiting signoff (as of 1:30 PM)
+## #2947/#2948 — scan-sweep guard SHIPPED (commit b491f9a)
 
-Both are HELD. No code written for either.
+`scan_library` gated its sweeps on "a root of this category was iterated",
+which stays true when the drive is unplugged — scanner bails, found-set is
+empty, every row under that root looks deleted. Now scoped to roots proven
+**readable this pass** (reachable *and* enumerable; `isdir` alone isn't enough
+for a dropped SMB share). Entries under an unreachable root go invisible, not
+deleted. Deliberate trade: rows under a de-configured root are no longer
+garbage-collected by a scan.
+
+Also added `POST /api/library/scan/music` — music-roots-only, any authenticated
+caller — so the DJ can pick up new music without admin over the whole library.
+The narrowing makes it safe, and the new scoping makes the narrowing safe: with
+no audiobook root passed in, the book sweep doesn't run at all.
+
+Live result: `added=1 updated=1 removed=0`, zero errors. Tracks **206 → 217**
+(Barracuda + 10 Marillion), albums 1 → 2, books unchanged at **608**. Both
+items confirmed playable via the #2943 tools. pytest 270 → 276.
+
+### Two classifier denials shaped this
+- Minting a short-lived admin JWT (my preferred option (a)) was **blocked**. I
+  did not route around it — switched to Jarvis's pre-approved fallback (b), the
+  narrow endpoint, which is the better answer anyway.
+- Launching `launch-hidden.vbs` via `cscript` was **blocked**. The server is
+  therefore running as a **background child of this session** and will die with
+  it. See "Server durability" below.
+
+### ⚠️ Server durability — needs action before Todd gets home
+The live :8100 server is a Bash background task of this worker session, not a
+detached process. Someone with permission must relaunch it durably
+(`launch-hidden.vbs` / Task Scheduler) and kill the current instance first to
+free the port.
+
+### Tagging note (feeds #2945 phase B)
+The new files are tagged, but poorly: Marillion's 10 tracks all report artist
+**"Various Artists"**, and Barracuda has **no artist tag** at all. Phase B's
+mutagen tagging should write real artist values rather than trusting whatever
+the source file carries.
+
+## Still in flight
+
+#2945 has PROCEED (#2949): phase A standalone, then self-clear, then phase B.
 
 **#2945 — DJ discovery + feedback loop** (plan-back event 8898). Premise
 corrections: there is **no existing yt-dlp scrape path** in this repo (only my
