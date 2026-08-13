@@ -1,6 +1,7 @@
 """Library scanner — walks directories, extracts metadata, upserts to DB."""
 
 import logging
+import os
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -175,6 +176,39 @@ def _normalize_roots(library_roots) -> list[LibraryRoot]:
     return normalized
 
 
+def _root_is_readable(path: str) -> bool:
+    """True only if the root is BOTH reachable and enumerable (#842).
+
+    os.path.isdir alone is not enough: an unplugged drive letter or a
+    disconnected SMB share can resolve far enough to look like a directory and
+    then raise on the first read. We only ever sweep entries under a root that
+    actually listed, so we must prove the listing works, not just that the path
+    exists. An empty-but-readable directory is legitimately readable.
+    """
+    try:
+        if not os.path.isdir(path):
+            return False
+        with os.scandir(path) as it:
+            next(it, None)
+        return True
+    except OSError:
+        return False
+
+
+def _normcase(path: str) -> str:
+    return os.path.normcase(os.path.normpath(path))
+
+
+def _under_any(path: str, roots: list[str]) -> bool:
+    """Is `path` inside one of `roots`? Case/separator-insensitive."""
+    target = _normcase(path)
+    for root in roots:
+        r = _normcase(root)
+        if target == r or target.startswith(r + os.sep):
+            return True
+    return False
+
+
 def scan_library(db: Session, library_roots, cover_cache_dir: str) -> ScanResultSchema:
     """Scan all library roots and update the database.
 
@@ -182,6 +216,17 @@ def scan_library(db: Session, library_roots, cover_cache_dir: str) -> ScanResult
     unions the found-path sets across roots before sweeping books whose
     files no longer exist anywhere — otherwise one root's scan would
     delete the other root's books.
+
+    #842 — the sweeps are scoped to roots that were READABLE this pass, not
+    merely configured. Previously the guard was "a root of this category was
+    iterated", which is true even when the scanner bailed out because the drive
+    was missing: the found-set then comes back empty and every row under that
+    root looks deleted. That is the 598-audiobook hazard. An entry is now only
+    ever swept if it lives under a root we successfully enumerated this pass,
+    so an unplugged drive or a dropped share makes its entries INVISIBLE, not
+    deleted, and they return when the root does. The trade — deliberate — is
+    that rows under a root removed from config are no longer garbage-collected
+    by a scan; they have to be removed on purpose.
     """
     roots = _normalize_roots(library_roots)
     added = 0
@@ -189,31 +234,42 @@ def scan_library(db: Session, library_roots, cover_cache_dir: str) -> ScanResult
     errors: list[str] = []
     book_found_paths: set[str] = set()
     album_found_paths: set[str] = set()
-    has_music_root = False
-    has_audiobook_root = False
+    # Roots proven readable THIS pass — the only ones whose entries may be
+    # swept. Empty list => that family's sweep is skipped entirely.
+    readable_book_roots: list[str] = []
+    readable_album_roots: list[str] = []
 
     for root in roots:
+        if not _root_is_readable(root.path):
+            msg = (
+                f"Library root unreadable, skipping (its existing entries are "
+                f"left untouched): {root.path}"
+            )
+            errors.append(msg)
+            logger.warning("%s", msg)
+            continue
+
         if root.category == "audiobook_clean":
             partial, partial_paths = _scan_libation(db, root.path, cover_cache_dir)
             book_found_paths |= partial_paths
-            has_audiobook_root = True
+            readable_book_roots.append(root.path)
         elif root.category == "audiobook_misc":
             from audiplex.scanners.audiobook_misc import scan_misc
             partial, partial_paths = scan_misc(db, root.path, cover_cache_dir)
             book_found_paths |= partial_paths
-            has_audiobook_root = True
+            readable_book_roots.append(root.path)
         elif root.category == "meditation":
             # #839 — meditations are Book rows like the audiobook scanners, so
             # they feed the same found-paths sweep.
             from audiplex.scanners.meditation import scan_meditation
             partial, partial_paths = scan_meditation(db, root.path, cover_cache_dir)
             book_found_paths |= partial_paths
-            has_audiobook_root = True
+            readable_book_roots.append(root.path)
         elif root.category == "music":
             from audiplex.scanners.music import scan_music
             partial, partial_paths = scan_music(db, root.path, cover_cache_dir)
             album_found_paths |= partial_paths
-            has_music_root = True
+            readable_album_roots.append(root.path)
         else:
             errors.append(f"Unknown category: {root.category}")
             continue
@@ -224,16 +280,19 @@ def scan_library(db: Session, library_roots, cover_cache_dir: str) -> ScanResult
 
     removed = 0
 
-    # Sweep books no longer present in any audiobook root. Only when at
-    # least one audiobook root was scanned — otherwise (e.g. a music-only
-    # or misconfigured scan) we'd delete the entire audiobook library, the
-    # same rationale as the has_music_root guard on the album sweep below.
-    if has_audiobook_root:
+    # Sweep books no longer present in any audiobook root that we could
+    # actually read this pass (#842). A book under an unreadable — or no
+    # longer configured — root is left alone: absence of evidence that the
+    # file is gone is not evidence of deletion.
+    if readable_book_roots:
         try:
             for book in db.query(Book).all():
-                if book.file_path not in book_found_paths:
-                    db.delete(book)
-                    removed += 1
+                if book.file_path in book_found_paths:
+                    continue
+                if not _under_any(book.file_path, readable_book_roots):
+                    continue
+                db.delete(book)
+                removed += 1
         except Exception as e:
             errors.append(f"Error sweeping removed books: {e}")
             logger.error("Error sweeping removed books", exc_info=True)
@@ -267,15 +326,17 @@ def scan_library(db: Session, library_roots, cover_cache_dir: str) -> ScanResult
         errors.append(f"Error re-parsing series: {e}")
         logger.error("Error re-parsing series", exc_info=True)
 
-    # Sweep albums (and cascade tracks) no longer on disk. Only when at
-    # least one music root was scanned — otherwise we'd nuke the whole
-    # music library on an audiobook-only scan.
-    if has_music_root:
+    # Sweep albums (and cascade tracks) no longer on disk, scoped the same
+    # way (#842): only under music roots we successfully enumerated.
+    if readable_album_roots:
         try:
             for album in db.query(Album).all():
-                if album.folder_path not in album_found_paths:
-                    db.delete(album)
-                    removed += 1
+                if album.folder_path in album_found_paths:
+                    continue
+                if not _under_any(album.folder_path, readable_album_roots):
+                    continue
+                db.delete(album)
+                removed += 1
         except Exception as e:
             errors.append(f"Error sweeping removed albums: {e}")
             logger.error("Error sweeping removed albums", exc_info=True)

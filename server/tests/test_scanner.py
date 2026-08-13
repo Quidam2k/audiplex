@@ -131,10 +131,16 @@ class TestScanLibrary:
         assert db_session.query(Book).count() == 0
 
     def test_scan_nonexistent_path(self, db_session, tmp_path):
-        """Nonexistent library path produces an error, not a crash."""
+        """Nonexistent library path produces an error, not a crash.
+
+        #842 changed the wording: the root is now rejected by the readability
+        gate before dispatch, so it reports "unreadable, skipping" rather than
+        the scanner's own "does not exist". Same contract — one error, no crash.
+        """
         result = scan_library(db_session, [str(tmp_path / "nope")], str(tmp_path / "covers"))
         assert len(result.errors) == 1
-        assert "does not exist" in result.errors[0]
+        assert "unreadable" in result.errors[0].lower()
+        assert "nope" in result.errors[0]
 
     def test_music_only_scan_preserves_audiobooks(self, db_session, sample_book, music_root_layout):
         """A music-only (or misconfigured) scan must not sweep Book rows —
@@ -246,3 +252,116 @@ class TestScanLibrary:
         db_session.refresh(book)
         assert book.series == "The Expanse"
         assert book.series_sequence == "2"
+
+
+class TestUnreadableRootGuard:
+    """#842 — an unreadable root must never trigger a sweep of its entries.
+
+    The old guard was "a root of this category was iterated", which is still
+    true when the drive is unplugged: the scanner bails out, the found-set
+    comes back empty, and every row under that root looks deleted. That is the
+    598-audiobook hazard.
+    """
+
+    def _scan(self, db_session, roots, cover_dir):
+        with (
+            patch("audiplex.scanner.extract_metadata") as mock_meta,
+            patch("audiplex.scanner.compute_file_hash", return_value="hash1"),
+            patch("audiplex.scanner.extract_cover_art"),
+        ):
+            mock_meta.return_value = _make_fake_metadata()
+            return scan_library(db_session, roots, cover_dir)
+
+    def test_helpers_reject_missing_root(self, tmp_path):
+        from audiplex.scanner import _root_is_readable, _under_any
+
+        assert _root_is_readable(str(tmp_path)) is True
+        assert _root_is_readable(str(tmp_path / "nope")) is False
+        # A file is not an enumerable root.
+        f = tmp_path / "f.txt"
+        f.write_text("x")
+        assert _root_is_readable(str(f)) is False
+
+        root = str(tmp_path)
+        assert _under_any(str(tmp_path / "a" / "b.m4b"), [root]) is True
+        assert _under_any(root, [root]) is True
+        assert _under_any("/somewhere/else.m4b", [root]) is False
+        # A sibling that merely shares a name prefix is NOT under the root.
+        assert _under_any(str(tmp_path) + "_other/x.m4b", [root]) is False
+
+    def test_vanished_root_preserves_its_books(self, db_session, tmp_path):
+        """The core hazard: root disappears, entries must survive."""
+        lib = tmp_path / "lib"
+        lib.mkdir()
+        (lib / "book.m4b").write_bytes(b"fake")
+        covers = str(tmp_path / "covers")
+
+        self._scan(db_session, [str(lib)], covers)
+        assert db_session.query(Book).count() == 1
+
+        # Whole root goes away (drive unplugged / share dropped).
+        (lib / "book.m4b").unlink()
+        lib.rmdir()
+
+        result = self._scan(db_session, [str(lib)], covers)
+
+        assert result.removed == 0, "unreadable root must not sweep"
+        assert db_session.query(Book).count() == 1, "book must survive"
+        assert any("unreadable" in e.lower() for e in result.errors)
+
+    def test_readable_root_still_sweeps_while_unreadable_one_is_spared(
+        self, db_session, tmp_path
+    ):
+        """The guard must not become a blanket amnesty: a live root still
+        garbage-collects its own deletions."""
+        alive = tmp_path / "alive"
+        dead = tmp_path / "dead"
+        alive.mkdir()
+        dead.mkdir()
+        (alive / "a.m4b").write_bytes(b"fake")
+        (dead / "d.m4b").write_bytes(b"fake")
+        covers = str(tmp_path / "covers")
+
+        self._scan(db_session, [str(alive), str(dead)], covers)
+        assert db_session.query(Book).count() == 2
+
+        # alive loses its file (a real deletion); dead loses its whole root.
+        (alive / "a.m4b").unlink()
+        (dead / "d.m4b").unlink()
+        dead.rmdir()
+
+        result = self._scan(db_session, [str(alive), str(dead)], covers)
+
+        assert result.removed == 1, "the live root's own deletion is still swept"
+        surviving = db_session.query(Book).all()
+        assert len(surviving) == 1
+        assert "dead" in surviving[0].file_path, "entry under the dead root survived"
+
+
+class TestUnreadableMusicRootGuard:
+    def test_vanished_music_root_preserves_albums(self, db_session, tmp_path):
+        """Same guard, album side — this is the shape that threatened q:/music
+        while E:/Stacked Deck/Music was configured but absent."""
+        from audiplex.models import Album
+
+        music = tmp_path / "music"
+        music.mkdir()
+        (music / "song.m4a").write_bytes(b"fake")
+        covers = str(tmp_path / "covers")
+        roots = [LibraryRoot(path=str(music), category="music")]
+
+        audio = MagicMock()
+        audio.info.length = 300.0
+        audio.get.side_effect = lambda key, default=None: default
+        audio.__contains__ = lambda self, key: False
+
+        with patch("audiplex.scanners.music.mutagen.File", return_value=audio):
+            scan_library(db_session, roots, covers)
+            assert db_session.query(Album).count() == 1
+
+            (music / "song.m4a").unlink()
+            music.rmdir()
+            result = scan_library(db_session, roots, covers)
+
+        assert result.removed == 0
+        assert db_session.query(Album).count() == 1, "album survived a vanished root"

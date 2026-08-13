@@ -104,6 +104,32 @@ def trigger_scan(db: Session = Depends(get_db), user: User = Depends(get_admin_u
     return scan_library(db, settings.library_roots, settings.cover_cache_dir)
 
 
+@router.post("/scan/music", response_model=ScanResultSchema)
+def trigger_music_scan(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Rescan ONLY the music roots. Any authenticated caller, not just admins.
+
+    Exists so the DJ service account can pick up newly-added music without
+    being handed admin over the whole library (#2947, and the ingest loop in
+    #2945 needs it after every approved download). The narrowing is what makes
+    that safe: audiobook and meditation roots are never passed in, so no Book
+    row is even considered — and since the #842 sweep only touches families
+    whose roots were read this pass, an empty audiobook root list means the
+    book sweep is skipped outright rather than seeing an empty found-set and
+    deleting everything.
+    """
+    settings = get_settings()
+    music_roots = [
+        r for r in settings.library_roots
+        if getattr(r, "category", None) == "music"
+    ]
+    if not music_roots:
+        return ScanResultSchema(
+            added=0, updated=0, removed=0,
+            errors=["No music roots are configured."],
+        )
+    return scan_library(db, music_roots, settings.cover_cache_dir)
+
+
 class EnrichResultSchema(BaseModel):
     checked: int
     enriched: int

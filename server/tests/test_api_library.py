@@ -203,3 +203,27 @@ class TestSeries:
         data = resp.json()
         assert len(data) == 1
         assert data[0]["name"] == "Lectures"
+
+
+class TestMusicOnlyScan:
+    """#2947 — the narrow rescan the DJ service account may fire itself."""
+
+    def test_music_scan_returns_scan_result(self, client):
+        r = client.post("/api/library/scan/music")
+        assert r.status_code == 200
+        assert {"added", "updated", "removed", "errors"} <= set(r.json())
+
+    def test_music_scan_never_sweeps_books(self, client, db_engine, sample_book):
+        """The point of narrowing: a music rescan must not consider Book rows,
+        even though their files sit outside every music root. Guaranteed by the
+        #842 scoping — no audiobook root is read, so that sweep never runs."""
+        from sqlalchemy.orm import sessionmaker
+        from audiplex.models import Book
+
+        before = sessionmaker(bind=db_engine)().query(Book).count()
+        assert before >= 1
+
+        r = client.post("/api/library/scan/music")
+        assert r.status_code == 200
+        assert r.json()["removed"] == 0
+        assert sessionmaker(bind=db_engine)().query(Book).count() == before
