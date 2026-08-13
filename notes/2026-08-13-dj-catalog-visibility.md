@@ -145,9 +145,54 @@ The new files are tagged, but poorly: Marillion's 10 tracks all report artist
 mutagen tagging should write real artist values rather than trusting whatever
 the source file carries.
 
+## #2945 phase A — discovery + taste loop SHIPPED (commit 720e867)
+
+`audiplex_mcp/server.py` only — 18 tools became 21. No server change, no
+`:8100` restart, Todd's app untouched. Jarvis needs an MCP reconnect to see them.
+
+- `dj_recommend(title, artist, why, set_context)` — logs a proposal for a track
+  the library does NOT have, auto-capturing what was playing at the time.
+  Queues and downloads nothing; returns a short rec id to say out loud.
+- `dj_rate(rec_id, verdict, note)` — `rec_id` **defaults to the most recent
+  unrated rec**, because the real flow is Todd reacting to what was just
+  suggested without quoting a number. Dictated phrasings are normalized, and
+  anything not clearly positive lands as `meh` — a lukewarm reaction must not
+  be banked as a win.
+- `dj_taste(limit)` — reads the signal back before the next pick.
+
+### Design notes worth keeping
+**Why SQLite MCP-side, not a server table:** `play_stats.track_id` is a FK to
+`tracks` and a rec by definition has no track row yet; `Favorite` is binary
+with no room for a verdict or set context. MCP-side also means no migration and
+no restart mid-listening. Path is `DJ_TASTE_DB`, default `data/dj/taste.db`,
+now gitignored — it's Todd's personal taste data, not repo content.
+
+**The empty-play-history trap.** `/api/music/most-played` and `/likely-skips`
+are scoped to the CALLING user, and the DJ calls as `dj-agent`, which has never
+played anything — verified live, both return `[]`. Todd's plays sit under his
+own account and are NOT readable through the DJ token (there is no
+owner-resolved variant under `/api/playback/` the way there is for playlists
+and favorites). `dj_taste` therefore says this in words; a silent `[]` would
+read as "Todd dislikes everything" when it means "invisible from here". If that
+signal is ever actually wanted, it needs an owner-resolved endpoint — a server
+change, so it belongs in phase C, not a workaround here.
+
+**Bug caught in test:** re-rating without a note wiped the earlier note. A
+verdict correction must not destroy the reason he gave the first time — that
+note is the highest-signal column in the table. Fixed; `note` now only
+overwrites when a new one is supplied.
+
+### Verification (live `:8100`, nothing bounced, nothing queued to the device)
+21 tools register; cold and warm `dj_taste`; bare-id rating; re-rate preserves
+the note; unknown and absent rec ids; empty-title guard; verdict normalization
+across dictated phrasings; now-playing capture with cruft stripped; both
+degraded paths (nothing playing, and a 401) log the rec anyway rather than
+failing. `server` pytest **276 passed** — unchanged, as expected for an
+MCP-only change.
+
 ## Still in flight
 
-#2945 has PROCEED (#2949): phase A standalone, then self-clear, then phase B.
+#2945 has PROCEED (#2949): phase A **done**; phase B next in a fresh session.
 
 **#2945 — DJ discovery + feedback loop** (plan-back event 8898). Premise
 corrections: there is **no existing yt-dlp scrape path** in this repo (only my
