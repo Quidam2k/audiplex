@@ -126,6 +126,19 @@ detached process. Someone with permission must relaunch it durably
 (`launch-hidden.vbs` / Task Scheduler) and kill the current instance first to
 free the port.
 
+### Does anything seed config.yaml? (#2951 Q3) — no
+There is no `config.example.yaml`, template, or setup script, and
+`Settings.library_roots` defaults to an empty list, so nothing can re-add the
+dead E: root. It is hand-maintained: local edit + this note is sufficient, and
+there is nothing to commit (the file is gitignored).
+
+**Caveat worth knowing:** `config.py:set_library_roots_for_category` *does*
+rewrite `config.yaml` via `yaml.safe_dump` (reached from admin
+`PUT /api/music/roots`). A safe_dump round-trip drops comments, so the
+explanatory comment above the commented-out E: root will silently disappear if
+anyone ever edits music roots through that endpoint. The root itself stays
+gone — only the explanation is fragile, which is why it's recorded here too.
+
 ### Tagging note (feeds #2945 phase B)
 The new files are tagged, but poorly: Marillion's 10 tracks all report artist
 **"Various Artists"**, and Barracuda has **no artist tag** at all. Phase B's
