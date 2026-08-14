@@ -1,7 +1,5 @@
 """Tests for the DJ playback command bus + now-playing state endpoints."""
 
-import asyncio
-
 import pytest
 from fastapi import Depends
 
@@ -16,10 +14,7 @@ from audiplex.playback_bus import bus
 @pytest.fixture(autouse=True)
 def reset_bus():
     """The bus is a global singleton (single-device v1) — reset between tests."""
-    bus._queue = asyncio.Queue()
-    bus._seq = 0
-    bus._state = None
-    bus._state_updated_at = 0.0
+    bus.reset()
     yield
 
 
@@ -61,6 +56,88 @@ class TestPlaybackCommands:
         second = client.get("/api/playback/command/next").json()
         assert first["type"] == "a"
         assert second["type"] == "b"
+
+
+class TestDeviceLiveness:
+    """#2961: a dead player and an idle one used to look identical."""
+
+    def test_no_device_before_any_poll(self, client):
+        data = client.get("/api/playback/device").json()
+        assert data["connected"] is False
+        assert data["last_poll_at"] is None
+        assert data["ever_reported_state"] is False
+
+    def test_poll_marks_device_connected(self, client):
+        client.post("/api/playback/command", json={"type": "skip", "payload": {}})
+        client.get("/api/playback/command/next")
+
+        data = client.get("/api/playback/device").json()
+        assert data["connected"] is True
+        assert data["last_poll_age_seconds"] < 5
+        assert data["last_command_id"] == 1
+        assert data["last_command_type"] == "skip"
+        assert data["last_command_delivered_age_seconds"] < 5
+
+    def test_idle_device_is_connected_but_never_reported(self, client):
+        """The distinction that matters: polling, alive, nothing playing."""
+        client.post("/api/playback/command", json={"type": "skip", "payload": {}})
+        client.get("/api/playback/command/next")
+
+        data = client.get("/api/playback/device").json()
+        assert data["connected"] is True
+        assert data["ever_reported_state"] is False
+        assert data["last_command_delivered_at"] is not None
+
+    def test_stale_poll_is_not_connected(self, client):
+        client.post("/api/playback/command", json={"type": "skip", "payload": {}})
+        client.get("/api/playback/command/next")
+        # Rewind the last beat past the staleness window.
+        bus._last_poll_at -= 120.0
+
+        data = client.get("/api/playback/device").json()
+        assert data["connected"] is False
+        assert data["last_poll_age_seconds"] > 60
+
+
+class TestClientLog:
+    def test_post_then_read_back(self, client):
+        resp = client.post(
+            "/api/playback/client-log",
+            json={
+                "level": "error",
+                "event": "player_error",
+                "message": "Source error",
+                "detail": {"code": "ERROR_CODE_IO_BAD_HTTP_STATUS"},
+                "at": 1786723388.0,
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["id"] == 1
+        assert resp.json()["received_at"] > 0
+
+        entries = client.get("/api/playback/client-log").json()
+        assert len(entries) == 1
+        assert entries[0]["event"] == "player_error"
+        assert entries[0]["detail"]["code"] == "ERROR_CODE_IO_BAD_HTTP_STATUS"
+        assert entries[0]["at"] == 1786723388.0
+
+    def test_oldest_first_and_limit_keeps_newest(self, client):
+        for i in range(5):
+            client.post(
+                "/api/playback/client-log",
+                json={"event": "process_exit", "message": f"exit {i}"},
+            )
+        entries = client.get("/api/playback/client-log", params={"limit": 2}).json()
+        assert [e["message"] for e in entries] == ["exit 3", "exit 4"]
+
+    def test_buffer_is_bounded(self, client):
+        from audiplex.playback_bus import CLIENT_LOG_CAPACITY
+
+        for i in range(CLIENT_LOG_CAPACITY + 10):
+            bus.add_client_log({"event": "spam", "message": str(i)})
+        entries = client.get("/api/playback/client-log", params={"limit": 200}).json()
+        assert len(entries) == CLIENT_LOG_CAPACITY
+        assert entries[-1]["message"] == str(CLIENT_LOG_CAPACITY + 9)
 
 
 class TestPlaybackState:

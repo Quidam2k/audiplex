@@ -163,6 +163,10 @@ interface AudiplexApi {
     @POST("api/playback/state")
     suspend fun postPlaybackState(@Body state: PlaybackStateDto): PlaybackStateDto
 
+    /** Ship a client-side diagnostic (playback error, process death) up. */
+    @POST("api/playback/client-log")
+    suspend fun postClientLog(@Body entry: ClientLogDto)
+
     companion object {
         fun coverUrl(baseUrl: String, bookId: Int): String =
             "${baseUrl}api/library/books/$bookId/cover"

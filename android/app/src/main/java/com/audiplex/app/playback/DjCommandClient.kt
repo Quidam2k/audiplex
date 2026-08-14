@@ -45,6 +45,7 @@ class DjCommandClient @Inject constructor(
     private val apiHolder: ApiServiceHolder,
     private val settingsStore: SettingsStore,
     private val playbackManager: PlaybackManager,
+    private val clientLog: ClientLogReporter,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var commandJob: Job? = null
@@ -176,42 +177,71 @@ class DjCommandClient @Inject constructor(
         return ids.mapNotNull { id -> runCatching { api.getTrack(id) }.getOrNull() }
     }
 
+    /**
+     * Post now-playing state up every 5s.
+     *
+     * Every tick is wrapped: before #2961 an exception here killed this job
+     * outright and, because the scope uses a SupervisorJob, it died without
+     * taking [commandLoop] with it or surfacing anywhere. The DJ went blind
+     * while remote control kept working, which is the worst of both — so the
+     * loop must survive anything a single tick can throw.
+     */
     private suspend fun reportLoop() {
         var lastKey = ""
         while (coroutineContext[Job]?.isActive == true) {
             delay(5000)
-            val api = apiHolder.api ?: continue
-            val music = playbackManager.currentMusic.value
-            val playing = playbackManager.isPlaying.value
-            val streamTitle = playbackManager.currentStreamTitle.value
-            val track = music?.items?.getOrNull(music.currentIndex)?.track
-            // A stream has no track id/queue — report title only (id -1 is a
-            // client-side sentinel; the agent only reads title/artist for it).
-            val trackDto = if (streamTitle != null) {
-                NowPlayingTrackDto(-1, streamTitle, "Radio Free Luna")
-            } else {
-                track?.let { NowPlayingTrackDto(it.id, it.title, it.artistName) }
-            }
-            val queue = music?.items?.mapIndexed { i, item ->
-                QueueTrackDto(index = i, id = item.track.id, title = item.track.title, artist = item.track.artistName)
-            } ?: emptyList()
-            val state = PlaybackStateDto(
-                playing = playing,
-                track = trackDto,
-                positionMs = playbackManager.positionMs.value,
-                durationMs = playbackManager.durationMs.value,
-                queueLength = music?.items?.size ?: 0,
-                queueIndex = music?.currentIndex ?: 0,
-                queue = queue,
-                volume = playbackManager.playerVolume(),
-            )
-            // Always refresh while playing (position moves); otherwise only on
-            // a meaningful state change so we don't spam the server when idle.
-            val key = "${state.playing}:${trackDto?.id}:${state.queueIndex}"
-            if (playing || key != lastKey) {
-                lastKey = key
-                runCatching { api.postPlaybackState(state) }
+            try {
+                lastKey = reportOnce(lastKey)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                clientLog.report(
+                    level = "error",
+                    event = "report_loop_error",
+                    message = e.message ?: e.javaClass.simpleName,
+                )
             }
         }
+    }
+
+    /** One state report. Returns the new dedup key. */
+    private suspend fun reportOnce(lastKey: String): String {
+        val api = apiHolder.api ?: return lastKey
+        val music = playbackManager.currentMusic.value
+        val playing = playbackManager.isPlaying.value
+        val streamTitle = playbackManager.currentStreamTitle.value
+        val track = music?.items?.getOrNull(music.currentIndex)?.track
+        // A stream has no track id/queue — report title only (id -1 is a
+        // client-side sentinel; the agent only reads title/artist for it).
+        val trackDto = if (streamTitle != null) {
+            NowPlayingTrackDto(-1, streamTitle, "Radio Free Luna")
+        } else {
+            track?.let { NowPlayingTrackDto(it.id, it.title, it.artistName) }
+        }
+        val queue = music?.items?.mapIndexed { i, item ->
+            QueueTrackDto(index = i, id = item.track.id, title = item.track.title, artist = item.track.artistName)
+        } ?: emptyList()
+        val state = PlaybackStateDto(
+            playing = playing,
+            track = trackDto,
+            positionMs = playbackManager.positionMs.value,
+            durationMs = playbackManager.durationMs.value,
+            queueLength = music?.items?.size ?: 0,
+            queueIndex = music?.currentIndex ?: 0,
+            queue = queue,
+            // Cached snapshot, NOT controller.volume — that call is main-thread
+            // only and we are on Dispatchers.IO here (#2961).
+            volume = playbackManager.playerVolume(),
+        )
+        // Always refresh while playing (position moves); otherwise only on
+        // a meaningful state change so we don't spam the server when idle.
+        // Device liveness does NOT depend on this — the server tracks that
+        // from the command long-poll, which beats every ~25s regardless.
+        val key = "${state.playing}:${trackDto?.id}:${state.queueIndex}"
+        if (playing || key != lastKey) {
+            api.postPlaybackState(state)
+            return key
+        }
+        return lastKey
     }
 }

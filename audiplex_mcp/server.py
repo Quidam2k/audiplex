@@ -109,15 +109,25 @@ async def dj_play_now(track_ids: list[int]) -> str:
             headers=_headers(),
             json={"type": "play_now", "payload": {"track_ids": track_ids}},
         )
-    if resp.status_code == 401:
-        return "Auth failed (401). Check AUDIPLEX_TOKEN."
-    resp.raise_for_status()
+        if resp.status_code == 401:
+            return "Auth failed (401). Check AUDIPLEX_TOKEN."
+        resp.raise_for_status()
+        device_resp = await client.get(
+            f"{AUDIPLEX_URL}/api/playback/device", headers=_headers()
+        )
     data = resp.json()
-    return (
+    device = device_resp.json() if device_resp.status_code == 200 else {}
+    head = (
         f"Queued play_now for {len(track_ids)} track(s) "
         f"(command #{data.get('id')}, {data.get('pending')} pending). "
-        "The device plays when it next polls (immediately if awake)."
     )
+    # Never claim "it's playing" — say whether anything is listening, so a dead
+    # player reads as a failure instead of a success (#2961).
+    if not device:
+        return head + "The device plays when it next polls (immediately if awake)."
+    if device.get("connected"):
+        return head + "A player is connected, so it should pick this up within seconds."
+    return head + _describe_device(device) + " It will play whenever a player next starts."
 
 
 @mcp.tool()
@@ -515,22 +525,125 @@ async def dj_queue_by(
     )
 
 
+def _describe_age(seconds: float | None) -> str:
+    if seconds is None:
+        return "never"
+    if seconds < 60:
+        return f"{int(seconds)}s ago"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m ago"
+    return f"{seconds / 3600:.1f}h ago"
+
+
+def _describe_device(d: dict) -> str:
+    """One line on whether a player is actually out there (#2961)."""
+    if not d.get("connected"):
+        last = _describe_age(d.get("last_poll_age_seconds"))
+        pending = d.get("pending", 0)
+        tail = f" {pending} command(s) waiting for it." if pending else ""
+        if d.get("last_poll_at") is None:
+            return f"NO PLAYER CONNECTED (none has ever polled this server).{tail}"
+        return f"NO PLAYER CONNECTED (last poll {last}).{tail}"
+    return f"Player connected (last poll {_describe_age(d.get('last_poll_age_seconds'))})."
+
+
 @mcp.tool()
-async def dj_now_playing() -> str:
-    """Report what the Audiplex device is currently playing — track, artist,
-    play/pause state, position — plus the full current queue (with indices,
-    for dj_reorder), as last reported by the client."""
+async def dj_device_status() -> str:
+    """Is an Audiplex player actually alive and listening right now?
+
+    Answers the question dj_now_playing cannot: a device that is connected but
+    idle and a device that is dead both report nothing playing. Use this before
+    concluding a play command failed.
+    """
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(
-            f"{AUDIPLEX_URL}/api/playback/state", headers=_headers()
+            f"{AUDIPLEX_URL}/api/playback/device", headers=_headers()
         )
     if resp.status_code == 401:
         return "Auth failed (401). Check AUDIPLEX_TOKEN."
     resp.raise_for_status()
+    d = resp.json()
+    lines = [_describe_device(d)]
+    if d.get("last_command_id"):
+        lines.append(
+            f"Last command taken: #{d['last_command_id']} ({d.get('last_command_type')}) "
+            f"{_describe_age(d.get('last_command_delivered_age_seconds'))}."
+        )
+    if d.get("ever_reported_state"):
+        lines.append(
+            f"Last now-playing report: {_describe_age(d.get('last_state_age_seconds'))}."
+        )
+    else:
+        lines.append("Last now-playing report: never (no state has ever been reported).")
+    if d.get("pending"):
+        lines.append(f"{d['pending']} command(s) still queued.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def dj_client_log(limit: int = 25) -> str:
+    """Recent diagnostics shipped up by the Android player — playback errors and
+    process-exit reasons. This is how you find out WHY audio stopped or the app
+    died; the phone is not reachable from the server host any other way."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{AUDIPLEX_URL}/api/playback/client-log",
+            headers=_headers(),
+            params={"limit": max(1, min(limit, 200))},
+        )
+    if resp.status_code == 401:
+        return "Auth failed (401). Check AUDIPLEX_TOKEN."
+    resp.raise_for_status()
+    entries = resp.json()
+    if not entries:
+        return "No client diagnostics reported."
+    lines = []
+    for e in entries:
+        when = datetime.datetime.fromtimestamp(e.get("received_at", 0)).strftime("%H:%M:%S")
+        line = f"[{when}] {e.get('level', 'info').upper()} {e.get('event')}: {e.get('message', '')}"
+        detail = e.get("detail") or {}
+        if detail:
+            line += " " + ", ".join(f"{k}={v}" for k, v in detail.items())
+        lines.append(line.rstrip())
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def dj_now_playing() -> str:
+    """Report what the Audiplex device is currently playing — track, artist,
+    play/pause state, position — plus the full current queue (with indices,
+    for dj_reorder), as last reported by the client.
+
+    Also reports device liveness, so 'nothing playing' can be told apart from
+    'nothing listening' (#2961)."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{AUDIPLEX_URL}/api/playback/state", headers=_headers()
+        )
+        if resp.status_code == 401:
+            return "Auth failed (401). Check AUDIPLEX_TOKEN."
+        resp.raise_for_status()
+        device_resp = await client.get(
+            f"{AUDIPLEX_URL}/api/playback/device", headers=_headers()
+        )
     s = resp.json()
+    device = device_resp.json() if device_resp.status_code == 200 else {}
+    device_line = _describe_device(device) if device else ""
     track = s.get("track")
     if not track:
-        return "Nothing is playing (no now-playing state reported yet)."
+        why = (
+            "The player is connected and idle — nothing is loaded."
+            if device.get("connected")
+            else "No player has reported state."
+        )
+        return f"Nothing is playing. {why}\n{device_line}".rstrip()
+    age = device.get("last_state_age_seconds")
+    if age is not None and age > 60:
+        # Stale state is worse than no state: it reads as live and isn't.
+        device_line += (
+            f"\nWARNING: this snapshot is {_describe_age(age)} — "
+            "the player may have stopped or died since."
+        )
     state = "playing" if s.get("playing") else "paused"
     pos = int(s.get("position_ms", 0) // 1000)
     dur = int(s.get("duration_ms", 0) // 1000)
@@ -550,6 +663,8 @@ async def dj_now_playing() -> str:
             lines.append(
                 f"{marker}{item.get('index')}: {item.get('title')} - {item.get('artist')}"
             )
+    if device_line:
+        lines.append(device_line)
     return "\n".join(lines)
 
 

@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -24,6 +25,7 @@ class SettingsStore @Inject constructor(
     private val authTokenKey = stringPreferencesKey("auth_token")
     private val usernameKey = stringPreferencesKey("username")
     private val sessionExpiredKey = booleanPreferencesKey("session_expired")
+    private val lastExitReportedAtKey = longPreferencesKey("last_exit_reported_at")
 
     override val serverUrl: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[serverUrlKey] ?: ""
@@ -49,6 +51,20 @@ class SettingsStore @Inject constructor(
      */
     val sessionExpired: Flow<Boolean> = context.dataStore.data.map { prefs ->
         prefs[sessionExpiredKey] ?: false
+    }
+
+    /**
+     * Timestamp of the newest process-exit record already shipped to the
+     * server, so a restart reports each death exactly once (#2961).
+     */
+    val lastExitReportedAt: Flow<Long> = context.dataStore.data.map { prefs ->
+        prefs[lastExitReportedAtKey] ?: 0L
+    }
+
+    suspend fun setLastExitReportedAt(timestamp: Long) {
+        context.dataStore.edit { prefs ->
+            prefs[lastExitReportedAtKey] = timestamp
+        }
     }
 
     suspend fun setServerUrl(url: String) {

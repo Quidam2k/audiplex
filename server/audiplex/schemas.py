@@ -269,3 +269,19 @@ class PlaybackState(BaseModel):
     queue_index: int = 0
     queue: list[NowPlayingQueueItem] = []
     volume: float | None = None
+
+
+class ClientLogEntry(BaseModel):
+    """A diagnostic shipped up by the Android client (#2961).
+
+    The phone is not reachable over adb from the server host, so player errors
+    and process-exit reasons have to travel this way or they are lost. `at` is
+    the client's own clock (epoch seconds) and may disagree with the server's —
+    the server stamps its own `received_at` on arrival.
+    """
+
+    level: str = "info"
+    event: str
+    message: str = ""
+    detail: dict = {}
+    at: float | None = None

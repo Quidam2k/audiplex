@@ -5,6 +5,9 @@ Endpoints:
   GET  /api/playback/command/next  — client long-polls for the next command
   POST /api/playback/state         — client reports now-playing
   GET  /api/playback/state         — agent reads now-playing
+  GET  /api/playback/device        — device liveness (last poll / state / command)
+  POST /api/playback/client-log    — client ships a diagnostic up
+  GET  /api/playback/client-log    — agent reads recent client diagnostics
   GET  /api/playback/playlists              — owner's playlists (read-only)
   GET  /api/playback/playlists/{id}         — owner's playlist detail
   GET  /api/playback/favorites              — owner's favorites (read-only)
@@ -34,6 +37,7 @@ from audiplex.models import Favorite, Playlist, User
 from audiplex.playback_bus import bus
 from audiplex.routers.music import FAVORITE_TYPES, _get_playlist_detail
 from audiplex.schemas import (
+    ClientLogEntry,
     FavoriteSchema,
     PlaybackCommand,
     PlaybackCommandQueued,
@@ -101,6 +105,30 @@ def get_state(user: User = Depends(get_current_user)):
         "volume": None,
         "updated_at": None,
     }
+
+
+@router.get("/device")
+def get_device(user: User = Depends(get_current_user)):
+    """Device liveness: is a player actually out there listening?
+
+    Distinct from /state, which only says what was last *played*. A device can
+    be connected and idle (polling, nothing loaded) or gone entirely, and those
+    two produced identical /state responses before this existed (#2961).
+    """
+    return bus.device_status()
+
+
+@router.post("/client-log")
+def post_client_log(entry: ClientLogEntry, user: User = Depends(get_current_user)):
+    """Client-shipped diagnostic (player error, process-exit reason, etc.)."""
+    return bus.add_client_log(entry.model_dump())
+
+
+@router.get("/client-log")
+def get_client_log(
+    limit: int = Query(50, ge=1, le=200), user: User = Depends(get_current_user)
+):
+    return bus.client_log(limit)
 
 
 @router.get("/playlists", response_model=list[PlaylistSummary])

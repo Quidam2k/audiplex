@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Player.DiscontinuityReason
 import androidx.media3.session.MediaController
@@ -57,7 +58,8 @@ class PlaybackManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val apiHolder: ApiServiceHolder,
     private val downloadRepository: DownloadRepository,
-    private val playbackPositionDao: PlaybackPositionDao
+    private val playbackPositionDao: PlaybackPositionDao,
+    private val clientLog: ClientLogReporter
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var controllerFuture: ListenableFuture<MediaController>? = null
@@ -92,6 +94,9 @@ class PlaybackManager @Inject constructor(
     private val _currentChapterIndex = MutableStateFlow(0)
     val currentChapterIndex: StateFlow<Int> = _currentChapterIndex
 
+    // Written on the main thread only; see playerVolume().
+    private val _playerVolume = MutableStateFlow(1f)
+
     private var currentBaseUrl: String = ""
     private var lastReportedTrackIndex: Int = -1
     // Position of the previously-playing track at the moment of a SEEK
@@ -108,6 +113,32 @@ class PlaybackManager @Inject constructor(
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(playing: Boolean) {
             _isPlaying.value = playing
+        }
+
+        /**
+         * Nothing overrode this before (#2961), so every playback failure —
+         * a 401 on the stream, a dropped Tailscale connection mid-track, a
+         * malformed file — ended as silence with no trace anywhere. Ship it.
+         */
+        override fun onPlayerError(error: PlaybackException) {
+            val item = _currentMusic.value
+                ?.let { it.items.getOrNull(it.currentIndex) }
+                ?.track
+            clientLog.report(
+                level = "error",
+                event = "player_error",
+                message = error.message ?: error.errorCodeName,
+                detail = buildMap {
+                    put("code", error.errorCodeName)
+                    put("cause", error.cause?.javaClass?.simpleName ?: "none")
+                    put("causeMessage", error.cause?.message ?: "")
+                    item?.let {
+                        put("trackId", it.id.toString())
+                        put("trackTitle", it.title)
+                    }
+                    _currentBook.value?.let { put("bookId", it.id.toString()) }
+                },
+            )
         }
 
         override fun onPositionDiscontinuity(
@@ -608,11 +639,16 @@ class PlaybackManager @Inject constructor(
             ctrl.play()
             // Manually fire start for the initial track since onMediaItemTransition
             // may have already fired for the same index before we updated state.
+            // If it did fire, it already claimed this index — posting again gave
+            // two 'start' rows milliseconds apart and skewed the taste loop
+            // (#2961), so let whichever path got there first own it.
             val firstPlayingIndex = ctrl.currentMediaItemIndex.coerceAtLeast(0)
-            items.getOrNull(firstPlayingIndex)?.let {
-                postPlayStat(it.track.id, "start", 0.0)
-                lastReportedTrackIndex = firstPlayingIndex
-                _durationMs.value = (it.track.durationSeconds * 1000).toLong()
+            if (lastReportedTrackIndex != firstPlayingIndex) {
+                items.getOrNull(firstPlayingIndex)?.let {
+                    postPlayStat(it.track.id, "start", 0.0)
+                    lastReportedTrackIndex = firstPlayingIndex
+                    _durationMs.value = (it.track.durationSeconds * 1000).toLong()
+                }
             }
         }
     }
@@ -647,10 +683,22 @@ class PlaybackManager @Inject constructor(
     /** Media3 player volume (0.0-1.0) — NOT device/stream volume, deliberately;
      * device volume would fight the Pantheon companion's mic-hot media-ducking. */
     fun setPlayerVolume(volume: Float) {
-        controller?.volume = volume.coerceIn(0f, 1f)
+        val clamped = volume.coerceIn(0f, 1f)
+        controller?.volume = clamped
+        _playerVolume.value = clamped
     }
 
-    fun playerVolume(): Float = controller?.volume ?: 1f
+    /**
+     * Last known player volume, safe to read from ANY thread.
+     *
+     * A MediaController is thread-confined to the looper it was built on, so
+     * reading controller.volume off the main thread throws IllegalStateException.
+     * That is precisely what killed DjCommandClient's report loop the moment
+     * anything played (#2961) — silently, because the loop had no try/catch and
+     * its sibling job kept running. Read the cached snapshot instead; it is
+     * refreshed on the main thread by startPositionUpdates().
+     */
+    fun playerVolume(): Float = _playerVolume.value
 
     fun seekTo(positionMs: Long) {
         if (isMusic()) {
@@ -760,6 +808,8 @@ class PlaybackManager @Inject constructor(
         positionUpdateJob = scope.launch {
             while (true) {
                 controller?.let { ctrl ->
+                    // Main-thread refresh of the snapshot background callers read.
+                    _playerVolume.value = ctrl.volume
                     if (ctrl.isPlaying) {
                         _positionMs.value = currentGlobalPositionMs()
                         if (isMusic()) {

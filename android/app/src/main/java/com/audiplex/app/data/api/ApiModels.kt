@@ -323,6 +323,20 @@ data class QueueTrackDto(
     val artist: String?
 )
 
+/**
+ * A diagnostic shipped up to the server (#2961). The phone isn't reachable over
+ * adb from the server host, so a playback error or a process death is invisible
+ * unless the app reports it itself.
+ */
+@JsonClass(generateAdapter = true)
+data class ClientLogDto(
+    val level: String,
+    val event: String,
+    val message: String = "",
+    val detail: Map<String, String> = emptyMap(),
+    val at: Double? = null
+)
+
 @JsonClass(generateAdapter = true)
 data class PlaybackStateDto(
     val playing: Boolean,
