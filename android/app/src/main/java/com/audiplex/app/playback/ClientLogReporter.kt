@@ -12,6 +12,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -47,19 +48,44 @@ class ClientLogReporter @Inject constructor(
         detail: Map<String, String> = emptyMap(),
     ) {
         Log.w(TAG, "$event: $message $detail")
-        scope.launch {
-            runCatching {
-                apiHolder.api?.postClientLog(
-                    ClientLogDto(
-                        level = level,
-                        event = event,
-                        message = message,
-                        detail = detail,
-                        at = System.currentTimeMillis() / 1000.0,
-                    )
-                )
-            }
+        scope.launch { send(level, event, message, detail) }
+    }
+
+    /** Returns true only if the server actually took the entry. */
+    private suspend fun send(
+        level: String,
+        event: String,
+        message: String,
+        detail: Map<String, String>,
+    ): Boolean = runCatching {
+        val api = apiHolder.api ?: return false
+        api.postClientLog(
+            ClientLogDto(
+                level = level,
+                event = event,
+                message = message,
+                detail = detail,
+                at = System.currentTimeMillis() / 1000.0,
+            )
+        )
+        true
+    }.getOrDefault(false)
+
+    /**
+     * Wait for a usable API client.
+     *
+     * ApiServiceHolder gets its base URL from the first ViewModel to come up,
+     * which is long after Application.onCreate — so anything reporting at
+     * startup finds `api` null and must wait rather than drop the report. The
+     * first cut of this shipped without the wait and silently lost exactly the
+     * process-exit records it existed to capture.
+     */
+    private suspend fun awaitApi(): Boolean {
+        repeat(API_WAIT_ATTEMPTS) {
+            if (apiHolder.api != null) return true
+            delay(API_WAIT_INTERVAL_MS)
         }
+        return apiHolder.api != null
     }
 
     /**
@@ -79,8 +105,15 @@ class ClientLogReporter @Inject constructor(
                     .filter { it.timestamp > since }
                     .sortedBy { it.timestamp }
                 if (exits.isEmpty()) return@runCatching
-                exits.forEach { info ->
-                    report(
+                if (!awaitApi()) return@runCatching
+
+                // Advance the watermark only past entries the server actually
+                // took. Anything unsent stays unmarked and is retried on the
+                // next launch — a dropped death report is unrecoverable, a
+                // duplicated one is merely noise.
+                var lastSent = 0L
+                for (info in exits) {
+                    val ok = send(
                         level = if (isUnexpected(info.reason)) "error" else "info",
                         event = "process_exit",
                         message = info.description ?: reasonName(info.reason),
@@ -91,8 +124,10 @@ class ClientLogReporter @Inject constructor(
                             "at" to info.timestamp.toString(),
                         ),
                     )
+                    if (!ok) break
+                    lastSent = info.timestamp
                 }
-                settingsStore.setLastExitReportedAt(exits.last().timestamp)
+                if (lastSent > 0L) settingsStore.setLastExitReportedAt(lastSent)
             }
         }
     }
@@ -128,6 +163,10 @@ class ClientLogReporter @Inject constructor(
 
     companion object {
         private const val TAG = "ClientLog"
-        private const val MAX_EXITS = 10
+        private const val MAX_EXITS = 16
+        // Long enough to cover a cold start reaching its first screen, bounded
+        // so a never-configured install doesn't hold a coroutine forever.
+        private const val API_WAIT_ATTEMPTS = 60
+        private const val API_WAIT_INTERVAL_MS = 2000L
     }
 }

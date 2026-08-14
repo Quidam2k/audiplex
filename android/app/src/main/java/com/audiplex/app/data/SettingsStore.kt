@@ -25,7 +25,12 @@ class SettingsStore @Inject constructor(
     private val authTokenKey = stringPreferencesKey("auth_token")
     private val usernameKey = stringPreferencesKey("username")
     private val sessionExpiredKey = booleanPreferencesKey("session_expired")
-    private val lastExitReportedAtKey = longPreferencesKey("last_exit_reported_at")
+    // v2: the v1 key was advanced by a reporter that dropped every entry it
+    // "reported" (no API client existed that early in startup), so the deaths
+    // it was meant to capture were marked done without ever being sent. A new
+    // key resets the watermark to zero and re-ships the history Android still
+    // holds on the device (#2961).
+    private val lastExitReportedAtKey = longPreferencesKey("last_exit_reported_at_v2")
 
     override val serverUrl: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[serverUrlKey] ?: ""
