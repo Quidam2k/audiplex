@@ -58,3 +58,6 @@ NOTE-*.md
 
 # DJ taste store — Todd's personal ratings of recommendations, not repo content
 data/dj/
+
+# Runtime diagnostics written by the server (process-exit reports, #3021).
+server/data/

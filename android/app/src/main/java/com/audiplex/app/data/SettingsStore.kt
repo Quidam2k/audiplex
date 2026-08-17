@@ -30,7 +30,10 @@ class SettingsStore @Inject constructor(
     // it was meant to capture were marked done without ever being sent. A new
     // key resets the watermark to zero and re-ships the history Android still
     // holds on the device (#2961).
-    private val lastExitReportedAtKey = longPreferencesKey("last_exit_reported_at_v2")
+    // v3 (#3021): bumping the key resets the watermark so the exit history
+    // Android still holds — including the 2026-08-14 16:02:58Z death — re-ships
+    // WITH its stack trace, which the v2 records were delivered without.
+    private val lastExitReportedAtKey = longPreferencesKey("last_exit_reported_at_v3")
 
     override val serverUrl: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[serverUrlKey] ?: ""

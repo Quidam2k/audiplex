@@ -140,6 +140,49 @@ class TestClientLog:
         assert entries[-1]["message"] == str(CLIENT_LOG_CAPACITY + 9)
 
 
+class TestPersistedExits:
+    """#3021: a process-exit report must survive a server restart.
+
+    The phone advances its own report watermark as soon as we accept an entry,
+    so anything held only in the ring buffer is gone for good if the process
+    restarts before a human reads it — the phone will never re-send it.
+    """
+
+    def test_process_exit_is_persisted_and_readable(self, client):
+        client.post(
+            "/api/playback/client-log",
+            json={
+                "event": "process_exit",
+                "message": "SIGNALED",
+                "detail": {"signal": "SIGKILL", "trace": "at Foo.bar()"},
+            },
+        )
+        entries = client.get("/api/playback/client-exits").json()
+        assert len(entries) == 1
+        assert entries[0]["message"] == "SIGNALED"
+        assert entries[0]["detail"]["trace"] == "at Foo.bar()"
+
+    def test_persisted_exits_survive_a_bus_reset(self, client):
+        client.post(
+            "/api/playback/client-log",
+            json={"event": "process_exit", "message": "LOW_MEMORY"},
+        )
+        bus.reset()  # stands in for a restart: memory gone, disk intact
+        assert client.get("/api/playback/client-log").json() == []
+        entries = client.get("/api/playback/client-exits").json()
+        assert [e["message"] for e in entries] == ["LOW_MEMORY"]
+
+    def test_only_exits_are_persisted(self, client):
+        client.post(
+            "/api/playback/client-log",
+            json={"event": "player_error", "message": "boom"},
+        )
+        assert client.get("/api/playback/client-exits").json() == []
+
+    def test_missing_file_reads_as_empty(self, client):
+        assert client.get("/api/playback/client-exits").json() == []
+
+
 class TestPlaybackState:
     def test_get_state_empty(self, client):
         resp = client.get("/api/playback/state")

@@ -375,3 +375,19 @@ def sample_playlist(db_session, sample_track):
     db_session.commit()
     db_session.refresh(playlist)
     return playlist
+
+
+@pytest.fixture(autouse=True)
+def isolated_exit_log(tmp_path, monkeypatch):
+    """Keep process-exit persistence out of the real on-disk log.
+
+    add_client_log appends every process_exit entry to a file (#3021), and
+    several tests post those — without this, running the suite would graft
+    fake deaths onto the record we keep specifically so a real one can never
+    be lost.
+    """
+    from audiplex import playback_bus
+
+    monkeypatch.setattr(
+        playback_bus, "EXIT_LOG_PATH", tmp_path / "client-exits.jsonl"
+    )

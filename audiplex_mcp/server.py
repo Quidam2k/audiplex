@@ -597,15 +597,53 @@ async def dj_client_log(limit: int = 25) -> str:
     entries = resp.json()
     if not entries:
         return "No client diagnostics reported."
+    return _render_client_log(entries)
+
+
+def _render_client_log(entries: list) -> str:
+    """One line per entry, except a stack trace, which gets its own block.
+
+    A trace inlined into the comma-joined detail dict is unreadable — which is
+    part of why traces were not being shipped at all before #3021. Pull it out
+    and indent it instead.
+    """
     lines = []
     for e in entries:
         when = datetime.datetime.fromtimestamp(e.get("received_at", 0)).strftime("%H:%M:%S")
         line = f"[{when}] {e.get('level', 'info').upper()} {e.get('event')}: {e.get('message', '')}"
-        detail = e.get("detail") or {}
+        detail = dict(e.get("detail") or {})
+        trace = detail.pop("trace", "")
         if detail:
             line += " " + ", ".join(f"{k}={v}" for k, v in detail.items())
         lines.append(line.rstrip())
+        if trace:
+            lines.extend("    " + t for t in str(trace).splitlines())
     return "\n".join(lines)
+
+
+@mcp.tool()
+async def dj_client_exits(limit: int = 25) -> str:
+    """Process-exit reports that SURVIVED a server restart.
+
+    dj_client_log reads an in-memory ring buffer, so a restart wipes it — and
+    the phone advances its own report watermark the moment the server accepts
+    an entry, so it never re-sends one. That makes a death report the one
+    diagnostic that can be lost for good, which is why it is also written to
+    disk (#3021). Reach for this when dj_client_log looks emptier than it
+    should, or when you need history older than the buffer holds."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{AUDIPLEX_URL}/api/playback/client-exits",
+            headers=_headers(),
+            params={"limit": max(1, min(limit, 200))},
+        )
+    if resp.status_code == 401:
+        return "Auth failed (401). Check AUDIPLEX_TOKEN."
+    resp.raise_for_status()
+    entries = resp.json()
+    if not entries:
+        return "No process exits on record."
+    return _render_client_log(entries)
 
 
 @mcp.tool()

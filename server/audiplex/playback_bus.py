@@ -24,14 +24,25 @@ A poll is the strongest liveness signal we have: the client re-issues it every
 
 Client log (#2961): the app ships player errors and process-exit reasons here
 so a silent death on the phone is diagnosable from the server without adb.
+
+Process-exit entries are ALSO appended to disk (#3021). The ring buffer is
+memory-only, and the phone advances its own report watermark as soon as the
+server takes an entry — so a restart between delivery and a human reading it
+destroys that death report permanently: the phone will never re-send it and
+Android eventually rolls the record out of its own history. Everything else in
+the log is reconstructible; a process-exit report is not, which is why it is
+the one category that gets persisted.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Deque, Optional
 
 # How long after the last poll we still consider a device connected. The client
@@ -40,6 +51,13 @@ from typing import Any, Deque, Optional
 DEVICE_STALE_AFTER_SECONDS = 60.0
 
 CLIENT_LOG_CAPACITY = 200
+
+# Append-only JSONL of process-exit reports. Overridable so tests never touch
+# the real file.
+EXIT_LOG_PATH = Path(
+    os.environ.get("AUDIPLEX_EXIT_LOG")
+    or Path(__file__).resolve().parent.parent / "data" / "client-exits.jsonl"
+)
 
 
 @dataclass
@@ -129,12 +147,46 @@ class PlaybackBus:
         self._log_seq += 1
         record = {**entry, "id": self._log_seq, "received_at": time.time()}
         self._client_log.append(record)
+        if record.get("event") == "process_exit":
+            _persist_exit(record)
         return record
 
     def client_log(self, limit: int = 50) -> list[dict[str, Any]]:
         """Most recent entries last, oldest first — reads like a log file."""
         entries = list(self._client_log)
         return entries[-limit:] if limit > 0 else entries
+
+
+def _persist_exit(record: dict[str, Any]) -> None:
+    """Append one process-exit report to the on-disk log.
+
+    Best-effort by design: this runs inside the request that accepts the
+    report, and a disk problem must not turn into a 500 that makes the phone
+    treat the entry as undelivered. Losing the durable copy is bad; losing the
+    entry AND the phone's watermark position is worse.
+    """
+    try:
+        EXIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(EXIT_LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+    except OSError:
+        pass
+
+
+def read_persisted_exits(limit: int = 50) -> list[dict[str, Any]]:
+    """Process-exit reports that survived a restart, oldest first."""
+    try:
+        with open(EXIT_LOG_PATH, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    for line in lines[-limit:] if limit > 0 else lines:
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
 
 
 # Module-level singleton (single-device v1).

@@ -26,14 +26,63 @@ internal data class ExitRecord(
     val status: Int,
     val importance: Int,
     val unexpected: Boolean,
+    /** First lines of the crash/ANR stack, empty when Android kept none. */
+    val trace: String = "",
 ) {
-    fun detail(): Map<String, String> = mapOf(
-        "reason" to reason,
-        "status" to status.toString(),
-        "importance" to importance.toString(),
-        "at" to timestamp.toString(),
-    )
+    fun detail(): Map<String, String> = buildMap {
+        put("reason", reason)
+        put("status", status.toString())
+        put("importance", importance.toString())
+        put("at", timestamp.toString())
+        // SIGNALED on its own says nothing: status 9 vs 6 vs 11 is the
+        // difference between "the OS reclaimed us", "we aborted" and "we
+        // segfaulted". The 08-14 history is 4x status=9 and read as a wall
+        // of identical "SIGNALED" lines until this was decoded (#3021).
+        signalName(status)?.let { put("signal", it) }
+        if (trace.isNotBlank()) put("trace", trace)
+    }
 }
+
+/** POSIX signal names for the handful that actually kill an Android app. */
+internal fun signalName(status: Int): String? = when (status) {
+    4 -> "SIGILL"
+    6 -> "SIGABRT"
+    7 -> "SIGBUS"
+    8 -> "SIGFPE"
+    9 -> "SIGKILL"
+    11 -> "SIGSEGV"
+    13 -> "SIGPIPE"
+    15 -> "SIGTERM"
+    else -> null
+}
+
+/**
+ * Trim a stack trace to something a log line can carry.
+ *
+ * Bounded twice on purpose: [maxLines] keeps the useful top frames, and the
+ * character cap stops one pathological line (a giant ANR thread dump header)
+ * from blowing the payload even when the line count looks sane.
+ */
+internal fun trimTrace(raw: String, maxLines: Int = TRACE_MAX_LINES, maxChars: Int = TRACE_MAX_CHARS): String {
+    if (raw.isBlank()) return ""
+    val lines = raw.lineSequence().take(maxLines).joinToString("\n").trimEnd()
+    return if (lines.length <= maxChars) lines else lines.take(maxChars) + "\n[truncated]"
+}
+
+/**
+ * The human-readable cause, falling back to the reason name.
+ *
+ * BLANK, not null, is the case that matters: the SIGNALED records observed on
+ * the device carry an empty string, which sails straight through a null check
+ * and lands in the log as an empty message — a wall of entries saying nothing
+ * (#3021). Pure and internal so the fallback is pinned by a test rather than
+ * only reachable through ApplicationExitInfo.
+ */
+internal fun resolveDescription(description: String?, reasonName: String): String =
+    description?.takeIf { it.isNotBlank() } ?: reasonName
+
+internal const val TRACE_MAX_LINES = 40
+internal const val TRACE_MAX_CHARS = 4000
 
 /**
  * Ship every exit newer than [since], oldest first, and return the timestamp of
@@ -146,10 +195,13 @@ class ClientLogReporter @Inject constructor(
                         ExitRecord(
                             timestamp = info.timestamp,
                             reason = reasonName(info.reason),
-                            description = info.description ?: reasonName(info.reason),
+                            description = resolveDescription(
+                                info.description, reasonName(info.reason)
+                            ),
                             status = info.status,
                             importance = info.importance,
                             unexpected = isUnexpected(info.reason),
+                            trace = readTrace(info),
                         )
                     }
                 if (exits.none { it.timestamp > since }) return@runCatching
@@ -167,6 +219,21 @@ class ClientLogReporter @Inject constructor(
             }
         }
     }
+
+    /**
+     * The stack that was executing when the process died.
+     *
+     * Android only retains this for CRASH and ANR (and a native tombstone for
+     * CRASH_NATIVE); everything else returns null, which is not an error. Any
+     * failure here yields an empty trace rather than propagating — losing the
+     * exit report entirely because its trace could not be read would defeat
+     * the whole point of the reporter.
+     */
+    private fun readTrace(info: ApplicationExitInfo): String = runCatching {
+        info.traceInputStream?.use { stream ->
+            trimTrace(stream.bufferedReader().readText())
+        }.orEmpty()
+    }.getOrDefault("")
 
     /** Deaths that mean something went wrong, as opposed to a normal teardown. */
     private fun isUnexpected(reason: Int): Boolean = when (reason) {

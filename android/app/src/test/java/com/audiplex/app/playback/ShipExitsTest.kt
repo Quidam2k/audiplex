@@ -2,6 +2,7 @@ package com.audiplex.app.playback
 
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -80,5 +81,67 @@ class ShipExitsTest {
     @Test
     fun `no entries means no watermark movement`() = runTest {
         assertEquals(0L, shipExits(emptyList(), since = 0L) { true })
+    }
+}
+
+/**
+ * Pins the three decoding defects fixed in #3021, all of which made a real
+ * process death land in the log saying nothing useful.
+ */
+class ExitDecodingTest {
+
+    @Test
+    fun `blank description falls back to the reason name`() {
+        // The observed SIGNALED records carry "" — not null — which is exactly
+        // what the original null check let through.
+        assertEquals("SIGNALED", resolveDescription("", "SIGNALED"))
+        assertEquals("SIGNALED", resolveDescription("   ", "SIGNALED"))
+        assertEquals("SIGNALED", resolveDescription(null, "SIGNALED"))
+        assertEquals("Java heap space", resolveDescription("Java heap space", "CRASH"))
+    }
+
+    @Test
+    fun `signal status decodes to a name`() {
+        assertEquals("SIGKILL", signalName(9))
+        assertEquals("SIGABRT", signalName(6))
+        assertEquals("SIGSEGV", signalName(11))
+        // status 0 is "no signal" — must not be labelled as one.
+        assertEquals(null, signalName(0))
+        assertEquals(null, signalName(99))
+    }
+
+    @Test
+    fun `trace is capped at the line limit`() {
+        val raw = (1..200).joinToString("\n") { "frame $it" }
+        val trimmed = trimTrace(raw)
+        assertEquals(TRACE_MAX_LINES, trimmed.lines().size)
+        assertEquals("frame 1", trimmed.lines().first())
+        assertEquals("frame $TRACE_MAX_LINES", trimmed.lines().last())
+    }
+
+    @Test
+    fun `trace is capped in characters even when the line count is sane`() {
+        // One pathological line — a giant ANR dump header — must not blow the
+        // payload just because it counts as a single line.
+        val trimmed = trimTrace("x".repeat(TRACE_MAX_CHARS * 2))
+        assertTrue(trimmed.length <= TRACE_MAX_CHARS + "\n[truncated]".length)
+        assertTrue(trimmed.endsWith("[truncated]"))
+    }
+
+    @Test
+    fun `blank trace is dropped rather than shipped empty`() {
+        assertEquals("", trimTrace(""))
+        assertEquals("", trimTrace("   "))
+    }
+
+    @Test
+    fun `detail carries signal and trace only when they mean something`() {
+        val killed = ExitRecord(1L, "SIGNALED", "SIGNALED", 9, 400, true, trace = "")
+        assertEquals("SIGKILL", killed.detail()["signal"])
+        assertEquals(null, killed.detail()["trace"])
+
+        val crashed = ExitRecord(2L, "CRASH", "boom", 0, 100, true, trace = "at Foo.bar()")
+        assertEquals(null, crashed.detail()["signal"])
+        assertEquals("at Foo.bar()", crashed.detail()["trace"])
     }
 }

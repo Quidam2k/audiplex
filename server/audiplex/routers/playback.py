@@ -8,6 +8,7 @@ Endpoints:
   GET  /api/playback/device        — device liveness (last poll / state / command)
   POST /api/playback/client-log    — client ships a diagnostic up
   GET  /api/playback/client-log    — agent reads recent client diagnostics
+  GET  /api/playback/client-exits  — process-exit reports, persisted to disk
   GET  /api/playback/playlists              — owner's playlists (read-only)
   GET  /api/playback/playlists/{id}         — owner's playlist detail
   GET  /api/playback/favorites              — owner's favorites (read-only)
@@ -34,7 +35,7 @@ from audiplex.auth import get_current_user
 from audiplex.config import get_settings
 from audiplex.database import get_db
 from audiplex.models import Favorite, Playlist, User
-from audiplex.playback_bus import bus
+from audiplex.playback_bus import bus, read_persisted_exits
 from audiplex.routers.music import FAVORITE_TYPES, _get_playlist_detail
 from audiplex.schemas import (
     ClientLogEntry,
@@ -129,6 +130,19 @@ def get_client_log(
     limit: int = Query(50, ge=1, le=200), user: User = Depends(get_current_user)
 ):
     return bus.client_log(limit)
+
+
+@router.get("/client-exits")
+def get_client_exits(
+    limit: int = Query(50, ge=1, le=200), user: User = Depends(get_current_user)
+):
+    """Process-exit reports from disk — the ones that survive a restart.
+
+    The ring buffer above is memory-only, and the phone advances its report
+    watermark the moment we accept an entry, so a restart would otherwise
+    destroy a death report nobody had read yet (#3021).
+    """
+    return read_persisted_exits(limit)
 
 
 @router.get("/playlists", response_model=list[PlaylistSummary])
