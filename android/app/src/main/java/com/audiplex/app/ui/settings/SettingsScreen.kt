@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -51,6 +52,8 @@ fun SettingsScreen(
     val saved by viewModel.saved.collectAsState()
     val updateState by viewModel.updateState.collectAsState()
     val downloadOnCellular by viewModel.downloadOnCellular.collectAsState()
+    val djLinkEnabled by viewModel.djLinkEnabled.collectAsState()
+    val context = androidx.compose.ui.platform.LocalContext.current
     val totalStorageUsed by viewModel.totalStorageUsed.collectAsState()
     val username by viewModel.username.collectAsState()
     val musicRoots by viewModel.musicRoots.collectAsState()
@@ -186,6 +189,28 @@ fun SettingsScreen(
                 Switch(
                     checked = downloadOnCellular,
                     onCheckedChange = { viewModel.toggleDownloadOnCellular() }
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Keep DJ link alive", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Runs a background service so DJ commands reach the app " +
+                            "even when it's been closed for a while. Shows a permanent " +
+                            "notification.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(
+                    checked = djLinkEnabled,
+                    onCheckedChange = { viewModel.toggleDjLink(context) }
                 )
             }
 

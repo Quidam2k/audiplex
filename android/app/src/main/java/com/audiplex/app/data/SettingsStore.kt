@@ -25,6 +25,7 @@ class SettingsStore @Inject constructor(
     private val authTokenKey = stringPreferencesKey("auth_token")
     private val usernameKey = stringPreferencesKey("username")
     private val sessionExpiredKey = booleanPreferencesKey("session_expired")
+    private val djLinkEnabledKey = booleanPreferencesKey("dj_link_enabled")
     // v2: the v1 key was advanced by a reporter that dropped every entry it
     // "reported" (no API client existed that early in startup), so the deaths
     // it was meant to capture were marked done without ever being sent. A new
@@ -41,6 +42,19 @@ class SettingsStore @Inject constructor(
 
     val downloadOnCellular: Flow<Boolean> = context.dataStore.data.map { prefs ->
         prefs[downloadOnCellularKey] ?: false
+    }
+
+    /**
+     * Whether the always-on DJ link service runs (#3022).
+     *
+     * Defaults ON per Todd's ruling, and stays a plain toggle on purpose: his
+     * framing was "we can change our mind later if it ends up not being a good
+     * idea", so turning this off must return the app to exactly its previous
+     * behaviour rather than disabling DJ control. Nothing may become
+     * load-bearing on the service being up.
+     */
+    val djLinkEnabled: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[djLinkEnabledKey] ?: true
     }
 
     override val authToken: Flow<String> = context.dataStore.data.map { prefs ->
@@ -84,6 +98,12 @@ class SettingsStore @Inject constructor(
     suspend fun setDownloadOnCellular(enabled: Boolean) {
         context.dataStore.edit { prefs ->
             prefs[downloadOnCellularKey] = enabled
+        }
+    }
+
+    suspend fun setDjLinkEnabled(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[djLinkEnabledKey] = enabled
         }
     }
 

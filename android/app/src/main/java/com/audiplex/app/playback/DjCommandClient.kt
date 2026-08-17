@@ -13,6 +13,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -40,6 +43,9 @@ import kotlin.coroutines.coroutineContext
  * an external HTTP audio stream (e.g. Radio Free Luna) to the device —
  * queue ops don't apply to it, and the reportLoop reports title-only state.
  */
+/** What the DJ link is currently doing, for display only. */
+enum class LinkState { UNCONFIGURED, CONNECTED, OFFLINE }
+
 @Singleton
 class DjCommandClient @Inject constructor(
     private val apiHolder: ApiServiceHolder,
@@ -50,6 +56,18 @@ class DjCommandClient @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var commandJob: Job? = null
     private var reportJob: Job? = null
+
+    private val _linkState = MutableStateFlow(LinkState.UNCONFIGURED)
+
+    /**
+     * Whether the command long-poll is currently reaching the server.
+     *
+     * Published so the DJ-link notification can say something true instead of
+     * a static "running" (#3022). Read-only and observational: DjLinkService
+     * watches this, and nothing here knows the service exists — which is what
+     * keeps the service removable.
+     */
+    val linkState: StateFlow<LinkState> = _linkState.asStateFlow()
 
     fun start() {
         if (commandJob?.isActive != true) {
@@ -70,17 +88,20 @@ class DjCommandClient @Inject constructor(
             val api = apiHolder.api
             val token = runCatching { settingsStore.authToken.first() }.getOrDefault("")
             if (api == null || token.isBlank()) {
+                _linkState.value = LinkState.UNCONFIGURED
                 delay(3000) // not logged in / no server yet — wait and retry
                 continue
             }
             try {
                 val resp = api.getNextPlaybackCommand()
+                _linkState.value = LinkState.CONNECTED
                 if (resp.code() == 204) continue // long-poll timeout — re-issue
                 val cmd = resp.body() ?: continue
                 dispatch(cmd)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                _linkState.value = LinkState.OFFLINE
                 delay(2000) // network blip / Tailscale down — back off and retry
             }
         }

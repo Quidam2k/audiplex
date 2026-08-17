@@ -3,6 +3,7 @@ package com.audiplex.app.ui.settings
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.audiplex.app.playback.DjLinkService
 import com.audiplex.app.BuildConfig
 import com.audiplex.app.data.ApiServiceHolder
 import com.audiplex.app.data.SettingsStore
@@ -89,6 +90,23 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             val current = downloadOnCellular.value
             settingsStore.setDownloadOnCellular(!current)
+        }
+    }
+
+    val djLinkEnabled: StateFlow<Boolean> = settingsStore.djLinkEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    /**
+     * Turning the DJ link off stops the service; turning it on starts it here,
+     * where an activity is on screen and a foreground-service start is legal.
+     * Playback and DJ commands work either way — without the service the app
+     * is simply reclaimable again, which is the state it was in before #3022.
+     */
+    fun toggleDjLink(context: Context) {
+        viewModelScope.launch {
+            val enabled = !djLinkEnabled.value
+            settingsStore.setDjLinkEnabled(enabled)
+            if (enabled) DjLinkService.start(context) else DjLinkService.stop(context)
         }
     }
 

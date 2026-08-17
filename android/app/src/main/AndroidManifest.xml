@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
@@ -36,6 +38,38 @@
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>
         </service>
+
+        <!-- The always-on DJ link (#3022). Holds the process up so a queued DJ
+             command reaches a live app instead of a cached one the OS has
+             since reclaimed; it owns no playback logic of its own.
+
+             specialUse, NOT dataSync, and the difference is a trap worth
+             spelling out: Android 15 caps dataSync foreground services at 6
+             cumulative hours per 24, but only for apps targeting SDK 35+. At
+             targetSdk 34 dataSync would work fine today and then start
+             killing the link the moment anyone bumps targetSdk — showing up
+             as "the DJ stops working in the evenings", nowhere near the
+             commit responsible. specialUse has no timeout at any targetSdk,
+             and the Play review that usually makes it awkward is moot for a
+             sideloaded app. -->
+        <service
+            android:name=".playback.DjLinkService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Maintains a persistent remote-control link to the user's self-hosted Audiplex server so playback commands arrive while the app is idle." />
+        </service>
+
+        <!-- Always-on has to survive a reboot, or it just means "until the
+             phone restarts". -->
+        <receiver
+            android:name=".playback.BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <!-- WorkManager runs DownloadWorker in its own SystemForegroundService.
              On Android 14 (targetSdk 34) setForeground(... DATA_SYNC) throws
