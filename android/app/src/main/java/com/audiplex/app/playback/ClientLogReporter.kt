@@ -18,6 +18,46 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/** One process death, flattened off ApplicationExitInfo so it can be tested. */
+internal data class ExitRecord(
+    val timestamp: Long,
+    val reason: String,
+    val description: String,
+    val status: Int,
+    val importance: Int,
+    val unexpected: Boolean,
+) {
+    fun detail(): Map<String, String> = mapOf(
+        "reason" to reason,
+        "status" to status.toString(),
+        "importance" to importance.toString(),
+        "at" to timestamp.toString(),
+    )
+}
+
+/**
+ * Ship every exit newer than [since], oldest first, and return the timestamp of
+ * the last one the server ACTUALLY TOOK — 0 if none got through.
+ *
+ * The invariant, and the whole reason this is a separate function: the
+ * watermark may never move past an entry that was not delivered. The first cut
+ * advanced it for entries it had merely attempted, so a null API client at
+ * startup silently consumed the exact records the feature existed to capture.
+ * A dropped death report is unrecoverable; a duplicated one is noise.
+ */
+internal suspend fun shipExits(
+    exits: List<ExitRecord>,
+    since: Long,
+    send: suspend (ExitRecord) -> Boolean,
+): Long {
+    var lastSent = 0L
+    for (exit in exits.filter { it.timestamp > since }.sortedBy { it.timestamp }) {
+        if (!send(exit)) break
+        lastSent = exit.timestamp
+    }
+    return lastSent
+}
+
 /**
  * Ships client-side diagnostics to the server (#2961).
  *
@@ -102,30 +142,26 @@ class ClientLogReporter @Inject constructor(
                 val since = settingsStore.lastExitReportedAt.first()
                 val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
                 val exits = am.getHistoricalProcessExitReasons(context.packageName, 0, MAX_EXITS)
-                    .filter { it.timestamp > since }
-                    .sortedBy { it.timestamp }
-                if (exits.isEmpty()) return@runCatching
+                    .map { info ->
+                        ExitRecord(
+                            timestamp = info.timestamp,
+                            reason = reasonName(info.reason),
+                            description = info.description ?: reasonName(info.reason),
+                            status = info.status,
+                            importance = info.importance,
+                            unexpected = isUnexpected(info.reason),
+                        )
+                    }
+                if (exits.none { it.timestamp > since }) return@runCatching
                 if (!awaitApi()) return@runCatching
 
-                // Advance the watermark only past entries the server actually
-                // took. Anything unsent stays unmarked and is retried on the
-                // next launch — a dropped death report is unrecoverable, a
-                // duplicated one is merely noise.
-                var lastSent = 0L
-                for (info in exits) {
-                    val ok = send(
-                        level = if (isUnexpected(info.reason)) "error" else "info",
+                val lastSent = shipExits(exits, since) { exit ->
+                    send(
+                        level = if (exit.unexpected) "error" else "info",
                         event = "process_exit",
-                        message = info.description ?: reasonName(info.reason),
-                        detail = mapOf(
-                            "reason" to reasonName(info.reason),
-                            "status" to info.status.toString(),
-                            "importance" to info.importance.toString(),
-                            "at" to info.timestamp.toString(),
-                        ),
+                        message = exit.description,
+                        detail = exit.detail(),
                     )
-                    if (!ok) break
-                    lastSent = info.timestamp
                 }
                 if (lastSent > 0L) settingsStore.setLastExitReportedAt(lastSent)
             }
