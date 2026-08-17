@@ -151,11 +151,28 @@ builds the player with `handleAudioFocus = true`, so a denied request leaves
 playWhenReady false with nothing logged anywhere. The same mechanism explains
 the morning's 0.75 s of Barracuda as focus *granted then transiently lost*.
 
-Decisive instrument, not yet built: `Player.Listener.onPlayWhenReadyChanged`
-reports `PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS` explicitly, and
-`onPlaybackSuppressionReasonChanged` reports
-`PLAYBACK_SUPPRESSION_REASON_TRANSIENT_AUDIO_FOCUS_LOSS`. Shipping both to the
-client log would confirm or kill this hypothesis on the next attempt.
+**Decisive instrument — SHIPPED in a3fc24b, APK 1.0.36.**
+`Player.Listener.onPlayWhenReadyChanged` is the only place the distinction
+surfaces: Media3 flips `playWhenReady` back to false with
+`PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS` when a request is refused.
+That plus `onPlaybackSuppressionReasonChanged`
+(`TRANSIENT_AUDIO_FOCUS_LOSS`, for focus lost mid-track to a call or
+assistant) now report to the client log with playback state, suppression
+reason and track id. The next play attempt confirms or kills the hypothesis.
+
+**What to look for in `dj_client_log` after the next DJ play:**
+- `play_when_ready playWhenReady=false reason=AUDIO_FOCUS_LOSS` → hypothesis
+  CONFIRMED, focus was refused or pulled. Fix is a focus-retry/observer, or
+  reconsidering `handleAudioFocus=true`.
+- `playback_suppressed TRANSIENT_AUDIO_FOCUS_LOSS` → something else on the
+  phone grabbed focus mid-track (the Pantheon companion is the obvious
+  candidate — see the deliberate note about mic-hot media-ducking in
+  `setPlayerVolume`).
+- `play_when_ready playWhenReady=true reason=USER_REQUEST` followed by silence
+  and no error → focus was fine; the fault is downstream and the hypothesis
+  is WRONG. Look at the renderer / data source next.
+- No `play_when_ready` entry at all → `play()` never reached the controller;
+  look at command dispatch, not playback.
 
 ## Still open
 
@@ -163,16 +180,13 @@ client log would confirm or kill this hypothesis on the next attempt.
 - Why process A actually died on 08-14 morning. Still unconfirmed. Note the
   19:35 retest was NOT a death, so the two incidents may share one cause (audio
   focus) or be separate.
-- **APK 1.0.35 is built and waiting** (commits 2cc2567 + d9560ca): fixed
-  process-exit reporter — waits for a usable API client, advances the watermark
-  only on confirmed delivery, and resets the watermark key so the next launch
-  re-ships the exit history Android still holds, including 16:02:58Z. Six unit
-  tests pin the invariant (`ShipExitsTest`). The device is still on 1.0.33, so
-  no exit reasons have shipped yet.
-- Audio-focus instrumentation (`onPlayWhenReadyChanged` +
-  `onPlaybackSuppressionReasonChanged` → client log). Proposed, not approved,
-  and now the highest-value next step — it tests the leading hypothesis
-  directly and is a handful of lines.
+- **APK 1.0.36 is built and waiting** — the one install Todd needs. It carries
+  everything since 1.0.33: the fixed process-exit reporter (2cc2567, waits for
+  a usable API client, advances the watermark only on confirmed delivery, and
+  resets the watermark key so the next launch re-ships the exit history Android
+  still holds including 16:02:58Z), the test pinning that invariant (d9560ca,
+  `ShipExitsTest`, 6 cases), and the audio-focus instrumentation (a3fc24b).
+  The device is still on 1.0.33, so no exit reasons have shipped yet.
 - Phase 3 (command registry + ACK + WS doorbell) still held pending live
   verification, per jarvis #2966.
 - Server on :8100 has been running the new code and stable since 08-14.
