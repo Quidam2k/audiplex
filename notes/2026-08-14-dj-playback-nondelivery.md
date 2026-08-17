@@ -160,6 +160,36 @@ That plus `onPlaybackSuppressionReasonChanged`
 assistant) now report to the client log with playback state, suppression
 reason and track id. The next play attempt confirms or kills the hypothesis.
 
+### 08-17 16:25 — first focus telemetry, healthy path
+
+Todd played the first track of Misplaced Childhood manually and stopped it.
+`playWhenReady=true reason=USER_REQUEST` (BUFFERING, suppression NONE,
+track 208), then `playWhenReady=false reason=USER_REQUEST` (READY) at his
+manual stop. Zero focus-loss entries, zero suppression, no player error.
+Focus is available on the device; nothing is permanently holding it. The DJ
+path remains untested — this was a manual play.
+
+Also: the phone's clock runs ~8.4 s AHEAD of the server's (client `at` vs
+server `received_at`). Do not correlate the two naively.
+
+### The DJ path and the manual path run the SAME playback code
+
+`playAlbum → playTrackList`, and DJ `play_now → playTracks → playTrackList`.
+Identical function, identical media pipeline. So a DJ-path-specific failure is
+**not** in the playback logic — it is in the caller context: a DJ command
+dispatches from an Application-scope IO coroutine via `withContext(Main)`,
+usually while the app is BACKGROUNDED, whereas a manual play comes from a
+foregrounded ViewModel. A backgrounded app is exactly the case Android most
+often refuses audio focus for, and the same context that makes Media3's
+foreground-service promotion fail.
+
+**Next experiment — run `dj_play_now` twice:** once with the app foregrounded,
+once backgrounded (screen off or another app on top). If foreground succeeds
+and background shows `AUDIO_FOCUS_LOSS`, the hypothesis is confirmed *and*
+localized in one shot — and the foreground-service standby answer becomes the
+fix for the bug, not just for the wake problem. If both succeed, the fault is
+elsewhere and the next probe is reproducing with the Pantheon companion active.
+
 **What to look for in `dj_client_log` after the next DJ play:**
 - `play_when_ready playWhenReady=false reason=AUDIO_FOCUS_LOSS` → hypothesis
   CONFIRMED, focus was refused or pulled. Fix is a focus-retry/observer, or
