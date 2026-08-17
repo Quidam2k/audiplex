@@ -110,9 +110,78 @@ class PlaybackManager @Inject constructor(
     private fun isMisc(): Boolean = _currentBook.value?.category == "audiobook_misc"
     private fun isMusic(): Boolean = _currentMusic.value != null
 
+    private fun currentTrackId(): Int? =
+        _currentMusic.value?.let { it.items.getOrNull(it.currentIndex)?.track?.id }
+
+    private fun playWhenReadyReasonName(reason: Int): String = when (reason) {
+        Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST -> "USER_REQUEST"
+        Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS -> "AUDIO_FOCUS_LOSS"
+        Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY -> "AUDIO_BECOMING_NOISY"
+        Player.PLAY_WHEN_READY_CHANGE_REASON_REMOTE -> "REMOTE"
+        Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM -> "END_OF_MEDIA_ITEM"
+        else -> "UNKNOWN($reason)"
+    }
+
+    private fun suppressionReasonName(reason: Int): String = when (reason) {
+        Player.PLAYBACK_SUPPRESSION_REASON_NONE -> "NONE"
+        Player.PLAYBACK_SUPPRESSION_REASON_TRANSIENT_AUDIO_FOCUS_LOSS -> "TRANSIENT_AUDIO_FOCUS_LOSS"
+        else -> "UNKNOWN($reason)"
+    }
+
+    private fun playbackStateName(state: Int): String = when (state) {
+        Player.STATE_IDLE -> "IDLE"
+        Player.STATE_BUFFERING -> "BUFFERING"
+        Player.STATE_READY -> "READY"
+        Player.STATE_ENDED -> "ENDED"
+        else -> "UNKNOWN($state)"
+    }
+
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(playing: Boolean) {
             _isPlaying.value = playing
+        }
+
+        /**
+         * Why playback started, stopped, or never started at all (#2961).
+         *
+         * The 08-14 19:35Z DJ command loaded its queue, connected a controller,
+         * called play() — and three seconds later sat at playing=false,
+         * position 0, with no error of any kind. A denied audio-focus request
+         * produces exactly that and logs nothing anywhere, because it is not a
+         * failure as far as ExoPlayer is concerned. This callback is the only
+         * place that distinction is visible: Media3 flips playWhenReady back to
+         * false with AUDIO_FOCUS_LOSS when the request is refused.
+         */
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            val focusRelated = reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS
+            clientLog.report(
+                level = if (focusRelated) "error" else "info",
+                event = "play_when_ready",
+                message = "playWhenReady=$playWhenReady reason=${playWhenReadyReasonName(reason)}",
+                detail = buildMap {
+                    put("playWhenReady", playWhenReady.toString())
+                    put("reason", playWhenReadyReasonName(reason))
+                    controller?.let {
+                        put("playbackState", playbackStateName(it.playbackState))
+                        put("suppression", suppressionReasonName(it.playbackSuppressionReason))
+                    }
+                    currentTrackId()?.let { put("trackId", it.toString()) }
+                },
+            )
+        }
+
+        /** Playing was requested and granted, but something is holding it — most
+         * often a transient focus loss to a call, alarm or assistant. */
+        override fun onPlaybackSuppressionReasonChanged(reason: Int) {
+            clientLog.report(
+                level = if (reason == Player.PLAYBACK_SUPPRESSION_REASON_NONE) "info" else "error",
+                event = "playback_suppressed",
+                message = suppressionReasonName(reason),
+                detail = buildMap {
+                    put("suppression", suppressionReasonName(reason))
+                    currentTrackId()?.let { put("trackId", it.toString()) }
+                },
+            )
         }
 
         /**
