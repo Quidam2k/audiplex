@@ -116,9 +116,63 @@ Android:
   `dj_now_playing` continuing to update after playback starts — which is
   exactly what root cause 1 prevented.
 
+## Field evidence from the 2026-08-14 19:35Z retest (read 08-17)
+
+Todd installed 1.0.33 and the queued command drained. Server-side record:
+
+| Time (UTC) | Evidence |
+|---|---|
+| 19:35:11 | command #1 `play_now` delivered (device endpoint) |
+| 19:35:13 | play_stats row 3: track 65 `start` — **one row, not two** |
+| 19:35:16 | state report: `playing:false, track:65 Barracuda, position_ms:0, duration_ms:263522, queue_length:2, volume:1.0` |
+| 19:35:16 → 01:27:05 (08-15) | app kept polling for ~5.9 more hours; **no further state reports, no client-log entries at all** |
+
+**Two fixes are proven in the field:**
+
+1. *Report loop survives a live controller.* `duration_ms: 263522` is set inside
+   the `ensureController {}` callback, so a MediaController was connected when
+   that report was posted. Under the old code `playerVolume()` would have thrown
+   at that exact moment and no report could have existed. The Phase 2 fix works.
+2. *Duplicate `start` is gone.* One row at 19:35:13 against the pair 3 ms apart
+   that morning.
+
+**The primary bug is NOT a process death, and it is not a stream failure.**
+The process lived nearly six hours past the command. The queue loaded, the
+controller connected, `prepare()` and `play()` ran, the start stat posted — and
+three seconds later playback was `false` at position 0, and it never moved
+again. Critically, **no `onPlayerError` ever fired**: the app was demonstrably
+able to POST (it was polling throughout), so a player error would have reached
+the client log, and the log is empty. That rules out stream, network, auth and
+decode failures.
+
+Queue loaded + no error + `playing:false` + position 0 is the signature of an
+**audio-focus request that was denied or immediately lost**. `PlaybackService`
+builds the player with `handleAudioFocus = true`, so a denied request leaves
+playWhenReady false with nothing logged anywhere. The same mechanism explains
+the morning's 0.75 s of Barracuda as focus *granted then transiently lost*.
+
+Decisive instrument, not yet built: `Player.Listener.onPlayWhenReadyChanged`
+reports `PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS` explicitly, and
+`onPlaybackSuppressionReasonChanged` reports
+`PLAYBACK_SUPPRESSION_REASON_TRANSIENT_AUDIO_FOCUS_LOSS`. Shipping both to the
+client log would confirm or kill this hypothesis on the next attempt.
+
 ## Still open
 
 - Todd's ruling on the standby mechanism (foreground DJ-link service vs FCM).
-- Why process A actually died. Unchanged and still unconfirmed — but the app now
-  self-reports it, so the next occurrence answers it.
-- Deploy: server restart (new endpoints) + APK install on the Pixel.
+- Why process A actually died on 08-14 morning. Still unconfirmed. Note the
+  19:35 retest was NOT a death, so the two incidents may share one cause (audio
+  focus) or be separate.
+- **APK 1.0.35 is built and waiting** (commits 2cc2567 + d9560ca): fixed
+  process-exit reporter — waits for a usable API client, advances the watermark
+  only on confirmed delivery, and resets the watermark key so the next launch
+  re-ships the exit history Android still holds, including 16:02:58Z. Six unit
+  tests pin the invariant (`ShipExitsTest`). The device is still on 1.0.33, so
+  no exit reasons have shipped yet.
+- Audio-focus instrumentation (`onPlayWhenReadyChanged` +
+  `onPlaybackSuppressionReasonChanged` → client log). Proposed, not approved,
+  and now the highest-value next step — it tests the leading hypothesis
+  directly and is a handful of lines.
+- Phase 3 (command registry + ACK + WS doorbell) still held pending live
+  verification, per jarvis #2966.
+- Server on :8100 has been running the new code and stable since 08-14.
