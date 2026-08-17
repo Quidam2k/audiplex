@@ -251,3 +251,51 @@ so a plan-back is required before code (#3022).
 - Phase 3 (command registry + ACK + WS doorbell) still held pending live
   verification, per jarvis #2966.
 - Server on :8100 has been running the new code and stable since 08-14.
+
+## 08-17 (later) — planning session for the FGS bundle (#3022/#3021/#3024)
+
+Fresh worker, plan-back #9210 submitted. Three findings that reshape the work:
+
+**1. `targetSdk` is 34, so the always-on FGS is legal today — with a tripwire.**
+Android 15's 6h-per-24h timeout on `dataSync` foreground services is gated on
+targetSdk 35+. At 34 we are exempt even on a Pixel running 15/16. The day
+anyone bumps targetSdk to 35, the DJ link starts dying after 6 cumulative
+hours a day, silently, and it will look like a regression somewhere else.
+Recommendation: use the `specialUse` FGS type, which has no timeout at any
+targetSdk, rather than `dataSync`.
+
+**2. There is no track rating anywhere — `dj_rate` rates RECOMMENDATIONS.**
+`dj_rate`/`dj_taste` operate on a `recs` table in MCP-side SQLite
+(`audiplex_mcp/data/dj/taste.db`), deliberately kept out of `audiplex.db`
+because a recommendation has no track row to hang off. The audiplex server has
+no rating model, table or endpoint at all. So #3024 is a new store + endpoints
++ UI + MCP surface, not a UI-over-existing-store job. Note also
+`audiplex_mcp/server.py` ~1029, which deferred app-side rating UI as costing
+"a build, a versionCode bump and an in-app update round-trip ... before we
+know the signal is worth anything" — Todd's ask overrides that, and the APK
+cost is being paid for the FGS anyway.
+
+**3. The client log is in-memory only and the trace shipper will race it.**
+`playback_bus`'s client log is a 200-entry ring buffer with no persistence,
+and the exit watermark advances on delivery. Ship #3021 as-is and a server
+restart between delivery and reading destroys the 08-14 trace permanently —
+watermark says shipped, Android rolls the record off, artifact gone. Fix
+(persist `process_exit` entries to disk) belongs in the same phase as the
+trace shipper, not after it.
+
+**Blocked, needs Jarvis:** could not read the live client log — the endpoint
+needs a Bearer token and minting one from the config `jwt_secret` was denied
+by the auto-mode classifier. Not worked around. Asked Jarvis to paste
+`dj_client_log`'s `process_exit` entries; that is the last thing between
+#3019 and closure, and it also shows whether SIGNALED records really arrive
+with blank descriptions before the fix is written blind.
+
+**Design principle for the FGS, from Todd's reversibility requirement:** the
+service owns nothing. `DjCommandClient`'s loops stay app-scoped and unchanged;
+`DjLinkService`'s only job is keeping the process alive and holding a
+notification. Toggle it off and behaviour is bit-for-bit what it is today.
+Nothing else may ever depend on it.
+
+Also queued as a near-free win: with the FGS up, a DJ play with the app closed
+is the **backgrounded** audio-focus experiment that never ran (see above). If
+the FGS is the fix for 08-14, that is the test where it shows.
