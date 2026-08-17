@@ -190,6 +190,37 @@ localized in one shot — and the foreground-service standby answer becomes the
 fix for the bug, not just for the wake problem. If both succeed, the fault is
 elsewhere and the next probe is reproducing with the Pantheon companion active.
 
+### 08-17 16:27 — DJ path tested CLEAN. Do not re-run this test.
+
+Jarvis fired `dj_play_now` for track 65 (Barracuda) **with the app open**.
+Client log: `playWhenReady=true reason=USER_REQUEST`, BUFFERING,
+suppression=NONE, trackId=65. Audible playback confirmed by Todd; manual stop
+30 s later. So the DJ command path is healthy end-to-end under clean
+conditions and **the 08-14 19:35 failure did not reproduce**.
+
+Score: the audio-focus hypothesis is **neither confirmed nor dead**. It stays
+open specifically for failure-night conditions, where the Pantheon companion's
+mic-hot media-ducking is the standing suspect. The instrumentation itself is
+proven live in the field, so a recurrence now self-identifies — waiting is a
+legitimate strategy.
+
+One precision for whoever picks this up: this was experiment (1) of the
+two-part test below — app **foregrounded**. The **backgrounded** variant was
+never run, and that was the actual discriminating variable, since a
+backgrounded app is the case Android most often refuses focus for. Jarvis has
+deprioritized it in favour of the companion-active reproduction (#3023); noting
+it only so nobody concludes the foreground/background question was answered.
+
+### Todd's standby ruling (relayed by jarvis, 08-17 16:27, msg 20639)
+
+**Build the always-on foreground DJ-link service.** His framing: *"We can
+change our mind later if it ends up not being a good idea. But it sounds like
+that's kind of what we're going to need in order to get that kind of feature
+set."* So **reversibility is part of the requirement** — the FGS must stay
+cleanly toggleable and must not become load-bearing for unrelated features.
+Evidence basis is the `LOW_MEMORY` + 4× `SIGKILL` history above. Architectural,
+so a plan-back is required before code (#3022).
+
 **What to look for in `dj_client_log` after the next DJ play:**
 - `play_when_ready playWhenReady=false reason=AUDIO_FOCUS_LOSS` → hypothesis
   CONFIRMED, focus was refused or pulled. Fix is a focus-retry/observer, or
