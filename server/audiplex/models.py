@@ -248,3 +248,41 @@ class Favorite(Base):
         ForeignKey("users.id", ondelete="CASCADE"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
+class TrackTagRepair(Base):
+    """A proposed correction to one file's artist/title, and the case for it.
+
+    An OVERLAY, not an edit. Todd's original files are never rewritten and the
+    YouTube channel tag stays where it is, because it is the evidence — once
+    overwritten there is no second opinion left to appeal to.
+
+    Keyed by `file_path` rather than `track_id` for a specific reason: the music
+    scanner used to delete every track in a changed album and re-insert it, and
+    `tracks.id` is a plain INTEGER PRIMARY KEY, so SQLite reuses rowids. A
+    repair bound to a track id would follow the id onto a DIFFERENT song. The
+    path outlives the row; `source_url` (the YouTube URL from the file's comment
+    tag) outlives even a rename, which is why both are kept.
+
+    `status` gates writing, and only `high` confidence is ever set to `applied`
+    automatically. A wrong artist is worse than a blank one: identity keys
+    derive from normalized(title, artist), so a bad guess quietly poisons
+    ratings and cooldown, while a blank one only limits them.
+    """
+
+    __tablename__ = "track_tag_repairs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    source_url: Mapped[str | None] = mapped_column(String(500), index=True)
+    proposed_artist: Mapped[str | None] = mapped_column(String(500))
+    proposed_title: Mapped[str | None] = mapped_column(String(500))
+    proposed_album: Mapped[str | None] = mapped_column(String(500))
+    confidence: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(20), default="parser", nullable=False)
+    evidence: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(
+        String(20), default="pending_review", nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)

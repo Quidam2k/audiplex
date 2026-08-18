@@ -20,7 +20,8 @@ from pathlib import Path
 import mutagen
 from sqlalchemy.orm import Session
 
-from audiplex.models import Album, Artist, Track
+from audiplex import tag_repair
+from audiplex.models import Album, Artist, Track, TrackTagRepair
 from audiplex.schemas import ScanResultSchema
 from audiplex.utils.cover_art import (
     extract_embedded_cover,
@@ -107,6 +108,12 @@ def _read_track(track_path: Path) -> dict | None:
 
     duration = float(audio.info.length) if audio.info and audio.info.length else 0.0
     title = _easy_tag(audio, "title")
+    # The artist tag is READ but never trusted blindly — on a YouTube rip it
+    # holds the uploading channel, not the performer. tag_repair.propose weighs
+    # it against the title. Before #3037 it was not read at all, which is why a
+    # correctly tagged album landed under "Various Artists".
+    artist = _easy_tag(audio, "artist")
+    comment = _easy_tag(audio, "comment")
     year_tag = _easy_tag(audio, "date") or _easy_tag(audio, "year")
     year = None
     if year_tag:
@@ -129,6 +136,8 @@ def _read_track(track_path: Path) -> dict | None:
     return {
         "duration": duration,
         "title": title,
+        "artist": artist,
+        "comment": comment,
         "year": year,
         "track_number": track_num,
     }
@@ -168,10 +177,17 @@ def _genre_from_path(album_folder: Path, root: Path) -> str | None:
 
 
 def _artist_from_path(album_folder: Path, root: Path) -> str:
-    """Artist = album folder's parent unless album_folder is directly under root."""
-    if album_folder.parent == root:
+    """Artist = album folder's parent unless album_folder is directly under root.
+
+    The parent's NAME can be empty — when the album folder is the music root
+    itself (`q:\\music`), its parent is the drive root, whose `.name` is `""`.
+    That produced one nameless artist owning 207 loose tracks (#3037). A folder
+    that is its own album has no artist above it to inherit, so it is Various
+    Artists, and each track's real artist is resolved per file instead.
+    """
+    if album_folder == root or album_folder.parent == root:
         return VARIOUS_ARTISTS
-    return album_folder.parent.name
+    return album_folder.parent.name or VARIOUS_ARTISTS
 
 
 def _get_or_create_artist(db: Session, name: str, cache: dict[str, Artist]) -> Artist:
@@ -272,6 +288,84 @@ def _populate_cover(album: Album, album_folder: Path, tracks: list[Path], cache_
     return False
 
 
+def _repairs_for(db: Session, paths: list[str]) -> dict[str, TrackTagRepair]:
+    """Existing repair rows for these files, keyed by path.
+
+    Chunked because SQLite caps the number of bound variables in one statement
+    and a flat dump album can hold every track in the library.
+    """
+    found: dict[str, TrackTagRepair] = {}
+    chunk = 500
+    for start in range(0, len(paths), chunk):
+        rows = (
+            db.query(TrackTagRepair)
+            .filter(TrackTagRepair.file_path.in_(paths[start : start + chunk]))
+            .all()
+        )
+        for row in rows:
+            found[row.file_path] = row
+    return found
+
+
+def _all_weighed(db: Session, track_infos: list[tuple[Path, int, dict]]) -> bool:
+    """True when every file in this album already has a repair verdict."""
+    paths = [str(tpath) for tpath, _, _ in track_infos]
+    return len(_repairs_for(db, paths)) == len(set(paths))
+
+
+def _propose_for(tpath: Path, info: dict) -> tag_repair.Proposal:
+    return tag_repair.propose(
+        title_tag=info.get("title"),
+        artist_tag=info.get("artist"),
+        filename_stem=tpath.stem,
+        comment=info.get("comment"),
+    )
+
+
+def _record_proposal(
+    db: Session, tpath: Path, info: dict, proposal: tag_repair.Proposal
+) -> TrackTagRepair:
+    """Write one file's proposal to the overlay. This is the ingest half of
+    #3037: anything that arrives later is weighed by the same ladder that
+    repaired the existing catalog, so the library cannot drift back.
+
+    Only `high` confidence is marked applied. Everything else lands as
+    pending_review with its evidence attached — a worklist, not a silent gap.
+    """
+    comment = info.get("comment") or ""
+    row = TrackTagRepair(
+        file_path=str(tpath),
+        source_url=comment if tag_repair.is_youtube_rip(comment) else None,
+        proposed_artist=proposal.artist,
+        proposed_title=proposal.title,
+        confidence=proposal.confidence,
+        source=tag_repair.SOURCE_PARSER,
+        evidence=proposal.evidence,
+        status=(
+            tag_repair.APPLIED if proposal.auto_applicable else tag_repair.PENDING_REVIEW
+        ),
+    )
+    db.add(row)
+    return row
+
+
+def _resolve_track(
+    tpath: Path, info: dict, repair: TrackTagRepair | None, album_artist: str
+) -> tuple[str, str]:
+    """(artist, title) for one file.
+
+    An applied repair wins — it is the only source that has been weighed
+    against every signal. Otherwise fall back to the album's path-derived
+    artist, which is right for a real `<Artist>/<Album>/` tree and merely
+    unhelpful for a flat dump.
+    """
+    if repair is not None and repair.status == tag_repair.APPLIED:
+        artist = repair.proposed_artist or album_artist
+        title = repair.proposed_title or info.get("title") or _title_fallback(tpath)
+        return artist, title
+    return album_artist, (info.get("title") or _title_fallback(tpath))
+
+
 def _process_album_folder(
     db: Session,
     album_folder: Path,
@@ -315,7 +409,11 @@ def _process_album_folder(
         existing_hash = _folder_hash(
             existing.folder_path, existing.duration_seconds, existing.track_count
         )
-        if existing_hash == file_hash:
+        # The hash covers path, duration and count — nothing about tag quality.
+        # An album whose files never change would therefore never be weighed by
+        # the repair ladder at all, so the fast path also requires that every
+        # file already has a verdict on record (#3037).
+        if existing_hash == file_hash and _all_weighed(db, track_infos):
             return "skipped", warnings
 
     artist = _get_or_create_artist(db, artist_name, artist_cache)
@@ -328,12 +426,7 @@ def _process_album_folder(
         existing.duration_seconds = total_duration
         existing.track_count = len(track_infos)
 
-        # Drop existing tracks, re-insert.
-        for t in list(existing.tracks):
-            db.delete(t)
-        db.flush()
-
-        _insert_tracks(db, existing, artist, track_infos)
+        _sync_tracks(db, existing, artist_name, track_infos, artist_cache)
         existing.has_cover = _populate_cover(
             existing, album_folder, [t for t, _, _ in track_infos], cover_cache_dir
         )
@@ -352,41 +445,85 @@ def _process_album_folder(
     db.add(album)
     db.flush()
 
-    _insert_tracks(db, album, artist, track_infos)
+    _sync_tracks(db, album, artist_name, track_infos, artist_cache)
     album.has_cover = _populate_cover(
         album, album_folder, [t for t, _, _ in track_infos], cover_cache_dir
     )
     return "added", warnings
 
 
-def _insert_tracks(
+def _sync_tracks(
     db: Session,
     album: Album,
-    artist: Artist,
+    album_artist: str,
     track_infos: list[tuple[Path, int, dict]],
+    artist_cache: dict[str, Artist],
 ) -> None:
+    """Reconcile this album's tracks against what is on disk, IN PLACE.
+
+    This used to delete every track in a changed album and re-insert it, which
+    destroyed listening history on the next scan: PlayStat rows went with the
+    ORM delete-orphan cascade, and TrackRating rows were left pointing at dead
+    ids that SQLite would later hand to a different song. Dropping one new file
+    into the music folder was enough to fire it, because the album's hash is
+    (path, duration, track count).
+
+    So: match by file_path — the one identifier that survives a rescan — update
+    what changed, and delete only the tracks whose files are genuinely gone.
+    """
+    existing_by_path = {t.file_path: t for t in album.tracks}
+    paths = [str(tpath) for tpath, _, _ in track_infos]
+    repairs = _repairs_for(db, paths)
+
+    seen: set[str] = set()
     for natural_index, (tpath, disc, info) in enumerate(track_infos, start=1):
+        path_str = str(tpath)
+        seen.add(path_str)
+
+        repair = repairs.get(path_str)
+        if repair is None:
+            repair = _record_proposal(db, tpath, info, _propose_for(tpath, info))
+
+        artist_name, title = _resolve_track(tpath, info, repair, album_artist)
+        artist = _get_or_create_artist(db, artist_name, artist_cache)
+
         track_num = (
             _track_number_from_filename(tpath)
             or info.get("track_number")
             or natural_index
         )
-        title = info.get("title") or _title_fallback(tpath)
         try:
             file_size = tpath.stat().st_size
         except OSError:
             file_size = 0
 
-        db.add(Track(
-            title=title,
-            album_id=album.id,
-            artist_id=artist.id,
-            disc_number=disc,
-            track_number=track_num,
-            duration_seconds=info["duration"],
-            file_path=str(tpath),
-            file_size=file_size,
-        ))
+        track = existing_by_path.get(path_str)
+        if track is None:
+            db.add(Track(
+                title=title,
+                album_id=album.id,
+                artist_id=artist.id,
+                disc_number=disc,
+                track_number=track_num,
+                duration_seconds=info["duration"],
+                file_path=path_str,
+                file_size=file_size,
+            ))
+            continue
+
+        track.title = title
+        track.album_id = album.id
+        track.artist_id = artist.id
+        track.disc_number = disc
+        track.track_number = track_num
+        track.duration_seconds = info["duration"]
+        track.file_size = file_size
+
+    for path_str, track in existing_by_path.items():
+        if path_str not in seen:
+            db.delete(track)
+
+    db.flush()
 
 
 def scan_music(

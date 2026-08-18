@@ -341,11 +341,19 @@ def scan_library(db: Session, library_roots, cover_cache_dir: str) -> ScanResult
             errors.append(f"Error sweeping removed albums: {e}")
             logger.error("Error sweeping removed albums", exc_info=True)
 
-        # Garbage-collect Artists with no remaining albums.
+        # Garbage-collect Artists with no remaining albums AND no remaining
+        # tracks. The track clause is not redundant: since #3037 a track can
+        # carry its own artist, distinct from the album's. A flat dump of
+        # YouTube rips is one "Various Artists" album whose tracks name a
+        # hundred real performers, and none of them owns an album. Checking
+        # albums alone deleted every one of them, and `Artist.tracks` has no
+        # delete cascade, so SQLAlchemy nulled tracks.artist_id on the way out.
         try:
             db.flush()
             orphan_artists = (
-                db.query(Artist).filter(~Artist.albums.any()).all()
+                db.query(Artist)
+                .filter(~Artist.albums.any(), ~Artist.tracks.any())
+                .all()
             )
             for a in orphan_artists:
                 db.delete(a)

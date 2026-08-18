@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from audiplex.config import get_settings
@@ -8,9 +8,30 @@ class Base(DeclarativeBase):
     pass
 
 
+def _enable_foreign_keys(engine) -> None:
+    """Make SQLite actually honour ON DELETE CASCADE (#3037).
+
+    SQLite parses foreign keys but ignores them unless this pragma is set, and
+    it is per-connection, not per-database. Without it every `ON DELETE
+    CASCADE` in models.py was decoration: deleting a track left its
+    `track_ratings` row behind pointing at a dead id — and since `tracks.id` is
+    a plain INTEGER PRIMARY KEY, SQLite reuses rowids, so the orphan could
+    later reattach to a DIFFERENT song. A rating silently moving to another
+    track is worse than a rating lost.
+    """
+
+    @event.listens_for(engine, "connect")
+    def _set_pragma(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+
 def get_engine(database_url: str | None = None):
     url = database_url or get_settings().database_url
-    return create_engine(url, connect_args={"check_same_thread": False})
+    engine = create_engine(url, connect_args={"check_same_thread": False})
+    _enable_foreign_keys(engine)
+    return engine
 
 
 def get_session_factory(engine=None):
@@ -186,6 +207,46 @@ def _migrate_favorites_constraint(engine):
         conn.execute(text("DROP TABLE _fav_old"))
 
 
+def _migrate_create_track_tag_repairs(engine):
+    """Create the tag-repair overlay table (#3037).
+
+    Keyed by file_path, not track_id — see models.TrackTagRepair on why binding
+    a repair to a reusable rowid would eventually move it onto another song.
+    """
+    inspector = inspect(engine)
+    if "track_tag_repairs" in inspector.get_table_names():
+        return
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE track_tag_repairs ("
+            "  id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,"
+            "  file_path TEXT NOT NULL UNIQUE,"
+            "  source_url VARCHAR(500),"
+            "  proposed_artist VARCHAR(500),"
+            "  proposed_title VARCHAR(500),"
+            "  proposed_album VARCHAR(500),"
+            "  confidence VARCHAR(20) NOT NULL,"
+            "  source VARCHAR(20) NOT NULL DEFAULT 'parser',"
+            "  evidence TEXT DEFAULT '',"
+            "  status VARCHAR(20) NOT NULL DEFAULT 'pending_review',"
+            "  created_at TIMESTAMP,"
+            "  updated_at TIMESTAMP"
+            ")"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_track_tag_repairs_status"
+            " ON track_tag_repairs (status)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_track_tag_repairs_confidence"
+            " ON track_tag_repairs (confidence)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_track_tag_repairs_source_url"
+            " ON track_tag_repairs (source_url)"
+        ))
+
+
 def init_db(database_url: str | None = None):
     """Initialize the database engine and session factory.
 
@@ -205,6 +266,7 @@ def init_db(database_url: str | None = None):
     _migrate_add_user_id_columns(_engine)
     _migrate_playback_positions_constraint(_engine)
     _migrate_favorites_constraint(_engine)
+    _migrate_create_track_tag_repairs(_engine)
     Base.metadata.create_all(bind=_engine)
     return _engine
 

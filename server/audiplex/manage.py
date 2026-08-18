@@ -92,6 +92,36 @@ def cmd_reset_password(args) -> int:
         db.close()
 
 
+def cmd_tag_repair_dryrun(args) -> int:
+    """Report what tag repair would do. Writes nothing to the catalog (#3037)."""
+    from audiplex import tag_repair_report
+
+    db = _session()
+    try:
+        rows = tag_repair_report.collect(db)
+        if not rows:
+            print("no tracks in the catalog — nothing to weigh")
+            return 0
+
+        report = tag_repair_report.render(rows)
+        if args.out:
+            with open(args.out, "w", encoding="utf-8") as handle:
+                handle.write(report)
+            print(f"report written to {args.out}", file=sys.stderr)
+        else:
+            print(report)
+
+        if args.export_unresolved:
+            count = tag_repair_report.write_export(rows, args.export_unresolved)
+            print(
+                f"{count} unresolved tracks exported to {args.export_unresolved}",
+                file=sys.stderr,
+            )
+        return 0
+    finally:
+        db.close()
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m audiplex.manage",
@@ -110,6 +140,17 @@ def main(argv=None) -> int:
         help="new password; omit to be prompted (avoids shell history)",
     )
     reset.set_defaults(func=cmd_reset_password)
+
+    dryrun = sub.add_parser(
+        "tag-repair-dryrun",
+        help="report what tag repair would change; writes nothing",
+    )
+    dryrun.add_argument("--out", help="write the report here instead of stdout")
+    dryrun.add_argument(
+        "--export-unresolved",
+        help="also write the review bucket as JSON, for the RFL identification pass",
+    )
+    dryrun.set_defaults(func=cmd_tag_repair_dryrun)
 
     args = parser.parse_args(argv)
     return args.func(args)
