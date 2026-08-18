@@ -23,6 +23,8 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
@@ -64,6 +66,7 @@ fun PlayerScreen(
     val kind by viewModel.playerKind.collectAsState()
     val book by viewModel.currentBook.collectAsState()
     val music by viewModel.currentMusic.collectAsState()
+    val ratings by viewModel.ratings.collectAsState()
     val streamTitle by viewModel.currentStreamTitle.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
     val positionMs by viewModel.positionMs.collectAsState()
@@ -129,6 +132,15 @@ fun PlayerScreen(
                     subtitle = track?.track?.artistName,
                     detail = track?.albumTitle
                 )
+                // Rating lives on music only: the DJ picks tracks, and a
+                // chapter of an audiobook is not a thing you rate (#3024).
+                track?.track?.id?.let { trackId ->
+                    Spacer(Modifier.height(12.dp))
+                    StarRating(
+                        rating = ratings[trackId] ?: 0,
+                        onRate = { stars -> viewModel.rateTrack(trackId, stars) },
+                    )
+                }
             }
             PlayerKind.Stream -> {
                 val title = streamTitle ?: return
@@ -331,5 +343,34 @@ private fun TitleBlock(title: String, subtitle: String?, detail: String?) {
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(horizontal = 32.dp)
         )
+    }
+}
+
+
+/**
+ * Five taps' worth of taste signal (#3024).
+ *
+ * Tapping the star that is already set clears the rating — the natural way to
+ * undo a mis-tap, and the only affordance for "actually, no opinion" that
+ * does not need a second control.
+ */
+@Composable
+private fun StarRating(rating: Int, onRate: (Int) -> Unit) {
+    Row(
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        (1..5).forEach { star ->
+            IconButton(onClick = { onRate(star) }) {
+                Icon(
+                    imageVector = if (star <= rating) Icons.Filled.Star else Icons.Filled.StarBorder,
+                    contentDescription = if (star == rating) "Clear rating" else "Rate $star stars",
+                    tint = if (star <= rating)
+                        MaterialTheme.colorScheme.primary
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }

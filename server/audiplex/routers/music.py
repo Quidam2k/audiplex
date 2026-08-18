@@ -1,6 +1,7 @@
 """Music API — browse genres/artists/albums/tracks, playlists, stream + covers."""
 
 import os
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
@@ -18,6 +19,7 @@ from audiplex.models import (
     PlaylistTrack,
     PlayStat,
     Track,
+    TrackRating,
     User,
 )
 from audiplex.schemas import (
@@ -41,6 +43,8 @@ from audiplex.schemas import (
     PlaylistSummary,
     PlaylistUpdate,
     SkipSuspectSchema,
+    TrackRatingCreate,
+    TrackRatingSchema,
     TrackSchema,
 )
 
@@ -581,6 +585,67 @@ def remove_favorite(entity_type: str, entity_key: str, db: Session = Depends(get
             Favorite.entity_type == entity_type,
             Favorite.entity_key == entity_key,
         )
+        .delete()
+    )
+    db.commit()
+    return {"deleted": deleted}
+
+
+@router.get("/ratings", response_model=list[TrackRatingSchema])
+def list_track_ratings(
+    db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """Every track this user has rated, best first (#3024)."""
+    return (
+        db.query(TrackRating)
+        .filter(TrackRating.user_id == user.id)
+        .order_by(TrackRating.rating.desc(), TrackRating.updated_at.desc())
+        .all()
+    )
+
+
+@router.put("/tracks/{track_id}/rating", response_model=TrackRatingSchema)
+def set_track_rating(
+    track_id: int,
+    body: TrackRatingCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Set or change this user's star rating for a track."""
+    if db.query(Track).filter(Track.id == track_id).first() is None:
+        raise HTTPException(status_code=404, detail="Track not found")
+    existing = (
+        db.query(TrackRating)
+        .filter(TrackRating.user_id == user.id, TrackRating.track_id == track_id)
+        .first()
+    )
+    if existing:
+        existing.rating = body.rating
+        # An explicit re-rate with no note keeps the old one: the note is the
+        # highest-signal column in the table and changing your mind about the
+        # score is not a reason to discard why you felt that way.
+        if body.note:
+            existing.note = body.note
+        existing.updated_at = datetime.now(timezone.utc)
+        rating = existing
+    else:
+        rating = TrackRating(
+            user_id=user.id, track_id=track_id, rating=body.rating, note=body.note
+        )
+        db.add(rating)
+    db.commit()
+    db.refresh(rating)
+    return rating
+
+
+@router.delete("/tracks/{track_id}/rating")
+def clear_track_rating(
+    track_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """Clear a rating — tapping the current star again means 'never mind'."""
+    deleted = (
+        db.query(TrackRating)
+        .filter(TrackRating.user_id == user.id, TrackRating.track_id == track_id)
         .delete()
     )
     db.commit()

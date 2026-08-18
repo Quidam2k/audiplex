@@ -236,6 +236,21 @@ data class FavoriteCreate(
 )
 
 @JsonClass(generateAdapter = true)
+data class TrackRatingCreate(
+    val rating: Int,
+    val note: String = "",
+)
+
+@JsonClass(generateAdapter = true)
+data class TrackRatingSchema(
+    val id: Int,
+    @Json(name = "track_id") val trackId: Int,
+    val rating: Int,
+    val note: String,
+    @Json(name = "updated_at") val updatedAt: String,
+)
+
+@JsonClass(generateAdapter = true)
 data class FavoriteSchema(
     val id: Int,
     @Json(name = "entity_type") val entityType: String,

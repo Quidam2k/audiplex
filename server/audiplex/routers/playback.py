@@ -12,6 +12,7 @@ Endpoints:
   GET  /api/playback/playlists              — owner's playlists (read-only)
   GET  /api/playback/playlists/{id}         — owner's playlist detail
   GET  /api/playback/favorites              — owner's favorites (read-only)
+  GET  /api/playback/ratings                — owner's star ratings (read-only)
 
 All require a valid Bearer token (get_current_user). v1 is single-device, so
 the bus is global: agent and device share one queue + one state regardless of
@@ -34,7 +35,7 @@ from sqlalchemy.orm import Session, selectinload
 from audiplex.auth import get_current_user
 from audiplex.config import get_settings
 from audiplex.database import get_db
-from audiplex.models import Favorite, Playlist, User
+from audiplex.models import Favorite, Playlist, TrackRating, User
 from audiplex.playback_bus import bus, read_persisted_exits
 from audiplex.routers.music import FAVORITE_TYPES, _get_playlist_detail
 from audiplex.schemas import (
@@ -45,6 +46,7 @@ from audiplex.schemas import (
     PlaybackState,
     PlaylistDetail,
     PlaylistSummary,
+    TrackRatingSchema,
 )
 
 router = APIRouter(prefix="/api/playback", tags=["playback"])
@@ -186,3 +188,23 @@ def list_owner_favorites(
             raise HTTPException(status_code=400, detail=f"Unknown entity_type: {entity_type}")
         query = query.filter(Favorite.entity_type == entity_type)
     return query.order_by(Favorite.created_at.desc()).all()
+
+
+@router.get("/ratings", response_model=list[TrackRatingSchema])
+def list_owner_ratings(
+    db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """The owner's star ratings, best first (#3024).
+
+    Owner-scoped for the same reason the playlists and favorites reads above
+    are: the DJ authenticates as dj-agent, which has never rated anything, so
+    a per-caller read would hand it an empty list and it would conclude Todd
+    has no opinions rather than that it was looking at the wrong account.
+    """
+    owner = _resolve_owner(db)
+    return (
+        db.query(TrackRating)
+        .filter(TrackRating.user_id == owner.id)
+        .order_by(TrackRating.rating.desc(), TrackRating.updated_at.desc())
+        .all()
+    )

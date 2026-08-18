@@ -274,6 +274,33 @@ class TestOwnerResolvedLibraryReads:
         assert data["id"] == sample_playlist.id
         assert [t["id"] for t in data["tracks"]] == [sample_track.id]
 
+    def test_owner_ratings_visible_to_dj_agent(self, dj_agent_client, db_session, sample_track):
+        """The DJ must see Todd's stars, not its own empty account (#3024).
+
+        dj-agent has never rated anything, so a per-caller read would return
+        [] and the DJ would conclude Todd has no opinions. The rating is
+        seeded straight onto the configured owner, since the dj_agent_client
+        fixture makes every request authenticate as the agent.
+        """
+        from audiplex.models import TrackRating
+
+        owner = db_session.query(User).filter(User.username == "testuser").first()
+        db_session.add(
+            TrackRating(
+                user_id=owner.id,
+                track_id=sample_track.id,
+                rating=5,
+                note="peak driving music",
+            )
+        )
+        db_session.commit()
+
+        resp = dj_agent_client.get("/api/playback/ratings")
+        assert resp.status_code == 200
+        ratings = resp.json()
+        assert [r["track_id"] for r in ratings] == [sample_track.id]
+        assert ratings[0]["rating"] == 5
+
     def test_missing_owner_404s(self, client, monkeypatch):
         monkeypatch.setattr(get_settings(), "dj_owner_username", "nobody-configured")
         resp = client.get("/api/playback/playlists")

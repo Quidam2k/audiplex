@@ -207,6 +207,34 @@ class PlayStat(Base):
     track: Mapped["Track"] = relationship(back_populates="play_stats")
 
 
+class TrackRating(Base):
+    """Todd's 1-5 star rating for a track (#3024).
+
+    Its own table rather than a Favorite row: Favorite is binary with a
+    polymorphic string key and no room for a score. Tracks only — the DJ
+    reasons about what to play next, and a starred album says much less about
+    the next three minutes than a starred track does.
+
+    Distinct from the MCP-side `recs` table, which rates RECOMMENDATIONS the
+    DJ made about music that may not be in the library at all. These are
+    ratings of tracks that exist here.
+    """
+
+    __tablename__ = "track_ratings"
+    __table_args__ = (UniqueConstraint("user_id", "track_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    track_id: Mapped[int] = mapped_column(
+        ForeignKey("tracks.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    )
+    rating: Mapped[int] = mapped_column(Integer, nullable=False)
+    note: Mapped[str] = mapped_column(String(500), default="")
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
 # Favorite uses a polymorphic key so genres (string-keyed) and
 # tracks/albums/artists/books (int-keyed) share one table.
 class Favorite(Base):

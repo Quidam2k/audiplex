@@ -770,3 +770,55 @@ class TestLikelySkips:
         resp = client.get("/api/music/likely-skips?min_skips=2")
         assert resp.status_code == 200
         assert len(resp.json()) == 1
+
+
+class TestTrackRatings:
+    """#3024: Todd's 1-5 star ratings, the signal the DJ picks from."""
+
+    def test_set_and_read_a_rating(self, client, sample_track):
+        resp = client.put(
+            f"/api/music/tracks/{sample_track.id}/rating",
+            json={"rating": 4, "note": "good driving song"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["rating"] == 4
+
+        ratings = client.get("/api/music/ratings").json()
+        assert len(ratings) == 1
+        assert ratings[0]["track_id"] == sample_track.id
+        assert ratings[0]["note"] == "good driving song"
+
+    def test_rerating_updates_in_place(self, client, sample_track):
+        client.put(f"/api/music/tracks/{sample_track.id}/rating", json={"rating": 2})
+        client.put(f"/api/music/tracks/{sample_track.id}/rating", json={"rating": 5})
+        ratings = client.get("/api/music/ratings").json()
+        assert len(ratings) == 1, "re-rating must not create a second row"
+        assert ratings[0]["rating"] == 5
+
+    def test_rerating_without_a_note_keeps_the_old_one(self, client, sample_track):
+        client.put(
+            f"/api/music/tracks/{sample_track.id}/rating",
+            json={"rating": 2, "note": "too slow for a workout"},
+        )
+        client.put(f"/api/music/tracks/{sample_track.id}/rating", json={"rating": 4})
+        ratings = client.get("/api/music/ratings").json()
+        # Changing your mind about the score is not a reason to discard why.
+        assert ratings[0]["note"] == "too slow for a workout"
+        assert ratings[0]["rating"] == 4
+
+    def test_clearing_a_rating(self, client, sample_track):
+        client.put(f"/api/music/tracks/{sample_track.id}/rating", json={"rating": 3})
+        resp = client.delete(f"/api/music/tracks/{sample_track.id}/rating")
+        assert resp.json()["deleted"] == 1
+        assert client.get("/api/music/ratings").json() == []
+
+    def test_out_of_range_ratings_are_rejected(self, client, sample_track):
+        for bad in (0, 6, -1):
+            resp = client.put(
+                f"/api/music/tracks/{sample_track.id}/rating", json={"rating": bad}
+            )
+            assert resp.status_code == 422, f"{bad} stars should not be accepted"
+
+    def test_rating_an_unknown_track_404s(self, client):
+        resp = client.put("/api/music/tracks/999999/rating", json={"rating": 3})
+        assert resp.status_code == 404

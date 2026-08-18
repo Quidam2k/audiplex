@@ -126,6 +126,18 @@ interface AudiplexApi {
     @POST("api/music/stats")
     suspend fun postPlayStat(@Body event: PlayStatEvent): PlayStatSchema
 
+    @GET("api/music/ratings")
+    suspend fun getTrackRatings(): List<TrackRatingSchema>
+
+    @PUT("api/music/tracks/{id}/rating")
+    suspend fun setTrackRating(
+        @Path("id") trackId: Int,
+        @Body body: TrackRatingCreate,
+    ): TrackRatingSchema
+
+    @DELETE("api/music/tracks/{id}/rating")
+    suspend fun clearTrackRating(@Path("id") trackId: Int): Map<String, Int>
+
     @GET("api/music/favorites")
     suspend fun getFavorites(
         @Query("entity_type") entityType: String? = null

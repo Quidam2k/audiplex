@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ChapterSchema(BaseModel):
@@ -194,6 +194,22 @@ class FavoriteSchema(BaseModel):
     entity_key: str
     created_at: datetime
     model_config = {"from_attributes": True}
+
+
+class TrackRatingSchema(BaseModel):
+    id: int
+    track_id: int
+    rating: int
+    note: str
+    updated_at: datetime
+    model_config = {"from_attributes": True}
+
+
+class TrackRatingCreate(BaseModel):
+    # 1-5 stars, validated at the edge so a bad client cannot poison the
+    # signal the DJ reads (#3024).
+    rating: int = Field(ge=1, le=5)
+    note: str = ""
 
 
 class PlaylistAppend(BaseModel):

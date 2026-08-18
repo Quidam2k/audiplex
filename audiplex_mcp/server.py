@@ -647,6 +647,38 @@ async def dj_client_exits(limit: int = 25) -> str:
 
 
 @mcp.tool()
+async def dj_track_ratings(limit: int = 30) -> str:
+    """Todd's OWN star ratings for tracks in the library, best first (#3024).
+
+    Distinct from dj_taste: that tracks how your RECOMMENDATIONS landed
+    (good/meh on things not in the library). This is Todd rating tracks he is
+    listening to, 1-5 stars, from the now-playing screen in the app. Read it
+    before building a set — a 5 is the strongest "play this again" signal
+    available, and a 1 is the clearest "don't"."""
+    ratings = await _get("/api/playback/ratings")
+    if not ratings:
+        return (
+            "No tracks rated yet. The star control is on the now-playing screen "
+            "in the app; nothing to weight picks with until he uses it."
+        )
+    lines = ["Todd's track ratings (his own stars, best first):"]
+    by_id = {r["track_id"]: r for r in ratings[:limit]}
+    for track_id, r in by_id.items():
+        stars = "*" * r["rating"]
+        label = f"track {track_id}"
+        try:
+            t = await _get(f"/api/music/tracks/{track_id}")
+            label = f"{t.get('artist_name', '')} - {t.get('title', '')}".strip(" -") or label
+        except Exception:
+            pass
+        line = f"  [{stars:<5}] {label}"
+        if r.get("note"):
+            line += f'  — "{r["note"]}"'
+        lines.append(line)
+    return "\n".join(lines)
+
+
+@mcp.tool()
 async def dj_now_playing() -> str:
     """Report what the Audiplex device is currently playing — track, artist,
     play/pause state, position — plus the full current queue (with indices,
@@ -1305,6 +1337,21 @@ async def dj_taste(limit: int = 20) -> str:
     if unrated:
         lines.append(f"Awaiting a reaction ({len(unrated)}) — ask about these:")
         lines += [f"  {row['id']}: {_rec_label(row)}" for row in unrated]
+
+    # Todd's own stars (#3024) — the most direct taste signal there is, and
+    # unlike the play-history reads below it is owner-scoped server-side, so
+    # the DJ genuinely sees his ratings rather than its own empty account.
+    try:
+        stars = await _get("/api/playback/ratings")
+    except Exception:
+        stars = []
+    if stars:
+        lines.append(f"Todd's rated tracks ({len(stars)}) — dj_track_ratings() for the list:")
+        for r in stars[:5]:
+            bit = f"  [{'*' * r['rating']}] track {r['track_id']}"
+            if r.get("note"):
+                bit += f'  — "{r["note"]}"'
+            lines.append(bit)
 
     # Library-side signal. Both endpoints are scoped to the CALLING user, and
     # the DJ calls as dj-agent, which has never played anything — so an empty
