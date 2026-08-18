@@ -34,7 +34,14 @@ class SettingsStore @Inject constructor(
     // v3 (#3021): bumping the key resets the watermark so the exit history
     // Android still holds — including the 2026-08-14 16:02:58Z death — re-ships
     // WITH its stack trace, which the v2 records were delivered without.
-    private val lastExitReportedAtKey = longPreferencesKey("last_exit_reported_at_v3")
+    // v4 (#3031): v3 re-shipped all 16 retained records and NOT ONE carried a
+    // trace, including the CRASH. Nothing could say whether Android had no
+    // trace for them or whether our read threw, because both produced the same
+    // empty string. trace_status now distinguishes those, and this bump is
+    // what makes the retained history re-ship once carrying it — the last
+    // chance to put a verdict on the 08-14 crash before it rolls out of
+    // Android's 16-record history.
+    private val lastExitReportedAtKey = longPreferencesKey("last_exit_reported_at_v4")
 
     override val serverUrl: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[serverUrlKey] ?: ""

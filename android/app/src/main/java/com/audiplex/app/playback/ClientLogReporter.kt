@@ -28,12 +28,25 @@ internal data class ExitRecord(
     val unexpected: Boolean,
     /** First lines of the crash/ANR stack, empty when Android kept none. */
     val trace: String = "",
+    /**
+     * Why [trace] is what it is: "present", "none" (Android had nothing for
+     * this record) or "error:<class>" (we failed to read it).
+     *
+     * The 2026-08-14 CRASH re-shipped under watermark v3 with NO trace, and
+     * nothing on the server could say which of those two happened — the read
+     * swallowed its own failure and returned the same empty string either way
+     * (#3031). Without this field the next crash would be exactly as
+     * undiagnosable as that one, which is the whole reason the trace shipper
+     * was built.
+     */
+    val traceStatus: String = TRACE_NONE,
 ) {
     fun detail(): Map<String, String> = buildMap {
         put("reason", reason)
         put("status", status.toString())
         put("importance", importance.toString())
         put("at", timestamp.toString())
+        put("trace_status", traceStatus)
         // SIGNALED on its own says nothing: status 9 vs 6 vs 11 is the
         // difference between "the OS reclaimed us", "we aborted" and "we
         // segfaulted". The 08-14 history is 4x status=9 and read as a wall
@@ -83,6 +96,10 @@ internal fun resolveDescription(description: String?, reasonName: String): Strin
 
 internal const val TRACE_MAX_LINES = 40
 internal const val TRACE_MAX_CHARS = 4000
+
+internal const val TRACE_PRESENT = "present"
+internal const val TRACE_NONE = "none"
+internal const val TRACE_ERROR_PREFIX = "error:"
 
 /**
  * Ship every exit newer than [since], oldest first, and return the timestamp of
@@ -192,6 +209,7 @@ class ClientLogReporter @Inject constructor(
                 val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
                 val exits = am.getHistoricalProcessExitReasons(context.packageName, 0, MAX_EXITS)
                     .map { info ->
+                        val (trace, traceStatus) = readTrace(info)
                         ExitRecord(
                             timestamp = info.timestamp,
                             reason = reasonName(info.reason),
@@ -201,7 +219,8 @@ class ClientLogReporter @Inject constructor(
                             status = info.status,
                             importance = info.importance,
                             unexpected = isUnexpected(info.reason),
-                            trace = readTrace(info),
+                            trace = trace,
+                            traceStatus = traceStatus,
                         )
                     }
                 if (exits.none { it.timestamp > since }) return@runCatching
@@ -229,11 +248,17 @@ class ClientLogReporter @Inject constructor(
      * exit report entirely because its trace could not be read would defeat
      * the whole point of the reporter.
      */
-    private fun readTrace(info: ApplicationExitInfo): String = runCatching {
-        info.traceInputStream?.use { stream ->
-            trimTrace(stream.bufferedReader().readText())
-        }.orEmpty()
-    }.getOrDefault("")
+    private fun readTrace(info: ApplicationExitInfo): Pair<String, String> =
+        runCatching {
+            val text = info.traceInputStream?.use { stream ->
+                trimTrace(stream.bufferedReader().readText())
+            }.orEmpty()
+            if (text.isBlank()) "" to TRACE_NONE else text to TRACE_PRESENT
+        }.getOrElse { e ->
+            // Previously this returned "" and the failure vanished, so a
+            // missing stack could not be told from an unreadable one.
+            "" to "$TRACE_ERROR_PREFIX${e.javaClass.simpleName}"
+        }
 
     /** Deaths that mean something went wrong, as opposed to a normal teardown. */
     private fun isUnexpected(reason: Int): Boolean = when (reason) {

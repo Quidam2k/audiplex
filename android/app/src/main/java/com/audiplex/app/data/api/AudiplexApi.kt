@@ -171,6 +171,18 @@ interface AudiplexApi {
     @GET("api/playback/command/next")
     suspend fun getNextPlaybackCommand(): Response<DjCommandDto>
 
+    /**
+     * Tell the server what we did with a command.
+     *
+     * This is what stops redelivery, and what lets the DJ say "the device
+     * acked" instead of "queued, hopefully" (#900).
+     */
+    @POST("api/playback/command/{id}/ack")
+    suspend fun ackPlaybackCommand(
+        @Path("id") id: Long,
+        @Body ack: DjCommandAckDto,
+    ): Response<Unit>
+
     /** Report current now-playing state up to the server for the agent to read. */
     @POST("api/playback/state")
     suspend fun postPlaybackState(@Body state: PlaybackStateDto): PlaybackStateDto

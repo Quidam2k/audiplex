@@ -320,7 +320,25 @@ data class DjCommandDto(
     val id: Long,
     val type: String,
     val payload: DjCommandPayload? = null,
-    @Json(name = "created_at") val createdAt: Double? = null
+    @Json(name = "created_at") val createdAt: Double? = null,
+    // >1 means the server never heard our ack for this command and is offering
+    // it again. Delivery is at-least-once, so the client dedupes on id (#900).
+    @Json(name = "delivery_count") val deliveryCount: Int = 1
+)
+
+/**
+ * What we did with a command (#900 Phase 3a).
+ *
+ * `status` is "ok" when it was carried out, otherwise a short machine-readable
+ * reason ("no_tracks", "bad_payload", "unknown_type", "error"). Reporting a
+ * FAILURE matters as much as reporting success: on 2026-08-14 a command was
+ * taken off the queue and silently dropped, and nothing anywhere could tell
+ * that apart from one still in flight.
+ */
+@JsonClass(generateAdapter = true)
+data class DjCommandAckDto(
+    val status: String,
+    val detail: String = ""
 )
 
 @JsonClass(generateAdapter = true)

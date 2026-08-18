@@ -2,6 +2,7 @@ package com.audiplex.app.playback
 
 import com.audiplex.app.data.ApiServiceHolder
 import com.audiplex.app.data.SettingsStore
+import com.audiplex.app.data.api.DjCommandAckDto
 import com.audiplex.app.data.api.DjCommandDto
 import com.audiplex.app.data.api.NowPlayingTrackDto
 import com.audiplex.app.data.api.PlaybackStateDto
@@ -46,6 +47,31 @@ import kotlin.coroutines.coroutineContext
 /** What the DJ link is currently doing, for display only. */
 enum class LinkState { UNCONFIGURED, CONNECTED, OFFLINE }
 
+/** The outcome of one command, as reported back to the server (#900). */
+internal data class DispatchResult(val status: String, val detail: String = "")
+
+/** Nothing in the command resolved — the device did not play, and says so. */
+internal fun noTracks(requested: List<Int>) =
+    DispatchResult("no_tracks", "resolved 0 of ${requested.size} track ids")
+
+/**
+ * OK, but say so when only some ids resolved.
+ *
+ * A half-loaded queue reported as a clean success is how a library gap stays
+ * invisible — the DJ would think it played five tracks when it played two.
+ */
+internal fun partialOrOk(requested: List<Int>, resolved: Int) =
+    if (resolved < requested.size)
+        DispatchResult("ok", "resolved $resolved of ${requested.size} track ids")
+    else DispatchResult("ok")
+
+/** The command arrived without a field it needs — a server/app mismatch. */
+internal fun badPayload(field: String) =
+    DispatchResult("bad_payload", "missing $field")
+
+/** How many recent command ids to remember for dedupe. */
+private const val EXECUTED_MEMORY = 64
+
 @Singleton
 class DjCommandClient @Inject constructor(
     private val apiHolder: ApiServiceHolder,
@@ -56,6 +82,11 @@ class DjCommandClient @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var commandJob: Job? = null
     private var reportJob: Job? = null
+
+    /** Command ids already executed, so an at-least-once redelivery is a
+     *  no-op rather than a second skip. Bounded; insertion-ordered so the
+     *  oldest id is the one evicted. */
+    private val executed = linkedSetOf<Long>()
 
     private val _linkState = MutableStateFlow(LinkState.UNCONFIGURED)
 
@@ -97,7 +128,7 @@ class DjCommandClient @Inject constructor(
                 _linkState.value = LinkState.CONNECTED
                 if (resp.code() == 204) continue // long-poll timeout — re-issue
                 val cmd = resp.body() ?: continue
-                dispatch(cmd)
+                handle(cmd)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -107,12 +138,54 @@ class DjCommandClient @Inject constructor(
         }
     }
 
-    private suspend fun dispatch(cmd: DjCommandDto) {
+    /**
+     * Run one command and tell the server what happened.
+     *
+     * The ack is the point. Before it, a command was destroyed by the poll
+     * that delivered it, so a command this client dropped — an unresolvable
+     * track id, a malformed payload, a thrown exception — was indistinguishable
+     * from one still in flight. Every exit path from here reports something.
+     */
+    private suspend fun handle(cmd: DjCommandDto) {
+        if (!executed.add(cmd.id)) {
+            // Delivery is at-least-once: the server re-offers a command it
+            // never heard an ack for. Executing it twice would double-skip or
+            // restart a track, so re-ack instead and do nothing.
+            ack(cmd.id, "ok", "duplicate delivery ${cmd.deliveryCount}, already executed")
+            return
+        }
+        while (executed.size > EXECUTED_MEMORY) {
+            executed.remove(executed.first())
+        }
+        val result = try {
+            dispatch(cmd)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            clientLog.report(
+                level = "error",
+                event = "command_failed",
+                message = e.message ?: e.javaClass.simpleName,
+                detail = mapOf("command_id" to cmd.id.toString(), "type" to cmd.type),
+            )
+            DispatchResult("error", e.message ?: e.javaClass.simpleName)
+        }
+        ack(cmd.id, result.status, result.detail)
+    }
+
+    /** Best-effort ack; a failure here must never break the command loop. */
+    private suspend fun ack(commandId: Long, status: String, detail: String) {
+        val api = apiHolder.api ?: return
+        runCatching { api.ackPlaybackCommand(commandId, DjCommandAckDto(status, detail)) }
+    }
+
+    private suspend fun dispatch(cmd: DjCommandDto): DispatchResult {
         val baseUrl = apiHolder.baseUrl
         when (cmd.type) {
             "play_now" -> {
-                val tracks = resolveTracks(cmd.payload?.trackIds.orEmpty())
-                if (tracks.isEmpty()) return
+                val requested = cmd.payload?.trackIds.orEmpty()
+                val tracks = resolveTracks(requested)
+                if (tracks.isEmpty()) return noTracks(requested)
                 withContext(Dispatchers.Main) {
                     playbackManager.playTracks(
                         tracks = tracks,
@@ -121,24 +194,29 @@ class DjCommandClient @Inject constructor(
                         albumLookup = emptyMap(),
                     )
                 }
+                return partialOrOk(requested, tracks.size)
             }
             "queue" -> {
-                val tracks = resolveTracks(cmd.payload?.trackIds.orEmpty())
-                if (tracks.isEmpty()) return
+                val requested = cmd.payload?.trackIds.orEmpty()
+                val tracks = resolveTracks(requested)
+                if (tracks.isEmpty()) return noTracks(requested)
                 withContext(Dispatchers.Main) {
                     playbackManager.enqueueTracks(tracks, baseUrl)
                 }
+                return partialOrOk(requested, tracks.size)
             }
             "play_next" -> {
-                val tracks = resolveTracks(cmd.payload?.trackIds.orEmpty())
-                if (tracks.isEmpty()) return
+                val requested = cmd.payload?.trackIds.orEmpty()
+                val tracks = resolveTracks(requested)
+                if (tracks.isEmpty()) return noTracks(requested)
                 withContext(Dispatchers.Main) {
                     playbackManager.playNextTracks(tracks, baseUrl)
                 }
+                return partialOrOk(requested, tracks.size)
             }
             "reorder" -> {
-                val from = cmd.payload?.fromIndex ?: return
-                val to = cmd.payload?.toIndex ?: return
+                val from = cmd.payload?.fromIndex ?: return badPayload("from_index")
+                val to = cmd.payload.toIndex ?: return badPayload("to_index")
                 withContext(Dispatchers.Main) {
                     playbackManager.moveTrack(from, to)
                 }
@@ -154,15 +232,15 @@ class DjCommandClient @Inject constructor(
             "resume" -> withContext(Dispatchers.Main) { playbackManager.resume() }
             "previous" -> withContext(Dispatchers.Main) { playbackManager.skipBack() }
             "seek" -> {
-                val positionMs = cmd.payload?.positionMs ?: return
+                val positionMs = cmd.payload?.positionMs ?: return badPayload("position_ms")
                 withContext(Dispatchers.Main) { playbackManager.seekTo(positionMs) }
             }
             "volume" -> {
-                val volume = cmd.payload?.volume ?: return
+                val volume = cmd.payload?.volume ?: return badPayload("volume")
                 withContext(Dispatchers.Main) { playbackManager.setPlayerVolume(volume) }
             }
             "play_stream" -> {
-                val url = cmd.payload?.url ?: return
+                val url = cmd.payload?.url ?: return badPayload("url")
                 val title = cmd.payload?.title ?: "Live stream"
                 withContext(Dispatchers.Main) { playbackManager.playStreamUrl(url, title) }
             }
@@ -170,8 +248,8 @@ class DjCommandClient @Inject constructor(
                 // DJ voice break (#431). clip_url is relative so the clip is
                 // fetched from OUR configured base URL, not whatever host the
                 // agent happened to reach the server on.
-                val clipUrl = cmd.payload?.clipUrl ?: return
-                val clipId = cmd.payload.clipId ?: return
+                val clipUrl = cmd.payload?.clipUrl ?: return badPayload("clip_url")
+                val clipId = cmd.payload.clipId ?: return badPayload("clip_id")
                 val absolute = if (clipUrl.startsWith("http"))
                     clipUrl
                 else
@@ -187,8 +265,11 @@ class DjCommandClient @Inject constructor(
                     )
                 }
             }
-            else -> Unit // unknown command type — ignored
+            // An unknown type is a real mismatch between server and app
+            // versions, and saying so beats the silence it used to get.
+            else -> return DispatchResult("unknown_type", cmd.type)
         }
+        return DispatchResult("ok")
     }
 
     /** Resolve DJ track IDs to full track metadata via the catalog API. */
