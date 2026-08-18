@@ -378,16 +378,25 @@ def sample_playlist(db_session, sample_track):
 
 
 @pytest.fixture(autouse=True)
-def isolated_exit_log(tmp_path, monkeypatch):
-    """Keep process-exit persistence out of the real on-disk log.
+def isolated_client_logs(tmp_path, monkeypatch):
+    """Keep the two durable on-disk logs out of the real files.
 
     add_client_log appends every process_exit entry to a file (#3021), and
     several tests post those — without this, running the suite would graft
     fake deaths onto the record we keep specifically so a real one can never
     be lost.
+
+    The link history (#900 Phase 3a) has exactly the same exposure and was
+    caught the hard way: every test that polls /command/next writes a link
+    event, so one suite run left a dozen bogus "resumed" entries in the real
+    file. A liveness record nobody can trust is worse than none, since the
+    whole reason it exists is to answer "did the link actually hold".
     """
     from audiplex import playback_bus
 
     monkeypatch.setattr(
         playback_bus, "EXIT_LOG_PATH", tmp_path / "client-exits.jsonl"
+    )
+    monkeypatch.setattr(
+        playback_bus, "LINK_LOG_PATH", tmp_path / "link-history.jsonl"
     )

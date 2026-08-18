@@ -32,15 +32,6 @@ def reset_bus():
     yield
 
 
-@pytest.fixture(autouse=True)
-def isolated_link_log(tmp_path, monkeypatch):
-    """Never append to the real link history from a test."""
-    monkeypatch.setattr(
-        "audiplex.playback_bus.LINK_LOG_PATH", tmp_path / "link-history.jsonl"
-    )
-    yield tmp_path / "link-history.jsonl"
-
-
 class TestDeliveryDoesNotConsume:
     def test_delivered_command_survives_delivery(self, client):
         client.post("/api/playback/command", json={"type": "play_now", "payload": {}})
