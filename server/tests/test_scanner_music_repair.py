@@ -244,3 +244,98 @@ class TestProperlyTaggedAlbumIsBelieved:
         track = db_session.query(Track).one()
         assert track.artist.name == "Marillion"
         assert db_session.query(Album).one().title == "Marillion - Misplaced Childhood"
+
+
+class TestFolderConsensus:
+    """A tagless track in a properly tagged album inherits its siblings'
+    artist — but only when they are unanimous (ruling on #3040)."""
+
+    def _album(self, tmp_path, tags_by_stem):
+        root = tmp_path / "music"
+        folder = root / "Marillion - Misplaced Childhood"
+        folder.mkdir(parents=True)
+        for stem in tags_by_stem:
+            (folder / f"{stem}.mp3").write_bytes(b"")
+        return root
+
+    def _patched(self, tags_by_stem):
+        def by_path(path, easy=False):
+            return _fake_audio(duration=240.0, **tags_by_stem.get(Path(path).stem, {}))
+
+        return patch("audiplex.scanners.music.mutagen.File", side_effect=by_path)
+
+    def test_tagless_tracks_join_their_unanimous_siblings(self, db_session, tmp_path):
+        tags = {
+            "01 - Pseudo Silk Kimono": {},                                  # no tags
+            "02 - Kayleigh": {"title": "Kayleigh", "artist": "Marillion"},
+            "03 - Lavender": {"title": "Lavender", "artist": "Marillion"},
+        }
+        root = self._album(tmp_path, tags)
+        with self._patched(tags):
+            _scan(db_session, root)
+
+        assert {t.artist.name for t in db_session.query(Track).all()} == {"Marillion"}
+
+    def test_the_inherited_title_loses_its_track_number(self, db_session, tmp_path):
+        tags = {
+            "01 - Pseudo Silk Kimono": {},
+            "02 - Kayleigh": {"title": "Kayleigh", "artist": "Marillion"},
+        }
+        root = self._album(tmp_path, tags)
+        with self._patched(tags):
+            _scan(db_session, root)
+
+        titles = {t.title for t in db_session.query(Track).all()}
+        assert titles == {"Pseudo Silk Kimono", "Kayleigh"}
+
+    def test_consensus_is_recorded_with_its_reasoning(self, db_session, tmp_path):
+        tags = {
+            "01 - Pseudo Silk Kimono": {},
+            "02 - Kayleigh": {"title": "Kayleigh", "artist": "Marillion"},
+        }
+        root = self._album(tmp_path, tags)
+        with self._patched(tags):
+            _scan(db_session, root)
+
+        repair = (
+            db_session.query(TrackTagRepair)
+            .filter(TrackTagRepair.proposed_title == "Pseudo Silk Kimono")
+            .one()
+        )
+        assert repair.source == "consensus"
+        assert repair.status == APPLIED
+        assert "Marillion" in repair.evidence
+
+    def test_a_divided_folder_reaches_no_consensus(self, db_session, tmp_path):
+        """Two different artists means the folder has nothing unanimous to
+        lend, so the tagless track stays in the review queue."""
+        tags = {
+            "01 - Mystery": {},
+            "02 - Kayleigh": {"title": "Kayleigh", "artist": "Marillion"},
+            "03 - Roundabout": {"title": "Roundabout", "artist": "Yes"},
+        }
+        root = self._album(tmp_path, tags)
+        with self._patched(tags):
+            _scan(db_session, root)
+
+        repair = (
+            db_session.query(TrackTagRepair)
+            .filter(TrackTagRepair.proposed_title == "Mystery")
+            .one()
+        )
+        assert repair.status == PENDING_REVIEW
+        assert repair.proposed_artist is None
+
+    def test_a_flat_dump_of_many_artists_lends_nothing(
+        self, db_session, rip_root, mocked_rip_tags
+    ):
+        """The guard that protects Todd's actual library: many different
+        performers are not unanimous, so "Barracuda" keeps its blank."""
+        _scan(db_session, rip_root)
+        repair = (
+            db_session.query(TrackTagRepair)
+            .filter(TrackTagRepair.proposed_title == "Barracuda")
+            .one()
+        )
+        assert repair.status == PENDING_REVIEW
+        assert repair.source == "parser"

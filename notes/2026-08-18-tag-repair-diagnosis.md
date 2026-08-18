@@ -186,3 +186,50 @@ Wall pair, exactly as predicted and signed off in plan-back #9272.
   bucket per the Q1 ruling — nothing invented. Classifying them is #954.
 - `Bea Miller / "Playground | Arcane League of Legends"` keeps a trailing pipe
   segment. Cosmetic; stripping it generally would eat real titles.
+
+---
+
+# LIVE WRITE APPLIED (authorized by #3040)
+
+Ran `python -m audiplex.manage tag-repair-apply --yes` against
+`server/audiplex.db`. Backup first: `audiplex.db.bak-20260818-tagrepair`.
+Rehearsed twice on copies before touching the real thing, including a second
+run to prove idempotence.
+
+```
+before: {'tracks': 217, 'artists': 2,   'play_stats': 7, 'ratings': 0}
+        dropping empty artist ''
+after : {'tracks': 217, 'artists': 138, 'play_stats': 7, 'ratings': 0}
+repairs applied: 186   held for review: 31
+```
+
+186 = the 184 parser high-confidence rows plus the 2 Marillion tracks that
+inherited their siblings' artist through the new folder consensus. Held drops
+33 -> 31 for the same reason.
+
+Verified on the live DB afterwards: 217 tracks (same rows, same ids), 138
+artists, **zero blank-artist rows**, play statistics still 7, and the identity
+map showing 4 work merges + 1 recording merge — the three from #9265, the new
+Cameo "Word Up" pair, and the Concrete Wall recording merge. Exactly the
+dry-run prediction, no drift.
+
+The apply runs the production scanner rather than a bespoke migration, so the
+repair path and the ingest path cannot diverge. It is idempotent: a second run
+reports the same counts and writes nothing.
+
+## Server restarted
+
+The running server (PID 35236) was still on the OLD code, which meant its scan
+endpoint could still delete-and-reinsert every track and take the play
+statistics with it. Killed and relaunched via `launch-hidden.vbs`; now PID
+43568, `/docs` returns 200. That hazard is closed rather than merely fixed in
+source.
+
+## Follow-ups filed, not done
+
+- #954 — `kind` classification for non-music. Exhibit: the "ADHD Music" artist
+  on the Greenred focus track, a dash-parse artifact Jarvis accepted on the
+  record as no-worse-than-blank.
+- #955 — the same delete/re-insert hazard in the book and meditation scanners.
+- The 31 held rows await the RFL identification pass; verdicts import through
+  the same overlay with `source='rfl'`.

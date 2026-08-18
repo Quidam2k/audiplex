@@ -52,8 +52,15 @@ PENDING_REVIEW = "pending_review"
 REJECTED = "rejected"
 
 SOURCE_PARSER = "parser"
+SOURCE_CONSENSUS = "consensus"
 SOURCE_RFL = "rfl"
 SOURCE_MANUAL = "manual"
+
+# "01 - Pseudo Silk Kimono" is a track number and a title. Applied ONLY to
+# titles derived from a filename, and only once the dash split has already been
+# tried and failed — otherwise it would shorten "4 Non Blondes - What's Up",
+# which is the same digit-eating bug the dry run caught once already.
+_FILENAME_INDEX = re.compile(r"^[\s\-_.]*\d{1,3}[\s\-_.]+(?=\S)")
 
 # The ripper cannot put these characters in a filename, so it substitutes
 # look-alikes. Tags keep the real character; only filenames need undoing, which
@@ -320,8 +327,10 @@ def propose(
     channel = read_channel(artist_tag)
 
     raw_title = (title_tag or "").strip()
+    from_filename = False
     if not raw_title and filename_stem:
         raw_title = demangle(filename_stem)
+        from_filename = True
     cleaned = strip_junk(raw_title)
 
     # A non-rip's artist tag is a real artist tag. Nothing to weigh: believe it.
@@ -337,6 +346,12 @@ def propose(
         )
 
     split = split_artist_title(cleaned)
+
+    if split is None and from_filename:
+        # No artist hides in this name, so a leading number is a track index
+        # rather than part of one. Safe to drop only now that the split has
+        # been tried and refused.
+        cleaned = _FILENAME_INDEX.sub("", cleaned).strip() or cleaned
 
     if split:
         artist, title = split

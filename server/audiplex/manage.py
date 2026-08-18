@@ -122,6 +122,80 @@ def cmd_tag_repair_dryrun(args) -> int:
         db.close()
 
 
+def cmd_tag_repair_apply(args) -> int:
+    """Repair the music catalog for real, in ONE transaction (#3037).
+
+    Deliberately runs the production scanner rather than a bespoke migration:
+    the repair path and the ingest path have to be the same code, or the next
+    file Todd drops in gets treated differently from the 217 already here.
+    Run the dry run first — `tag-repair-dryrun` — and read it.
+    """
+    from audiplex.models import Artist, PlayStat, Track, TrackRating, TrackTagRepair
+    from audiplex.scanners.music import scan_music
+
+    settings = get_settings()
+    roots = [r for r in settings.library_roots if r.category == "music"]
+    if not roots:
+        print("error: no music root configured", file=sys.stderr)
+        return 1
+
+    db = _session()
+    try:
+        def counts():
+            return {
+                "tracks": db.query(Track).count(),
+                "artists": db.query(Artist).count(),
+                "play_stats": db.query(PlayStat).count(),
+                "ratings": db.query(TrackRating).count(),
+            }
+
+        before = counts()
+        print(f"before: {before}")
+        if not args.yes:
+            print("refusing to write without --yes", file=sys.stderr)
+            return 1
+
+        for root in roots:
+            result, _ = scan_music(db, root.path, settings.cover_cache_dir)
+            for error in result.errors:
+                print(f"  warn: {error}", file=sys.stderr)
+        db.flush()
+
+        # The nameless artist that owned 207 tracks now owns nothing. Same rule
+        # the scan orchestrator uses: an artist with neither albums nor tracks
+        # is a leftover, and this one is the very row the repair exists to empty.
+        orphans = (
+            db.query(Artist)
+            .filter(~Artist.albums.any(), ~Artist.tracks.any())
+            .all()
+        )
+        for artist in orphans:
+            print(f"  dropping empty artist {artist.name!r}")
+            db.delete(artist)
+
+        db.commit()
+
+        after = counts()
+        print(f"after : {after}")
+
+        applied = db.query(TrackTagRepair).filter(TrackTagRepair.status == "applied").count()
+        held = db.query(TrackTagRepair).filter(TrackTagRepair.status == "pending_review").count()
+        print(f"repairs applied: {applied}  held for review: {held}")
+
+        if after["play_stats"] < before["play_stats"]:
+            print(
+                "ERROR: play statistics were lost — restore the backup",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m audiplex.manage",
@@ -151,6 +225,15 @@ def main(argv=None) -> int:
         help="also write the review bucket as JSON, for the RFL identification pass",
     )
     dryrun.set_defaults(func=cmd_tag_repair_dryrun)
+
+    apply_cmd = sub.add_parser(
+        "tag-repair-apply",
+        help="apply tag repair to the catalog; run the dry run first",
+    )
+    apply_cmd.add_argument(
+        "--yes", action="store_true", help="confirm the write (required)"
+    )
+    apply_cmd.set_defaults(func=cmd_tag_repair_apply)
 
     args = parser.parse_args(argv)
     return args.func(args)

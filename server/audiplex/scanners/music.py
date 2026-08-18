@@ -322,8 +322,25 @@ def _propose_for(tpath: Path, info: dict) -> tag_repair.Proposal:
     )
 
 
+def _folder_consensus(proposals: list[tag_repair.Proposal]) -> str | None:
+    """The artist this folder unanimously agrees on, if it agrees at all.
+
+    Only counts the files confident enough to be applied, and only answers when
+    every one of them names the SAME artist. An album with eight tagged tracks
+    and two tagless ones is a real album with two gaps; a flat dump of a hundred
+    different performers is not unanimous about anything, so this stays silent
+    there — the guard falls out of the data instead of needing a special case.
+    """
+    named = {p.artist for p in proposals if p.auto_applicable and p.artist}
+    return next(iter(named)) if len(named) == 1 else None
+
+
 def _record_proposal(
-    db: Session, tpath: Path, info: dict, proposal: tag_repair.Proposal
+    db: Session,
+    tpath: Path,
+    info: dict,
+    proposal: tag_repair.Proposal,
+    consensus: str | None = None,
 ) -> TrackTagRepair:
     """Write one file's proposal to the overlay. This is the ingest half of
     #3037: anything that arrives later is weighed by the same ladder that
@@ -333,17 +350,34 @@ def _record_proposal(
     pending_review with its evidence attached — a worklist, not a silent gap.
     """
     comment = info.get("comment") or ""
+    artist = proposal.artist
+    confidence = proposal.confidence
+    source = tag_repair.SOURCE_PARSER
+    evidence = proposal.evidence
+    applied = proposal.auto_applicable
+
+    if consensus and not artist:
+        # Fills a blank, never overrides a claim. A file that named somebody —
+        # even unconvincingly — keeps its own answer and stays in the review
+        # queue; only the ones with nothing to say inherit the folder's.
+        artist = consensus
+        confidence = tag_repair.HIGH
+        source = tag_repair.SOURCE_CONSENSUS
+        evidence = (
+            f"{proposal.evidence}; every other file in this folder that could "
+            f"be identified names {consensus!r}, so this one inherits it"
+        )
+        applied = bool(proposal.title)
+
     row = TrackTagRepair(
         file_path=str(tpath),
         source_url=comment if tag_repair.is_youtube_rip(comment) else None,
-        proposed_artist=proposal.artist,
+        proposed_artist=artist,
         proposed_title=proposal.title,
-        confidence=proposal.confidence,
-        source=tag_repair.SOURCE_PARSER,
-        evidence=proposal.evidence,
-        status=(
-            tag_repair.APPLIED if proposal.auto_applicable else tag_repair.PENDING_REVIEW
-        ),
+        confidence=confidence,
+        source=source,
+        evidence=evidence,
+        status=tag_repair.APPLIED if applied else tag_repair.PENDING_REVIEW,
     )
     db.add(row)
     return row
@@ -475,16 +509,28 @@ def _sync_tracks(
     paths = [str(tpath) for tpath, _, _ in track_infos]
     repairs = _repairs_for(db, paths)
 
+    # Weigh every unverdicted file BEFORE writing any of them down: the folder
+    # consensus is a property of the whole album, so it cannot be known while
+    # walking one track at a time.
+    fresh = {
+        str(tpath): _propose_for(tpath, info)
+        for tpath, _, info in track_infos
+        if str(tpath) not in repairs
+    }
+    consensus = _folder_consensus(list(fresh.values()))
+    for tpath, _, info in track_infos:
+        proposal = fresh.get(str(tpath))
+        if proposal is not None:
+            repairs[str(tpath)] = _record_proposal(db, tpath, info, proposal, consensus)
+
     seen: set[str] = set()
     for natural_index, (tpath, disc, info) in enumerate(track_infos, start=1):
         path_str = str(tpath)
         seen.add(path_str)
 
-        repair = repairs.get(path_str)
-        if repair is None:
-            repair = _record_proposal(db, tpath, info, _propose_for(tpath, info))
-
-        artist_name, title = _resolve_track(tpath, info, repair, album_artist)
+        artist_name, title = _resolve_track(
+            tpath, info, repairs.get(path_str), album_artist
+        )
         artist = _get_or_create_artist(db, artist_name, artist_cache)
 
         track_num = (
