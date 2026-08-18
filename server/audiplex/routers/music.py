@@ -652,23 +652,18 @@ def clear_track_rating(
     return {"deleted": deleted}
 
 
-@router.get("/most-played", response_model=list[TrackSchema])
-def list_most_played(
-    limit: int = Query(50, ge=1, le=500),
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """Top-N tracks by completed-play count.
+def most_played_for(db: Session, user_id: int, limit: int) -> list[TrackSchema]:
+    """Top-N tracks by completed-play count, for one user.
 
-    A "play" is a PlayStat with event='complete' OR a 'stop' with
-    played_seconds beyond the early-skip threshold — so genuine listens
-    count even when the user stops before the track auto-advances.
+    Split out from the endpoint so the owner-scoped DJ read in the playback
+    router can share the definition of "a play" rather than reimplementing it
+    and drifting (#3028).
     """
     rows = (
         db.query(Track, func.count(PlayStat.id).label("plays"))
         .join(PlayStat, PlayStat.track_id == Track.id)
         .filter(
-            PlayStat.user_id == user.id,
+            PlayStat.user_id == user_id,
             (PlayStat.event == "complete")
             | (
                 (PlayStat.event == "stop")
@@ -684,19 +679,33 @@ def list_most_played(
     return [_track_schema(t) for t, _ in rows]
 
 
-@router.get("/likely-skips", response_model=list[SkipSuspectSchema])
-def list_likely_skips(
-    limit: int = Query(25, ge=1, le=200),
-    min_skips: int = Query(2, ge=1),
+@router.get("/most-played", response_model=list[TrackSchema])
+def list_most_played(
+    limit: int = Query(50, ge=1, le=500),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Tracks frequently abandoned in the first few seconds.
+    """Top-N tracks by completed-play count, for the CALLER.
+
+    Per-caller on purpose: this is the user-facing view. Agents must use the
+    owner-scoped read in the playback router instead — see that endpoint for
+    why a per-caller read hands a service account an empty list (#3028).
+    """
+    return most_played_for(db, user.id, limit)
+
+
+def likely_skips_for(
+    db: Session, user_id: int, limit: int, min_skips: int
+) -> list[SkipSuspectSchema]:
+    """Tracks one user frequently abandons in the first few seconds.
 
     A track is counted as an early skip when the client posts a 'stop'
     PlayStat with played_seconds below EARLY_SKIP_THRESHOLD_SECONDS, or
     when the next track starts via SEEK while the previous was still in
     its first few seconds (recorded as event='skip').
+
+    Shared with the owner-scoped DJ read for the same reason as
+    [most_played_for] (#3028).
     """
     early_skip_filter = (
         (PlayStat.event == "skip")
@@ -710,7 +719,7 @@ def list_likely_skips(
             PlayStat.track_id.label("tid"),
             func.count(PlayStat.id).label("early_skips"),
         )
-        .filter(PlayStat.user_id == user.id, early_skip_filter)
+        .filter(PlayStat.user_id == user_id, early_skip_filter)
         .group_by(PlayStat.track_id)
         .having(func.count(PlayStat.id) >= min_skips)
         .subquery()
@@ -720,7 +729,7 @@ def list_likely_skips(
             PlayStat.track_id.label("tid"),
             func.count(PlayStat.id).label("starts"),
         )
-        .filter(PlayStat.user_id == user.id, PlayStat.event == "start")
+        .filter(PlayStat.user_id == user_id, PlayStat.event == "start")
         .group_by(PlayStat.track_id)
         .subquery()
     )
@@ -745,3 +754,14 @@ def list_likely_skips(
         )
         for t, skips, starts in rows
     ]
+
+
+@router.get("/likely-skips", response_model=list[SkipSuspectSchema])
+def list_likely_skips(
+    limit: int = Query(25, ge=1, le=200),
+    min_skips: int = Query(2, ge=1),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Early-skip suspects for the CALLER (see [most_played_for] on scoping)."""
+    return likely_skips_for(db, user.id, limit, min_skips)

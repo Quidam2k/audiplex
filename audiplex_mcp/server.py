@@ -120,6 +120,8 @@ async def dj_play_now(track_ids: list[int]) -> str:
     head = (
         f"Queued play_now for {len(track_ids)} track(s) "
         f"(command #{data.get('id')}, {data.get('pending')} pending). "
+        f"Confirm with dj_command_status({data.get('id')}) — it reports whether "
+        f"the device acked, which is the difference between 'sent' and 'played'. "
     )
     # Never claim "it's playing" — say whether anything is listening, so a dead
     # player reads as a failure instead of a success (#2961).
@@ -128,6 +130,95 @@ async def dj_play_now(track_ids: list[int]) -> str:
     if device.get("connected"):
         return head + "A player is connected, so it should pick this up within seconds."
     return head + _describe_device(device) + " It will play whenever a player next starts."
+
+
+@mcp.tool()
+async def dj_command_status(command_id: int = 0, limit: int = 10) -> str:
+    """Did the device actually take a DJ command, and what did it do with it?
+
+    Pass a command_id for one command, or nothing for the recent few. This is
+    the delivery receipt the 2026-08-14 test did not have: back then a command
+    was destroyed by the poll that delivered it, so "queued" was the last thing
+    anyone could say about it, and a command silently dropped by the app looked
+    exactly like one still in flight.
+
+    Statuses: queued (nobody has taken it), delivered (handed over, no answer
+    yet — it is re-offered after 60s), acked (the device carried it out),
+    failed (the device explicitly could not — see ack_detail).
+    """
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{AUDIPLEX_URL}/api/playback/commands?limit={max(limit, 1)}",
+            headers=_headers(),
+        )
+        if resp.status_code == 401:
+            return "Auth failed (401). Check AUDIPLEX_TOKEN."
+        resp.raise_for_status()
+    rows = resp.json()
+    if command_id:
+        rows = [r for r in rows if r.get("id") == command_id]
+        if not rows:
+            return (
+                f"No command #{command_id} on the server. Either it was never "
+                f"queued, or it has aged out of the registry."
+            )
+    if not rows:
+        return "No commands have been issued since the server started."
+
+    lines = []
+    for r in rows:
+        line = f"#{r.get('id')} {r.get('type')}: {r.get('status')}"
+        if r.get("delivery_count", 0) > 1:
+            line += f" (delivered {r['delivery_count']}x)"
+        if r.get("ack_status") and r.get("ack_status") != "ok":
+            line += f" — device said '{r['ack_status']}'"
+            if r.get("ack_detail"):
+                line += f": {r['ack_detail']}"
+        elif r.get("status") == "delivered":
+            line += " — handed over, no ack yet"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def dj_link_history(limit: int = 25) -> str:
+    """When the DJ link to the phone dropped, and when it came back.
+
+    Durable across server restarts, unlike dj_device_status, which only ever
+    knows about right now. This exists because on 2026-08-18 nobody could
+    answer "did the link actually hold overnight?" — the only record was a
+    single in-memory timestamp, so a continuous beat and a night full of gaps
+    looked identical.
+
+    A 'resumed (after server restart)' line means WE restarted; it is not a
+    device fault and is deliberately not counted as a gap.
+    """
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{AUDIPLEX_URL}/api/playback/link-history?limit={max(limit, 1)}",
+            headers=_headers(),
+        )
+        if resp.status_code == 401:
+            return "Auth failed (401). Check AUDIPLEX_TOKEN."
+        resp.raise_for_status()
+    rows = resp.json()
+    if not rows:
+        return (
+            "No link history recorded yet. Expect the first entry as soon as a "
+            "player polls; gaps are only written when one actually happens."
+        )
+    lines = []
+    for r in rows:
+        if r.get("event") == "resumed":
+            when = _fmt_time(r.get("at"))
+            suffix = " (after server restart)" if r.get("after_restart") else ""
+            lines.append(f"{when}: link resumed{suffix}")
+        else:
+            lines.append(
+                f"{_fmt_time(r.get('from'))} → {_fmt_time(r.get('to'))}: "
+                f"GAP of {_fmt_duration(r.get('seconds', 0))}"
+            )
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -773,6 +864,13 @@ def _clean_title(title: str) -> str:
     return re.sub(r"\s{2,}", " ", cleaned).strip(" -–—") or (title or "")
 
 
+def _fmt_time(epoch) -> str:
+    """Epoch seconds as local wall-clock, for humans reading a timeline."""
+    if not isinstance(epoch, (int, float)) or epoch <= 0:
+        return "unknown"
+    return datetime.datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _fmt_duration(seconds) -> str:
     if not isinstance(seconds, (int, float)) or seconds <= 0:
         return "?:??"
@@ -1353,13 +1451,15 @@ async def dj_taste(limit: int = 20) -> str:
                 bit += f'  — "{r["note"]}"'
             lines.append(bit)
 
-    # Library-side signal. Both endpoints are scoped to the CALLING user, and
-    # the DJ calls as dj-agent, which has never played anything — so an empty
-    # result here means "not visible to me", NOT "Todd doesn't listen to music".
-    # Saying so is the whole point; a silent [] would read as the opposite.
+    # Library-side signal, read OWNER-scoped (#3028). These used to point at
+    # /api/music/*, which filters by the CALLING user — and the DJ calls as
+    # dj-agent, which has never played anything, so the lists were always empty
+    # and the DJ would conclude Todd has no history rather than that it was
+    # asking as the wrong account. The playback-router copies resolve
+    # settings.dj_owner_username instead, the same fix /api/playback/ratings got.
     try:
-        played = await _get("/api/music/most-played?limit=10")
-        skipped = await _get("/api/music/likely-skips?limit=10")
+        played = await _get("/api/playback/most-played?limit=10")
+        skipped = await _get("/api/playback/likely-skips?limit=10")
     except Exception as e:
         lines.append(f"(Library play history unavailable: {e})")
         return "\n".join(lines)
@@ -1376,11 +1476,11 @@ async def dj_taste(limit: int = 20) -> str:
         ]
     if not played and not skipped:
         lines.append(
-            "No library play history visible: /api/music/most-played and "
-            "/likely-skips are scoped to the CALLING user and the DJ calls as "
-            "dj-agent, which has no listening history of its own. Todd's plays "
-            "are recorded under his own account and are not readable here — "
-            "treat this as no data, not as dislike."
+            "No library play history for the configured DJ owner. These reads "
+            "are owner-scoped now (#3028), so unlike before this is a real "
+            "answer and not an artefact of asking as dj-agent — the owner "
+            "genuinely has no completed plays or early skips recorded yet. "
+            "Still treat it as no data, not as dislike."
         )
     return "\n".join(lines)
 

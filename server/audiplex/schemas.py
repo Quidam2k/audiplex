@@ -245,6 +245,33 @@ class PlaybackCommandQueued(BaseModel):
     pending: int
 
 
+class PlaybackCommandAck(BaseModel):
+    """The device's verdict on a command it was handed (#900 Phase 3a).
+
+    `status` is 'ok' when the command was carried out; anything else is a
+    failure the device is owning up to ('no_tracks', 'error', ...). A failure
+    reported is worth far more than the silence that preceded this endpoint —
+    on 2026-08-14 a command was consumed and dropped with no trace anywhere.
+    """
+
+    status: str = "ok"
+    detail: str = ""
+
+
+class PlaybackCommandAckResult(BaseModel):
+    """The registry's record of a command after an ack."""
+
+    id: int
+    type: str
+    status: str
+    created_at: float
+    delivered_at: float | None = None
+    delivery_count: int = 0
+    acked_at: float | None = None
+    ack_status: str | None = None
+    ack_detail: str = ""
+
+
 class NowPlayingTrack(BaseModel):
     id: int
     title: str | None = None

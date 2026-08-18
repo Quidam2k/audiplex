@@ -3,12 +3,17 @@
 Endpoints:
   POST /api/playback/command       — agent enqueues a command
   GET  /api/playback/command/next  — client long-polls for the next command
+  POST /api/playback/command/{id}/ack — client reports what it did with one
+  GET  /api/playback/commands      — recent commands + their delivery status
   POST /api/playback/state         — client reports now-playing
   GET  /api/playback/state         — agent reads now-playing
   GET  /api/playback/device        — device liveness (last poll / state / command)
   POST /api/playback/client-log    — client ships a diagnostic up
   GET  /api/playback/client-log    — agent reads recent client diagnostics
   GET  /api/playback/client-exits  — process-exit reports, persisted to disk
+  GET  /api/playback/link-history  — link gaps/resumes, persisted to disk
+  GET  /api/playback/most-played            — owner's most-played (read-only)
+  GET  /api/playback/likely-skips           — owner's early-skip suspects
   GET  /api/playback/playlists              — owner's playlists (read-only)
   GET  /api/playback/playlists/{id}         — owner's playlist detail
   GET  /api/playback/favorites              — owner's favorites (read-only)
@@ -36,17 +41,26 @@ from audiplex.auth import get_current_user
 from audiplex.config import get_settings
 from audiplex.database import get_db
 from audiplex.models import Favorite, Playlist, TrackRating, User
-from audiplex.playback_bus import bus, read_persisted_exits
-from audiplex.routers.music import FAVORITE_TYPES, _get_playlist_detail
+from audiplex.playback_bus import bus, read_link_history, read_persisted_exits
+from audiplex.routers.music import (
+    FAVORITE_TYPES,
+    _get_playlist_detail,
+    likely_skips_for,
+    most_played_for,
+)
 from audiplex.schemas import (
     ClientLogEntry,
+    PlaybackCommandAck,
+    PlaybackCommandAckResult,
     FavoriteSchema,
     PlaybackCommand,
     PlaybackCommandQueued,
     PlaybackState,
     PlaylistDetail,
     PlaylistSummary,
+    SkipSuspectSchema,
     TrackRatingSchema,
+    TrackSchema,
 )
 
 router = APIRouter(prefix="/api/playback", tags=["playback"])
@@ -85,8 +99,38 @@ async def next_command(user: User = Depends(get_current_user)):
             "type": rec.type,
             "payload": rec.payload,
             "created_at": rec.created_at,
+            # Redeliveries are expected under at-least-once; the client dedupes
+            # on id and this tells it (and us) which pass it is looking at.
+            "delivery_count": rec.delivery_count,
         }
     )
+
+
+@router.post("/command/{command_id}/ack", response_model=PlaybackCommandAckResult)
+def ack_command(
+    command_id: int,
+    ack: PlaybackCommandAck,
+    user: User = Depends(get_current_user),
+):
+    """The device reports what it actually did with a command.
+
+    This is the half that was missing on 2026-08-14: the command was taken off
+    the queue and then silently dropped, and nothing anywhere could tell the
+    difference between that and a command still in flight. An ack — including
+    a FAILING one — ends the ambiguity, and it is what stops redelivery.
+    """
+    rec = bus.ack(command_id, ack.status, ack.detail)
+    if rec is None:
+        raise HTTPException(status_code=404, detail=f"Unknown command {command_id}")
+    return PlaybackCommandAckResult(**rec.summary())
+
+
+@router.get("/commands")
+def list_commands(
+    limit: int = Query(20, ge=1, le=200), user: User = Depends(get_current_user)
+):
+    """Recent commands and what became of each — the DJ's delivery receipt."""
+    return bus.commands(limit)
 
 
 @router.post("/state", response_model=PlaybackState)
@@ -145,6 +189,21 @@ def get_client_exits(
     destroy a death report nobody had read yet (#3021).
     """
     return read_persisted_exits(limit)
+
+
+@router.get("/link-history")
+def get_link_history(
+    limit: int = Query(50, ge=1, le=200), user: User = Depends(get_current_user)
+):
+    """When the DJ link dropped, and when it came back.
+
+    Durable because the live view is not: last-poll is a single in-memory
+    float, so "did the link hold overnight?" was unanswerable on 2026-08-18
+    even with the foreground service running (#3031). A `resumed` entry with
+    after_restart means the SERVER restarted — not a device fault, and
+    deliberately not recorded as a gap.
+    """
+    return read_link_history(limit)
 
 
 @router.get("/playlists", response_model=list[PlaylistSummary])
@@ -208,3 +267,34 @@ def list_owner_ratings(
         .order_by(TrackRating.rating.desc(), TrackRating.updated_at.desc())
         .all()
     )
+
+
+@router.get("/most-played", response_model=list[TrackSchema])
+def list_owner_most_played(
+    limit: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """The owner's most-played tracks (#3028).
+
+    Owner-scoped for the same reason as /ratings above, and this one was a
+    known-broken read rather than a hypothetical: /api/music/most-played
+    filters by the CALLER, the DJ authenticates as dj-agent, and dj-agent has
+    never played anything — so dj_taste's read was always an empty list, and
+    the DJ would conclude Todd has no history rather than that it was asking
+    as the wrong account.
+    """
+    owner = _resolve_owner(db)
+    return most_played_for(db, owner.id, limit)
+
+
+@router.get("/likely-skips", response_model=list[SkipSuspectSchema])
+def list_owner_likely_skips(
+    limit: int = Query(25, ge=1, le=200),
+    min_skips: int = Query(2, ge=1),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """The owner's early-skip suspects — same scoping story as most-played."""
+    owner = _resolve_owner(db)
+    return likely_skips_for(db, owner.id, limit, min_skips)
