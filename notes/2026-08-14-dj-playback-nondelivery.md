@@ -459,3 +459,88 @@ record before the HTTP response is written (root cause 5, still present), and
 empty just `return`s, consuming the command with no trace anywhere. The DJ
 still cannot say "the device got it and acted on it", which is the exact
 ambiguity that made the 08-14 test fail silently.
+
+## 08-18 — Phase 3 built and shipped (#3032 PROCEED, plan-back #9245)
+
+All four rulings applied: WS doorbell DEFERRED (latency evidence above), ACK
+at-least-once with N=60 and client dedup, 3a/3b split, no blocking on the
+battery question.
+
+### 3a — server only, live on :8100 (e95b7c1, 413c2d1)
+
+The `asyncio.Queue` is gone. Commands live in a bounded registry with a status
+(`queued` → `delivered` → `acked`/`failed`); delivery MARKS, it no longer
+consumes. **Root cause 5 is closed.** Un-acked deliveries are re-offered after
+60s and `/command/next` returns `delivery_count` so a redelivery is visible on
+both sides.
+
+New: `POST /api/playback/command/{id}/ack`, `GET /api/playback/commands`,
+`GET /api/playback/link-history`, plus MCP `dj_command_status` and
+`dj_link_history`. `dj_play_now` now points the caller at
+`dj_command_status` rather than implying the track played.
+
+**#3028 closed.** `/api/music/most-played` and `/likely-skips` filter by the
+CALLING user, and the DJ calls as `dj-agent`, which has never played anything —
+so `dj_taste`'s reads were always `[]`. Owner-scoped copies now live in the
+playback router (the `/api/playback/ratings` shape) and `dj_taste` reads those.
+Server-only, no APK, as argued. A test pins the per-caller endpoints still
+returning `[]` for `dj-agent`, so the distinction stays deliberate.
+
+314 server tests pass. Every endpoint and every new MCP tool was exercised live
+over HTTP against a scratch server on :8199.
+
+**A bug the live check caught, worth remembering.** After restarting :8100, the
+production `link-history.jsonl` held a dozen `resumed` entries in sub-second
+bursts — mine. Every test that polls `/command/next` writes a link event, and
+`bus.reset()` clears the once-per-process guard. The exit log had been
+protected by an autouse conftest fixture since #3021; the link log shipped
+without the equivalent, and the fixture I added covered only its own file.
+Isolation now lives in conftest for the whole suite, verified by a full run
+leaving both files untouched. The bogus rows are purged.
+
+**Unplanned evidence:** the one surviving entry is the phone re-attaching at
+07:41:34 after that restart — live proof the FGS recovers across a server
+restart, and now a durable record instead of something someone has to witness.
+Note the limit: link history only accumulates from 08-18 onward. It cannot
+retroactively answer last night.
+
+### 3b — APK 1.0.38, built, NOT yet installed (a4d61d8)
+
+Every exit path from a DJ command now acks. Previously `dispatch()` returned
+`Unit` and half its branches bailed with a bare `return`: an unresolvable track
+id, a payload missing a field, an unknown command type, or a thrown exception
+all produced *nothing*, against a server that had already destroyed the command
+by delivering it. Outcomes are `ok`, `no_tracks`, `bad_payload` (names the
+field), `unknown_type`, `error`. A partly-resolved track list acks `ok` **with
+detail**, because a half-loaded queue reported as a clean success is how a
+library gap stays invisible. The client remembers the last 64 command ids and
+re-acks a redelivery rather than executing it twice.
+
+`trace_status` (present / none / `error:<class>`) is now on every exit record,
+and the watermark goes to **v4** so the retained history re-ships once carrying
+it.
+
+Android unit tests green, 11 new. The server's update endpoint already serves
+1.0.38; the device is on 1.0.37.
+
+### ⚠️ THE ONE THING STILL OPEN — the 08-14 CRASH verdict
+
+Per jarvis (#3032), the v4 re-ship's answer for the 08-14 CRASH — `none` vs
+`error:<class>` — is to be written here as this file's **closing entry**.
+
+**It cannot be written yet, and must not be guessed.** The answer does not
+exist until Todd installs 1.0.38 and the phone re-ships its history. Whoever
+picks this up: read `dj_client_exits` (or `server/data/client-exits.jsonl`)
+after that install, find the record at `at=1786723385727`, and record its
+`trace_status`:
+
+- `none` → Android never kept a stack for that record. The 08-14 exception is
+  gone for good; close it as unrecoverable and rely on the instrumentation for
+  the next one.
+- `error:<class>` → our read was broken all along. Fix that class of failure;
+  the same bug would have eaten every future trace too.
+
+Either way it is a real endpoint for a record that has been chased for four
+days. Note the crash may already have rolled out of Android's 16-record
+history, in which case it simply will not appear — say so plainly rather than
+reporting a verdict that was never observed.
