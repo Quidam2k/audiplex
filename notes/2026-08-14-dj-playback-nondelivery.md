@@ -381,3 +381,81 @@ existing rec history for nothing.
 Install timing: Todd installs after his 5 PM block, so **no install
 verification tonight before then**. Post-install analysis belongs to a fresh
 session.
+
+## 08-18 morning — trace verification (#3031). THE TRACE IS NOT THERE.
+
+Worker: worker-audiplex-push-playback--20260818-142216-e204. MCP `dj_*` tools
+are not connected in this session, so this was read from the durable artifact
+directly: `server/data/client-exits.jsonl` (the file `dj_client_exits` serves).
+
+**1.0.37 is installed and the v3 re-ship happened.** Entry 20 is a
+`killDueToPackageUpdate` at 2026-08-18 01:04:59Z (= 08-17 18:04 PT, matching
+the file mtime), and the batch that follows re-ships all 16 records Android
+still holds — exactly the watermark-v3 behaviour #3021 designed.
+
+**Zero of the 16 records carry a `trace` field. Including the CRASH.** Not a
+truncated trace, not a blank one — `detail()` only emits the key when the
+trace is non-blank, and the key is absent everywhere.
+
+The CRASH record is nonetheless a real result:
+
+| field | value |
+|---|---|
+| `at` | 1786723385727 = **2026-08-14 16:03:05Z** |
+| reason | CRASH |
+| importance | 100 (FOREGROUND) |
+| trace | **absent** |
+
+That timestamp lands inside the 16:02:58–16:03:03 window the 08-14 analysis
+inferred for process A's death. So **root cause 2 is now confirmed by record
+rather than by inference: process A died of an uncaught exception (CRASH), not
+LOW_MEMORY and not the FGS-promotion exception that was the leading
+hypothesis.** What it does NOT give us is *which* exception, because the stack
+is missing.
+
+**Why the stack is missing is undetermined and cannot be settled remotely.**
+Two candidates, indistinguishable from the server: (a) Android retained no
+trace for this record — `getTraceInputStream()` is documented around ANR and
+native tombstones, and a 4-day-old record's trace file may simply be pruned;
+or (b) `readTrace()` threw and its `getOrDefault("")` swallowed it. The code
+cannot tell us which, because both paths produce an identical empty string and
+nothing is logged. That is an instrumentation gap in #3021, and it is the
+thing worth fixing — see the plan-back.
+
+**The 08-14 stack is realistically gone.** The phone advanced its watermark
+past this record on delivery, and the record is one of only 16 Android
+retains, so it will roll out. Recovery is not a plan; making the *next* crash
+self-explain is.
+
+### Overnight link continuity: NOT auditable, and nobody should claim it is
+
+`PlaybackBus._last_poll_at` is a single float in process memory. There is no
+poll history, and the server restarted overnight, so "continuous beat vs
+gaps" cannot be answered from the server at all — only the two point samples
+jarvis already has (a state report ~5:50 AM, a poll 6s before 7:26 AM).
+
+There IS one piece of real evidence the FGS held, and it is stronger than
+those samples: **`client-exits.jsonl` has not been appended to since the
+01:04:54Z install batch.** Any process death would have been reported on the
+next launch and landed in that file. No new entries = no reported death in
+the ~13 hours since install. Caveat: a death whose report failed to deliver
+would look identical, so this is strong but not conclusive.
+
+Battery-Unrestricted on the Pixel remains unconfirmed by Todd.
+
+### Two design findings that change Phase 3's shape
+
+**1. The WS doorbell buys almost no latency.** `bus.enqueue()` puts to an
+`asyncio.Queue` that a parked `bus.next()` is already awaiting, so a command
+reaches a *connected* device essentially instantly today — the long-poll IS a
+push. The only exposed gap is the sub-second re-issue window after a 204. The
+original #900 framing ("stop hanging out in a polling loop") was aimed at
+waking a **frozen or dead** app, and that is precisely what the FGS now
+solves. So the doorbell's justification is largely absorbed.
+
+**2. The ACK is the part that actually mattered.** `bus.next()` pops the
+record before the HTTP response is written (root cause 5, still present), and
+`dispatch()` can then drop it silently — e.g. `resolveTracks()` returning
+empty just `return`s, consuming the command with no trace anywhere. The DJ
+still cannot say "the device got it and acted on it", which is the exact
+ambiguity that made the 08-14 test fail silently.
