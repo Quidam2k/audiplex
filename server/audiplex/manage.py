@@ -224,6 +224,63 @@ def cmd_tag_repair_import_rfl(args) -> int:
         db.close()
 
 
+def cmd_tag_repair_endorse(args) -> int:
+    """Apply a held repair on human authority (#3037).
+
+    The review queue exists because the automatic rules refuse to guess, but a
+    person looking at the row often can tell. This is how that judgement gets
+    in: it records WHO decided and WHY alongside the machine's original
+    reasoning, so a row that reads "applied" later can still be argued with.
+    """
+    from audiplex.models import Track, TrackTagRepair
+
+    db = _session()
+    try:
+        track = db.query(Track).filter(Track.id == args.track_id).first()
+        if track is None:
+            print(f"error: no track with id {args.track_id}", file=sys.stderr)
+            return 1
+
+        repair = (
+            db.query(TrackTagRepair)
+            .filter(TrackTagRepair.file_path == track.file_path)
+            .first()
+        )
+        if repair is None:
+            print(f"error: no repair row for track {args.track_id}", file=sys.stderr)
+            return 1
+
+        artist = args.artist or repair.proposed_artist
+        title = args.title or repair.proposed_title
+        if not artist or not title:
+            print(
+                "error: nothing to apply — pass --artist/--title",
+                file=sys.stderr,
+            )
+            return 1
+
+        print(f"track {args.track_id}: {track.artist.name!r} / {track.title!r}")
+        print(f"      -> {artist!r} / {title!r}")
+        if not args.yes:
+            print("DRY RUN — pass --yes to commit")
+            return 0
+
+        repair.proposed_artist = artist
+        repair.proposed_title = title
+        repair.confidence = "high"
+        repair.source = "manual"
+        repair.status = "applied"
+        repair.evidence = f"{repair.evidence} — ENDORSED by {args.by}: {args.note}"
+        db.commit()
+        print("endorsed; run tag-repair-apply to push it into the catalog")
+        return 0
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m audiplex.manage",
@@ -270,6 +327,18 @@ def main(argv=None) -> int:
     rfl.add_argument("path", help="verdicts JSON from the RFL pass")
     rfl.add_argument("--yes", action="store_true", help="commit (default is a dry run)")
     rfl.set_defaults(func=cmd_tag_repair_import_rfl)
+
+    endorse = sub.add_parser(
+        "tag-repair-endorse",
+        help="apply a held repair on human authority",
+    )
+    endorse.add_argument("track_id", type=int)
+    endorse.add_argument("--artist", help="override the held proposal's artist")
+    endorse.add_argument("--title", help="override the held proposal's title")
+    endorse.add_argument("--by", default="unknown", help="who is endorsing this")
+    endorse.add_argument("--note", default="", help="why")
+    endorse.add_argument("--yes", action="store_true", help="commit (default is a dry run)")
+    endorse.set_defaults(func=cmd_tag_repair_endorse)
 
     args = parser.parse_args(argv)
     return args.func(args)

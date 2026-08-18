@@ -306,3 +306,39 @@ applied rows are checked, so the 27 permanently-held ones do not force a rescan
 every time. Three tests.
 
 Server restarted again onto the new scanner (PID 18460, /docs 200).
+
+---
+
+# Final item — [54] endorsed (#3042)
+
+Jarvis endorsed Cirque du Soleil — "First Incantation": "CriqueCirque" is a
+transposition of Cirque, and track [6] Alegria had already resolved to Cirque
+du Soleil via its Topic channel in the same library. The rule couldn't see
+that; a person could.
+
+Added `manage.py tag-repair-endorse <track_id> --by --note` rather than editing
+a row by hand — 26 rows are still held and they should be actionable without a
+worker session. It defaults to a dry run, and it records WHO endorsed and WHY
+alongside the machine's original reasoning, so a row that reads "applied" can
+still be argued with later.
+
+Final live state: **191 applied / 26 held**, 217 tracks, 142 artists,
+play statistics 7, work merges 4, recording merges 1. Overlay by source:
+parser 184, consensus 2, rfl 4, manual 1. Artist count did not move — Cirque du
+Soleil already existed from track [6], which is itself the confirmation the
+endorsement rested on.
+
+No server restart needed: `manage.py` is the admin CLI and the server does not
+import it.
+
+## Ledger
+
+| | |
+|---|---|
+| repaired automatically | 184 parser + 2 folder consensus |
+| repaired from external identification | 4 RFL |
+| repaired on human authority | 1 |
+| **still held, with evidence** | **26** |
+
+Of the 26: 14 RFL could not identify, 6 uncorroborated external hits, 5
+non-music (#954), 1 low confidence.
