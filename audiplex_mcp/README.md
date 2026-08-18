@@ -32,6 +32,15 @@ is a flat untagged dump, so the artist/album/genre axes are degenerate and the
 real metadata is in the track titles; `dj_library` says so rather than letting
 the agent conclude the library is empty.
 
+Listening signal (#947/#948) — `dj_track_stats` reads completion RATE and where
+skips land (sharper than raw play counts: "played 8, finished 2" and "played 2,
+finished 2" have the same count and opposite meanings). `dj_check_picks` asks
+whether a proposed set would repeat something Todd just heard, at recording
+level (this exact track) or work level (any version of the song, 20 min each by
+default). Both are advisory — `dj_play_now` / `dj_queue` / `dj_play_next` append
+a heads-up when a pick just played but never filter, because an explicit request
+for a song is an explicit request.
+
 Taste loop (#2945 phase A) — `dj_recommend` logs a track the library doesn't
 have, `dj_rate` records how it landed, `dj_taste` reads the signal back.
 Feedback is voice-relayed through the agent; there is no app UI for it.

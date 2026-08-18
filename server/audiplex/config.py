@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     token_expiry_hours: int = 720
     dj_owner_username: str = "admin"
+    # Recency cooldown (#948). Twenty minutes at BOTH levels is Todd's stated
+    # number, not a derived one — revisit the work-level figure against real
+    # listening data rather than guessing a different one now.
+    dj_recording_cooldown_minutes: int = 20
+    dj_work_cooldown_minutes: int = 20
 
     @model_validator(mode="after")
     def _ensure_jwt_secret(self):

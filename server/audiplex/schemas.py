@@ -224,6 +224,87 @@ class SkipSuspectSchema(BaseModel):
     total_starts: int
 
 
+# ----- Song identity, taste aggregation, recency cooldown (#943/#947/#948) -----
+
+
+class TrackIdentitySchema(BaseModel):
+    """The two keys a track answers to. See audiplex/identity.py."""
+
+    track_id: int
+    recording_id: str  # same audio — ratings and stats bind here
+    work_id: str  # same song, any version — cooldown binds here
+    same_recording_track_ids: list[int] = []
+    same_work_track_ids: list[int] = []
+
+
+class RecordingStatsSchema(BaseModel):
+    """One recording's listening history, pooled across every copy of it.
+
+    completion_rate is completes/starts, and is null when the recording has
+    never been started. Note what 'complete' means: the client posts it with
+    the track's full duration, so it records REACHED THE END, not heard all
+    of it. Good enough for taste; not evidence of attention.
+    """
+
+    recording_id: str
+    work_id: str
+    track: TrackSchema
+    track_ids: list[int]
+    starts: int
+    completes: int
+    abandons: int
+    early_skips: int
+    completion_rate: float | None = None
+    mean_skip_seconds: float | None = None
+    median_skip_seconds: float | None = None
+    last_played_at: datetime | None = None
+
+
+class RecentPlaySchema(BaseModel):
+    track_id: int
+    recording_id: str
+    work_id: str
+    event: str
+    at: datetime
+    minutes_ago: float
+    title: str | None = None
+    artist_name: str | None = None
+
+
+class CooldownStateSchema(BaseModel):
+    recording_cooldown_minutes: float
+    work_cooldown_minutes: float
+    recent_plays: list[RecentPlaySchema]
+
+
+class CandidateFilterRequest(BaseModel):
+    """Ask whether these picks would repeat something Todd just heard."""
+
+    track_ids: list[int]
+    recording_cooldown_minutes: float | None = None
+    work_cooldown_minutes: float | None = None
+    min_rating: int | None = Field(default=None, ge=1, le=5)
+
+
+class SuppressionSchema(BaseModel):
+    """A candidate to pass over, and the reason to say out loud."""
+
+    track_id: int
+    reason: str  # recording_cooldown | work_cooldown | low_rating
+    detail: str
+    minutes_ago: float | None = None
+    clears_in_minutes: float | None = None
+    title: str | None = None
+    artist_name: str | None = None
+
+
+class CandidateFilterResult(BaseModel):
+    allowed: list[int]
+    suppressed: list[SuppressionSchema]
+    recording_cooldown_minutes: float
+    work_cooldown_minutes: float
+
+
 # ----- DJ playback command bus (remote control) -----
 
 

@@ -125,11 +125,21 @@ async def dj_play_now(track_ids: list[int]) -> str:
     )
     # Never claim "it's playing" — say whether anything is listening, so a dead
     # player reads as a failure instead of a success (#2961).
+    note = await _repeat_note(track_ids)
     if not device:
-        return head + "The device plays when it next polls (immediately if awake)."
+        return head + "The device plays when it next polls (immediately if awake)." + note
     if device.get("connected"):
-        return head + "A player is connected, so it should pick this up within seconds."
-    return head + _describe_device(device) + " It will play whenever a player next starts."
+        return (
+            head
+            + "A player is connected, so it should pick this up within seconds."
+            + note
+        )
+    return (
+        head
+        + _describe_device(device)
+        + " It will play whenever a player next starts."
+        + note
+    )
 
 
 @mcp.tool()
@@ -273,7 +283,7 @@ async def dj_queue(track_ids: list[int]) -> str:
         f"Queued {len(track_ids)} track(s) to the end "
         f"(command #{data.get('id')}, {data.get('pending')} pending). "
         "Appended when the device next polls."
-    )
+    ) + await _repeat_note(track_ids)
 
 
 @mcp.tool()
@@ -291,7 +301,7 @@ async def dj_play_next(track_ids: list[int]) -> str:
     return (
         f"Inserted {len(track_ids)} track(s) to play next "
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
-    )
+    ) + await _repeat_note(track_ids)
 
 
 @mcp.tool()
@@ -509,6 +519,45 @@ async def _get(path: str):
         raise PermissionError("Auth failed (401). Check AUDIPLEX_TOKEN.")
     resp.raise_for_status()
     return resp.json()
+
+
+async def _post(path: str, body: dict):
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.post(
+            f"{AUDIPLEX_URL}{path}", headers=_headers(), json=body
+        )
+    if resp.status_code == 401:
+        raise PermissionError("Auth failed (401). Check AUDIPLEX_TOKEN.")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _describe_suppression(item: dict) -> str:
+    label = f"{item.get('artist_name') or ''} - {item.get('title') or ''}".strip(" -")
+    return f"    {label or ('track ' + str(item['track_id']))} — {item['detail']}"
+
+
+async def _repeat_note(track_ids: list[int]) -> str:
+    """Advisory line for a queueing command: did this just play? (#948)
+
+    Deliberately does NOT filter. An explicit request is an explicit request —
+    when Todd asks for a song by name he gets that song. This only appends a
+    note, so a repeat is visible rather than silent, and a failure to reach the
+    cooldown read can never stop a command from being sent.
+    """
+    try:
+        verdict = await _post("/api/playback/candidates/filter", {"track_ids": track_ids})
+    except Exception:
+        return ""
+    suppressed = verdict.get("suppressed") or []
+    if not suppressed:
+        return ""
+    lines = [
+        "",
+        f"  Heads-up: {len(suppressed)} of these played recently (queued anyway):",
+    ]
+    lines.extend(_describe_suppression(s) for s in suppressed)
+    return "\n".join(lines)
 
 
 def _best_match(items: list[dict], name_key: str, q: str) -> dict | None:
@@ -765,6 +814,95 @@ async def dj_track_ratings(limit: int = 30) -> str:
         line = f"  [{stars:<5}] {label}"
         if r.get("note"):
             line += f'  — "{r["note"]}"'
+        lines.append(line)
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def dj_check_picks(track_ids: list[int], min_rating: int = 0) -> str:
+    """Before you queue a set: which of these would repeat something Todd just
+    heard, and why (#948).
+
+    Two windows, both 20 minutes by default. The first is the same RECORDING —
+    he just heard this exact track. The second is the same SONG in any version:
+    a live cut, a remaster, the same tune off a different album still counts as
+    hearing it twice.
+
+    ADVISORY ONLY. Nothing here blocks playback and nothing is removed from a
+    queue behind your back — if Todd asked for a song by name, play it. This
+    exists so YOUR OWN picks don't repeat themselves, and so you can say why
+    you passed something over instead of silently narrowing his library.
+
+    min_rating: optionally also flag tracks rated below N stars (1-5). 0 = off.
+    """
+    if not track_ids:
+        return "No track_ids given; nothing to check."
+    body: dict = {"track_ids": track_ids}
+    if min_rating:
+        body["min_rating"] = min_rating
+    verdict = await _post("/api/playback/candidates/filter", body)
+
+    allowed = verdict.get("allowed") or []
+    suppressed = verdict.get("suppressed") or []
+    lines = [
+        f"Checked {len(track_ids)} pick(s) against a "
+        f"{verdict.get('recording_cooldown_minutes')}-min recording / "
+        f"{verdict.get('work_cooldown_minutes')}-min song cooldown."
+    ]
+    lines.append(f"  Clear to play ({len(allowed)}): {allowed if allowed else 'none'}")
+    if suppressed:
+        lines.append(f"  Would repeat ({len(suppressed)}):")
+        lines.extend(_describe_suppression(s) for s in suppressed)
+        lines.append(
+            "  Swap those out if you're free-picking. If Todd asked for one by "
+            "name, play it anyway and just say you know he heard it recently."
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def dj_track_stats(limit: int = 25, min_starts: int = 2) -> str:
+    """How Todd actually listens to tracks he has played: completion RATE and
+    where the skips land (#947).
+
+    Sharper than dj_most_played's raw counts. "Played eight times, finished
+    twice" and "played twice, finished twice" have identical play counts and
+    opposite meanings — the rate separates them. The mean/median skip position
+    tells you the other half: bailing at 4 seconds is "wrong song", bailing at
+    four minutes is "good song, too long for right now".
+
+    One honest limit: a 'complete' is posted with the track's full duration, so
+    it means REACHED THE END, not heard every second of it. Treat it as taste,
+    not as proof of attention.
+
+    Statistics pool across every copy of a recording, so a track that exists
+    both on the server and on the phone doesn't look half-listened-to twice.
+    """
+    stats = await _get(f"/api/playback/track-stats?limit={limit}&min_starts={min_starts}")
+    if not stats:
+        return (
+            "No listening history yet. Play stats accumulate as Todd listens; "
+            "until then, dj_track_ratings (his stars) is the signal to use."
+        )
+    lines = ["How Todd listens (completion rate, then where he bails):"]
+    for entry in stats:
+        track = entry.get("track") or {}
+        label = f"{track.get('artist_name') or ''} - {track.get('title') or ''}".strip(" -")
+        rate = entry.get("completion_rate")
+        rate_text = "no starts yet" if rate is None else f"{rate * 100:.0f}% finished"
+        line = (
+            f"  {label or 'track ' + str(track.get('id'))}: {rate_text} "
+            f"({entry.get('completes')}/{entry.get('starts')} plays)"
+        )
+        if entry.get("abandons"):
+            line += (
+                f", {entry['abandons']} bail(s) around "
+                f"{entry.get('median_skip_seconds')}s"
+            )
+            if entry.get("early_skips"):
+                line += f", {entry['early_skips']} of them in the first 10s"
+        if len(entry.get("track_ids") or []) > 1:
+            line += f"  [{len(entry['track_ids'])} copies pooled]"
         lines.append(line)
     return "\n".join(lines)
 

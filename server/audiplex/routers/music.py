@@ -8,9 +8,11 @@ from fastapi.responses import FileResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
 
+from audiplex import taste
 from audiplex.config import get_settings, set_library_roots_for_category
 from audiplex.auth import get_admin_user, get_current_user
 from audiplex.database import get_db
+from audiplex.identity import build_identity_map
 from audiplex.models import (
     Album,
     Artist,
@@ -42,7 +44,9 @@ from audiplex.schemas import (
     PlaylistDetail,
     PlaylistSummary,
     PlaylistUpdate,
+    RecordingStatsSchema,
     SkipSuspectSchema,
+    TrackIdentitySchema,
     TrackRatingCreate,
     TrackRatingSchema,
     TrackSchema,
@@ -51,8 +55,10 @@ from audiplex.schemas import (
 # Entity types for the polymorphic Favorite table.
 FAVORITE_TYPES = {"track", "album", "artist", "genre", "book", "to_read"}
 # Tracks with stop events whose played_seconds is below this threshold are
-# treated as early skips.
-EARLY_SKIP_THRESHOLD_SECONDS = 10.0
+# treated as early skips. Defined in audiplex.taste and re-exported here: the
+# skip-suspect read and the taste aggregation must not drift apart (#3028),
+# and existing callers import it from this module.
+EARLY_SKIP_THRESHOLD_SECONDS = taste.EARLY_SKIP_THRESHOLD_SECONDS
 from audiplex.utils.cover_art import get_album_cover_path
 from audiplex.utils.streaming import EXT_MIME, serve_file
 
@@ -765,3 +771,104 @@ def list_likely_skips(
 ):
     """Early-skip suspects for the CALLER (see [most_played_for] on scoping)."""
     return likely_skips_for(db, user.id, limit, min_skips)
+
+
+# ----- Song identity + taste aggregation (#943/#947/#948) -----
+
+
+def _tracks_by_id(db: Session, track_ids: list[int]) -> dict[int, Track]:
+    if not track_ids:
+        return {}
+    rows = (
+        db.query(Track)
+        .filter(Track.id.in_(track_ids))
+        .options(selectinload(Track.artist))
+        .all()
+    )
+    return {track.id: track for track in rows}
+
+
+def track_identity_for(db: Session, track_id: int) -> TrackIdentitySchema | None:
+    """The two keys one track answers to, plus everything sharing them.
+
+    Shared with the owner-scoped DJ read for the same reason as
+    [most_played_for] (#3028) — one definition, not two that drift.
+    """
+    identities = build_identity_map(db)
+    identity = identities.get(track_id)
+    if identity is None:
+        return None
+    return TrackIdentitySchema(
+        track_id=track_id,
+        recording_id=identity.recording_id,
+        work_id=identity.work_id,
+        same_recording_track_ids=sorted(
+            other.track_id
+            for other in identities.values()
+            if other.recording_id == identity.recording_id
+        ),
+        same_work_track_ids=sorted(
+            other.track_id
+            for other in identities.values()
+            if other.work_id == identity.work_id
+        ),
+    )
+
+
+def recording_stats_view(
+    db: Session, user_id: int, limit: int, min_starts: int
+) -> list[RecordingStatsSchema]:
+    """Per-recording completion rate and skip positions, for one user (#947).
+
+    Every copy of a recording pools into one row, so a track that exists both
+    locally and on the server doesn't look half-listened-to twice.
+    """
+    ranked = taste.ranked_recording_stats(db, user_id, limit, min_starts)
+    representative_ids = [entry.track_ids[0] for entry in ranked if entry.track_ids]
+    tracks = _tracks_by_id(db, representative_ids)
+
+    out: list[RecordingStatsSchema] = []
+    for entry in ranked:
+        track = tracks.get(entry.track_ids[0]) if entry.track_ids else None
+        if track is None:
+            continue
+        out.append(
+            RecordingStatsSchema(
+                recording_id=entry.recording_id,
+                work_id=entry.work_id,
+                track=_track_schema(track),
+                track_ids=entry.track_ids,
+                starts=entry.starts,
+                completes=entry.completes,
+                abandons=entry.abandons,
+                early_skips=entry.early_skips,
+                completion_rate=entry.completion_rate,
+                mean_skip_seconds=entry.mean_skip_seconds,
+                median_skip_seconds=entry.median_skip_seconds,
+                last_played_at=entry.last_played_at,
+            )
+        )
+    return out
+
+
+@router.get("/tracks/{track_id}/identity", response_model=TrackIdentitySchema)
+def get_track_identity(
+    track_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """What else in the library is the same recording, and the same song."""
+    identity = track_identity_for(db, track_id)
+    if identity is None:
+        raise HTTPException(status_code=404, detail="Track not found")
+    return identity
+
+
+@router.get("/track-stats", response_model=list[RecordingStatsSchema])
+def list_track_stats(
+    limit: int = Query(50, ge=1, le=500),
+    min_starts: int = Query(1, ge=0),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Completion rates and skip positions for the CALLER (see
+    [most_played_for] on why agents must use the owner-scoped read instead)."""
+    return recording_stats_view(db, user.id, limit, min_starts)
