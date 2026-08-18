@@ -360,3 +360,24 @@ network anyway.
 with the app CLOSED is both the FGS liveness proof and the backgrounded
 audio-focus experiment that was never run. If focus was the 08-14 cause, this
 is where it shows — and if the FGS fixed it, it shows there too.
+
+## Carry-forward for the next session (jarvis #3028)
+
+**Do NOT fix ad hoc — file it in the next plan-back:** `dj_taste`'s
+library-side reads (`/api/music/most-played`, `/api/music/likely-skips`) have
+the same caller-scoping trap the ratings read avoided. They are per-caller,
+the DJ calls as `dj-agent`, and `dj-agent` has never played anything — so
+those lists are always empty for the DJ. The existing comment there says so
+honestly rather than pretending otherwise, which is why this is a known
+limitation and not a bug, but the fix is the same shape as
+`GET /api/playback/ratings`: an owner-scoped read in the playback router.
+Jarvis's ruling is that it goes through plan review, not a drive-by patch.
+
+Also on record from #3028: the owner-scoped ratings deviation is APPROVED as
+the dud-prevention standard, and NOT converting `dj_rate`'s good/meh rec
+vocabulary to 1-5 was the right call — converting would have corrupted
+existing rec history for nothing.
+
+Install timing: Todd installs after his 5 PM block, so **no install
+verification tonight before then**. Post-install analysis belongs to a fresh
+session.
