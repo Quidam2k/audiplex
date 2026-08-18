@@ -299,3 +299,64 @@ Nothing else may ever depend on it.
 Also queued as a near-free win: with the FGS up, a DJ play with the app closed
 is the **backgrounded** audio-focus experiment that never ran (see above). If
 the FGS is the fix for 08-14, that is the test where it shows.
+
+## 08-17 (evening) — APK 1.0.37 shipped: FGS + trace shipper + star ratings
+
+Plan-back #9210 approved (#3025) with all five rulings, plus #3026 (Todd:
+stars, not thumbs). All three phases built, tested and pushed.
+
+**Phase A — #3021, stack traces + three decoding defects.**
+`getTraceInputStream()` now ships the first 40 lines (4000-char cap) for CRASH
+and ANR. The blank-description bug was real and confirmed on-device: SIGNALED
+records carry `""`, not null, so the old `?:` never fired — Jarvis's paste
+shows the double-space where the message should be. Status is now decoded to a
+signal name, because "SIGNALED" repeated four times says nothing while
+`SIGKILL` does. Watermark key → v3 so the retained history re-ships WITH
+traces.
+
+**Server-side durability (finding 3).** `process_exit` entries are now appended
+to `server/data/client-exits.jsonl` as well as the ring buffer, exposed via
+`GET /api/playback/client-exits` and `dj_client_exits`. Without this the first
+trace we ever capture could be destroyed by a restart, since the phone
+advances its watermark on delivery and never re-sends.
+
+**Phase B — #3022, the always-on FGS.** `DjLinkService`, type **specialUse**
+(the targetSdk-35 dataSync timeout trap is documented in the manifest itself).
+It owns nothing: `DjCommandClient`'s loops are untouched in the application
+scope, and the service only holds the process up and shows a notification —
+so the toggle genuinely reverts to prior behaviour. Started from
+`MainActivity` (an FGS start is illegal from a backgrounded
+`Application.onCreate`) and from `BootReceiver` on reboot. Notification is
+IMPORTANCE_MIN and reports real link state, doubling as the liveness readout
+whose absence made the 08-14 test fail silently.
+
+**Phase C — #3024, stars 1-5.** The assignment's premise was wrong: nothing
+rated tracks anywhere, so this added the store too — `track_ratings`,
+`PUT/DELETE /api/music/tracks/{id}/rating`, `GET /api/music/ratings`, and a
+five-star row on the now-playing screen (music only). Tap the set star to
+clear; re-rating keeps an existing note.
+
+**A trap worth remembering:** the DJ reads ratings through a SEPARATE
+owner-scoped endpoint, `GET /api/playback/ratings`. It authenticates as
+`dj-agent`, which has never rated anything, so the per-caller read would have
+returned `[]` and the DJ would have concluded Todd has no opinions rather than
+that it was querying the wrong account. Same trap the playlists/favorites
+reads in that router already avoid — and the same one `dj_taste`'s
+most-played read still lives with, deliberately, with a comment saying so.
+
+**Verification:** server 294 passed, Android unit tests green, APK **1.0.37**
+built (device is on 1.0.36, so the in-app updater will offer it). Server on
+:8100 RESTARTED onto the new code — `/api/playback/client-exits`,
+`/api/playback/ratings` and `/api/music/ratings` all answer 401 (route present,
+auth required) rather than 404, and `track_ratings` exists in the DB. No
+active connections were open at restart time, so nothing was interrupted.
+
+**Not device-verified** — that needs Todd's install. Two one-time phone
+settings: allow the notification, and set battery to Unrestricted (the same
+treatment Tailscale already needs on this device) or Doze will cut the link's
+network anyway.
+
+**The first post-install test does double duty** (Jarvis endorsed): a DJ play
+with the app CLOSED is both the FGS liveness proof and the backgrounded
+audio-focus experiment that was never run. If focus was the 08-14 cause, this
+is where it shows — and if the FGS fixed it, it shows there too.
