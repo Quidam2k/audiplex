@@ -233,3 +233,76 @@ source.
 - #955 — the same delete/re-insert hazard in the book and meditation scanners.
 - The 31 held rows await the RFL identification pass; verdicts import through
   the same overlay with `source='rfl'`.
+
+---
+
+# Phase 4 — RFL verdicts imported (#3041)
+
+33 verdicts in, from `2026-08-18-tag-repair-rfl-verdicts.json` (jarvis, commit
+2f03125). Import policy: high applies on its own; **medium applies only when
+CORROBORATED by something already in the file** — the artist named in the title
+tag, or a channel that matches. Low, unidentified and non-music stay held.
+
+```
+applied 4 | held_uncorroborated 6 | held_low 2
+held_unidentified 14 | held_non_music 5 | already_resolved 2   (= 33)
+```
+
+Catalog after: artists 138 -> 142, **190 applied / 27 held**, play statistics
+still 7, work merges 4 and recording merges 1 — unchanged. Overlay by source:
+parser 184, consensus 2, rfl 4.
+
+## Why medium needed corroboration
+
+MusicBrainz matches largely on TITLE, so a lookup for a bare title returns a
+confident hit for *somebody's* recording of that name. Four of the medium
+verdicts were exactly that, all scoring 0.82+:
+
+| track | RFL said | what it actually is |
+|---|---|---|
+| 8 | Suzy Bogguss — "Paint the Town Blue" (0.823) | the Arcane S2 Netflix cut |
+| 201 | Linda Clifford — "You Are, You Are" (0.823) | an upload on *hankschannel* |
+| 157 | arvop3arl666 — "STARS STARS STARS" (0.823) | one of three F3LC4T uploads |
+| 194 | Orchards & Vines — "Violet" (0.867) | ditto |
+
+Writing those would have been worse than the blanks they replaced. The
+corroboration rule holds all four without needing to know anything about the
+music.
+
+## Applied (4)
+
+- **61** Jesse Welles — Good Morning America (high, MusicBrainz 1.0)
+- **40** Anna Kendrick — Cups (When I'm Gone) — the title-dash REVERSAL my own
+  ladder caught and held; RFL confirms it
+- **58** fun. — We Are Young (feat. Janelle Monáe) — channel was the label
+- **160** Stray Kids / Young Miko / Tom Morello — Come Play — held by the
+  over-long-credit guard, corroborated by the raw title tag
+
+That last one is why corroboration reads the FILE and not the parser's
+conclusion: the parser's cleaned title had dropped the credit, but the raw tag
+still carried it.
+
+## Held mediums I'd endorse anyway
+
+**54** Cirque du Soleil — "First Incantation" and, before the title tag
+corroborated it, **160**. Both look right to me, but nothing in the file backs
+54 up (the channel is the misspelled "CriqueCirque"), and the rule cannot tell
+it apart from the four wrong ones. Held. A one-line status flip applies it if
+jarvis wants it.
+
+## Marillion pair — independent confirmation
+
+Tracks 208/212 were already resolved by folder consensus, and RFL independently
+returned "Marillion" for both. The import skips already-applied rows rather than
+reopening them, so consensus stands; the agreement is a nice check on the rule.
+
+## Scanner fix this exposed
+
+A verdict arriving AFTER a scan could not reach the catalog: the album's hash
+was unchanged and every file already had a verdict, so the fast path skipped.
+`_overlay_settled` now also requires that every APPLIED verdict already matches
+its track row — checking the real invariant rather than a staleness clock. Only
+applied rows are checked, so the 27 permanently-held ones do not force a rescan
+every time. Three tests.
+
+Server restarted again onto the new scanner (PID 18460, /docs 200).

@@ -307,10 +307,42 @@ def _repairs_for(db: Session, paths: list[str]) -> dict[str, TrackTagRepair]:
     return found
 
 
-def _all_weighed(db: Session, track_infos: list[tuple[Path, int, dict]]) -> bool:
-    """True when every file in this album already has a repair verdict."""
+def _overlay_settled(
+    db: Session, existing: Album | None, track_infos: list[tuple[Path, int, dict]]
+) -> bool:
+    """True when every file has a verdict AND every applied verdict is already
+    reflected in its track row.
+
+    Both halves are needed. The first stops an album whose files never change
+    from escaping the repair ladder forever. The second is what lets a verdict
+    arriving LATER — an RFL identification landing days after the scan — reach
+    the catalog: the album's hash is unchanged, so without this the fast path
+    would skip right past the new answer and the overlay would quietly disagree
+    with the tracks it is supposed to govern.
+
+    Checking the tracks directly rather than comparing timestamps because it
+    tests the actual invariant. A staleness clock can be wrong; "does the row
+    say what the overlay says" cannot.
+    """
     paths = [str(tpath) for tpath, _, _ in track_infos]
-    return len(_repairs_for(db, paths)) == len(set(paths))
+    repairs = _repairs_for(db, paths)
+    if len(repairs) != len(set(paths)):
+        return False
+    if existing is None:
+        return False
+
+    tracks = {t.file_path: t for t in existing.tracks}
+    for path, repair in repairs.items():
+        if repair.status != tag_repair.APPLIED:
+            continue
+        track = tracks.get(path)
+        if track is None:
+            return False
+        if repair.proposed_title and track.title != repair.proposed_title:
+            return False
+        if repair.proposed_artist and track.artist.name != repair.proposed_artist:
+            return False
+    return True
 
 
 def _propose_for(tpath: Path, info: dict) -> tag_repair.Proposal:
@@ -443,11 +475,10 @@ def _process_album_folder(
         existing_hash = _folder_hash(
             existing.folder_path, existing.duration_seconds, existing.track_count
         )
-        # The hash covers path, duration and count — nothing about tag quality.
-        # An album whose files never change would therefore never be weighed by
-        # the repair ladder at all, so the fast path also requires that every
-        # file already has a verdict on record (#3037).
-        if existing_hash == file_hash and _all_weighed(db, track_infos):
+        # The hash covers path, duration and count — nothing about tag quality
+        # and nothing about the overlay. So the fast path also requires that the
+        # repair verdicts are settled and already reflected in the rows (#3037).
+        if existing_hash == file_hash and _overlay_settled(db, existing, track_infos):
             return "skipped", warnings
 
     artist = _get_or_create_artist(db, artist_name, artist_cache)

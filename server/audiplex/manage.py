@@ -196,6 +196,34 @@ def cmd_tag_repair_apply(args) -> int:
         db.close()
 
 
+def cmd_tag_repair_import_rfl(args) -> int:
+    """Fold RFL identification verdicts into the repair overlay (#3037 Phase 4)."""
+    from audiplex import rfl_import
+
+    db = _session()
+    try:
+        rows = rfl_import.load(args.path)
+        print(f"{len(rows)} verdicts from {args.path}")
+
+        counts, log = rfl_import.import_verdicts(db, rows)
+        for line in log:
+            print(line)
+        print(f"counts: {counts.as_dict()}")
+
+        if args.yes:
+            db.commit()
+            print("committed")
+        else:
+            db.rollback()
+            print("DRY RUN — nothing written (pass --yes to commit)")
+        return 0
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m audiplex.manage",
@@ -234,6 +262,14 @@ def main(argv=None) -> int:
         "--yes", action="store_true", help="confirm the write (required)"
     )
     apply_cmd.set_defaults(func=cmd_tag_repair_apply)
+
+    rfl = sub.add_parser(
+        "tag-repair-import-rfl",
+        help="import RFL identification verdicts into the repair overlay",
+    )
+    rfl.add_argument("path", help="verdicts JSON from the RFL pass")
+    rfl.add_argument("--yes", action="store_true", help="commit (default is a dry run)")
+    rfl.set_defaults(func=cmd_tag_repair_import_rfl)
 
     args = parser.parse_args(argv)
     return args.func(args)

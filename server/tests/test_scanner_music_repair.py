@@ -339,3 +339,54 @@ class TestFolderConsensus:
         )
         assert repair.status == PENDING_REVIEW
         assert repair.source == "parser"
+
+
+class TestLateVerdictsReachTheCatalog:
+    """A verdict that arrives AFTER the scan — an RFL identification landing
+    days later — must still reach the track rows. The album's hash has not
+    changed, so only the overlay check can notice (#3041)."""
+
+    def test_a_verdict_flipped_to_applied_is_picked_up_next_scan(
+        self, db_session, rip_root, mocked_rip_tags
+    ):
+        _scan(db_session, rip_root)
+        assert db_session.query(Track).filter(Track.title == "Barracuda").one().artist.name == "Various Artists"
+
+        repair = (
+            db_session.query(TrackTagRepair)
+            .filter(TrackTagRepair.proposed_title == "Barracuda")
+            .one()
+        )
+        repair.proposed_artist = "Heart"
+        repair.confidence = HIGH
+        repair.status = APPLIED
+        repair.source = "rfl"
+        db_session.commit()
+
+        # Nothing on disk changed — no new file, no touched duration.
+        result = _scan(db_session, rip_root)
+        assert result.updated >= 1
+
+        assert db_session.query(Track).filter(Track.title == "Barracuda").one().artist.name == "Heart"
+
+    def test_a_settled_catalog_is_still_a_noop(
+        self, db_session, rip_root, mocked_rip_tags
+    ):
+        _scan(db_session, rip_root)
+        result = _scan(db_session, rip_root)
+        assert (result.added, result.updated) == (0, 0)
+
+    def test_a_still_pending_verdict_does_not_force_rescans(
+        self, db_session, rip_root, mocked_rip_tags
+    ):
+        """Only APPLIED rows have to match. "Barracuda" stays held forever and
+        must not make every scan think there is work to do."""
+        _scan(db_session, rip_root)
+        held = (
+            db_session.query(TrackTagRepair)
+            .filter(TrackTagRepair.status == PENDING_REVIEW)
+            .count()
+        )
+        assert held >= 1
+        result = _scan(db_session, rip_root)
+        assert (result.added, result.updated) == (0, 0)
