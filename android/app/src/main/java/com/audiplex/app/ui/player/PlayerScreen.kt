@@ -1,5 +1,6 @@
 package com.audiplex.app.ui.player
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,9 +10,12 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -55,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import coil3.compose.AsyncImage
 import com.audiplex.app.data.api.AudiplexApi
+import com.audiplex.app.playback.MusicQueueState
 import com.audiplex.app.playback.PlayerKind
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -279,7 +284,98 @@ fun PlayerScreen(
             }
         }
 
-        Spacer(Modifier.height(48.dp))
+        // Visible queue (#3105/#993): the DJ session Todd walks up to should
+        // show what is queued and where he is in it, and let him jump around.
+        val q = music
+        if (kind == PlayerKind.Music && q != null && q.items.size > 1) {
+            Spacer(Modifier.height(20.dp))
+            UpNextQueue(
+                queue = q,
+                onTrackClick = { viewModel.seekToTrack(it) },
+            )
+        }
+
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+/**
+ * The now-playing queue, current track marked, every row tappable to jump
+ * straight there (#3105/#993). Header doubles as the "8/11" position readout
+ * Todd was missing. Scrolls internally so it never pushes the transport
+ * controls off-screen.
+ */
+@Composable
+private fun UpNextQueue(
+    queue: MusicQueueState,
+    onTrackClick: (Int) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+    ) {
+        Text(
+            text = "Up next · ${queue.currentIndex + 1}/${queue.items.size}",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 8.dp, bottom = 4.dp)
+        )
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 220.dp)
+        ) {
+            itemsIndexed(queue.items) { index, item ->
+                val isCurrent = index == queue.currentIndex
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onTrackClick(index) }
+                        .padding(vertical = 8.dp, horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (isCurrent) {
+                        Icon(
+                            Icons.Default.MusicNote,
+                            contentDescription = "Now playing",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    } else {
+                        Text(
+                            text = "${index + 1}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.width(18.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = item.track.title,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (isCurrent)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        item.track.artistName?.let {
+                            Text(
+                                text = it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

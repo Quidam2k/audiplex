@@ -342,9 +342,88 @@ class PlaybackManager @Inject constructor(
             val ctrl = future.get()
             controller = ctrl
             ctrl.addListener(playerListener)
+            // A controller connecting to an ALREADY-PLAYING session (the app
+            // opened after a screen-off DJ session, or after a process restart)
+            // must adopt the session's live state — otherwise the now-playing
+            // UI stays blank while the MediaSession, its notification and the
+            // media button all keep working, which is exactly the "no track /
+            // no pause control in the app" gap Todd hit (#3105/#993). Runs
+            // before onReady so a fresh play command still wins if there is one.
+            hydrateFromController(ctrl)
             onReady(ctrl)
             startPositionUpdates()
         }, MoreExecutors.directExecutor())
+    }
+
+    /**
+     * Connect the MediaController to whatever the session is doing, without
+     * issuing a command. Called when the UI first appears (#3105/#993) so a
+     * walk-up to an in-progress DJ session hydrates the now-playing surfaces
+     * immediately. Idempotent — reuses the existing controller if one is up.
+     */
+    fun connect() {
+        ensureController { }
+    }
+
+    /**
+     * Adopt the session's current MUSIC queue into the UI state flows when we
+     * have none of our own (#3105/#993).
+     *
+     * Guarded to never clobber live local state: it only fills in when nothing
+     * is currently loaded. Only music timelines are reconstructable — music
+     * items carry a `track:<id>` mediaId plus identity extras (see
+     * buildMusicMediaItem); books/streams have neither, so their items resolve
+     * to nothing and we leave those kinds alone.
+     */
+    private fun hydrateFromController(ctrl: MediaController) {
+        if (_playerKind.value != null || _currentMusic.value != null || _currentBook.value != null) return
+        val count = ctrl.mediaItemCount
+        if (count == 0) return
+        val items = (0 until count).mapNotNull { i ->
+            val mi = ctrl.getMediaItemAt(i)
+            val trackId = mi.mediaId.removePrefix("track:").toIntOrNull() ?: return@mapNotNull null
+            val md = mi.mediaMetadata
+            val extras = md.extras
+            val albumId = extras?.getInt("albumId") ?: 0
+            MusicQueueItem(
+                track = TrackSchema(
+                    id = trackId,
+                    title = md.title?.toString() ?: "",
+                    albumId = albumId,
+                    artistId = extras?.getInt("artistId") ?: 0,
+                    artistName = md.artist?.toString(),
+                    discNumber = extras?.getInt("discNumber") ?: 0,
+                    trackNumber = md.trackNumber ?: 0,
+                    durationSeconds = extras?.getDouble("durationSeconds") ?: 0.0,
+                ),
+                albumId = albumId,
+                albumTitle = extras?.getString("albumTitle") ?: md.albumTitle?.toString() ?: "Unknown",
+                albumHasCover = extras?.getBoolean("albumHasCover") ?: false,
+            )
+        }
+        if (items.isEmpty()) return  // not a music timeline — leave it be
+        val idx = ctrl.currentMediaItemIndex.coerceIn(0, items.lastIndex)
+        _currentMusic.value = MusicQueueState(
+            items = items,
+            albumId = null,
+            playlistId = null,
+            title = "Now playing",
+            currentIndex = idx,
+        )
+        _playerKind.value = PlayerKind.Music
+        _isPlaying.value = ctrl.isPlaying
+        _durationMs.value = ctrl.duration.coerceAtLeast(0)
+        lastReportedTrackIndex = idx
+        clientLog.report(
+            level = "info",
+            event = "hydrate_from_controller",
+            message = "rehydrated ${items.size} music items at index $idx",
+            detail = buildMap {
+                put("count", items.size.toString())
+                put("index", idx.toString())
+                put("isPlaying", ctrl.isPlaying.toString())
+            },
+        )
     }
 
     private fun buildMediaItem(uri: String, book: BookDetail, displayTitle: String): MediaItem {
@@ -367,6 +446,19 @@ class PlaybackManager @Inject constructor(
         val coverUrl = if (item.albumHasCover)
             AudiplexApi.musicCoverUrl(currentBaseUrl, item.albumId)
         else null
+        // Stash the identity fields the UI needs but MediaMetadata has no slot
+        // for. The MediaSession replicates these extras to any controller that
+        // connects later, so hydrateFromController() can rebuild a FAITHFUL
+        // queue (correct albumId → artwork, duration) after a process/Activity
+        // restart — not a lossy title-only placeholder (#3105/#993).
+        val extras = android.os.Bundle().apply {
+            putInt("albumId", item.albumId)
+            putBoolean("albumHasCover", item.albumHasCover)
+            putString("albumTitle", item.albumTitle)
+            putInt("artistId", item.track.artistId)
+            putInt("discNumber", item.track.discNumber)
+            putDouble("durationSeconds", item.track.durationSeconds)
+        }
         return MediaItem.Builder()
             .setUri(uri)
             .setMediaId("track:${item.track.id}")
@@ -377,6 +469,7 @@ class PlaybackManager @Inject constructor(
                     .setAlbumTitle(item.albumTitle)
                     .setTrackNumber(item.track.trackNumber)
                     .setArtworkUri(coverUrl?.let { android.net.Uri.parse(it) })
+                    .setExtras(extras)
                     .build()
             )
             .build()

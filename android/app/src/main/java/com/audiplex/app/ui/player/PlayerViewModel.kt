@@ -46,6 +46,10 @@ class PlayerViewModel @Inject constructor(
     val ratings: StateFlow<Map<Int, Int>> = _ratings.asStateFlow()
 
     init {
+        // Adopt an in-progress session's now-playing state the moment the UI
+        // exists, so walking up to a screen-off DJ session shows the track and
+        // controls instead of a blank player (#3105/#993). Idempotent.
+        playbackManager.connect()
         viewModelScope.launch {
             val api = apiHolder.api ?: return@launch
             runCatching { api.getTrackRatings() }
