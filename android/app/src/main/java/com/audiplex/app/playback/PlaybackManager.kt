@@ -23,6 +23,7 @@ import com.audiplex.app.data.api.ProgressUpdate
 import com.audiplex.app.data.api.TrackSchema
 import com.audiplex.app.data.db.PlaybackPositionDao
 import com.audiplex.app.data.db.PlaybackPositionEntity
+import com.audiplex.app.data.db.RecentlyPlayedDao
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -61,6 +62,7 @@ class PlaybackManager @Inject constructor(
     private val apiHolder: ApiServiceHolder,
     private val downloadRepository: DownloadRepository,
     private val playbackPositionDao: PlaybackPositionDao,
+    private val recentlyPlayedDao: RecentlyPlayedDao,
     private val clientLog: ClientLogReporter
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -244,6 +246,7 @@ class PlaybackManager @Inject constructor(
             // Report start of new track
             music.items.getOrNull(newIndex)?.let { current ->
                 postPlayStat(current.track.id, "start", 0.0)
+                recordRecentlyPlayed(current)
             }
             lastReportedTrackIndex = newIndex
             _durationMs.value = (music.items.getOrNull(newIndex)?.track?.durationSeconds ?: 0.0)
@@ -835,6 +838,7 @@ class PlaybackManager @Inject constructor(
             if (lastReportedTrackIndex != firstPlayingIndex) {
                 items.getOrNull(firstPlayingIndex)?.let {
                     postPlayStat(it.track.id, "start", 0.0)
+                    recordRecentlyPlayed(it)
                     lastReportedTrackIndex = firstPlayingIndex
                     _durationMs.value = (it.track.durationSeconds * 1000).toLong()
                 }
@@ -848,6 +852,21 @@ class PlaybackManager @Inject constructor(
                 apiHolder.api?.postPlayStat(
                     PlayStatEvent(trackId = trackId, event = event, playedSeconds = playedSeconds)
                 )
+            } catch (_: Exception) { }
+        }
+    }
+
+    /**
+     * Remember a track the moment it starts, for the Recently-played list
+     * (#3107/#993). Local-only and best-effort — a DB hiccup must never disturb
+     * playback. Synthetic DJ voice-break clips (negative track id) are filtered
+     * out by RecentlyPlayed.fromQueueItem.
+     */
+    private fun recordRecentlyPlayed(item: MusicQueueItem) {
+        val row = RecentlyPlayed.fromQueueItem(item, System.currentTimeMillis()) ?: return
+        scope.launch {
+            try {
+                recentlyPlayedDao.record(row)
             } catch (_: Exception) { }
         }
     }

@@ -27,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.TrendingUp
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
@@ -92,6 +93,7 @@ fun MusicScreen(
     onPlaylistClick: (Int) -> Unit,
     onMostPlayedClick: () -> Unit,
     onLikelySkipsClick: () -> Unit,
+    onRecentlyPlayedClick: () -> Unit,
     onSettingsClick: () -> Unit,
     viewModel: MusicViewModel = hiltViewModel()
 ) {
@@ -151,6 +153,7 @@ fun MusicScreen(
                         onPlaylistClick = onPlaylistClick,
                         onMostPlayedClick = onMostPlayedClick,
                         onLikelySkipsClick = onLikelySkipsClick,
+                        onRecentlyPlayedClick = onRecentlyPlayedClick,
                         onOpenFolderRoot = { viewModel.openFolderRoot() },
                         onEnterFolder = { viewModel.enterFolder(it) },
                         onExitFolder = { viewModel.exitFolder() },
@@ -217,6 +220,7 @@ private fun MusicContent(
     onPlaylistClick: (Int) -> Unit,
     onMostPlayedClick: () -> Unit,
     onLikelySkipsClick: () -> Unit,
+    onRecentlyPlayedClick: () -> Unit,
     onOpenFolderRoot: () -> Unit,
     onEnterFolder: (String) -> Unit,
     onExitFolder: () -> Unit,
@@ -320,6 +324,7 @@ private fun MusicContent(
             onClick = onPlaylistClick,
             onMostPlayedClick = onMostPlayedClick,
             onLikelySkipsClick = onLikelySkipsClick,
+            onRecentlyPlayedClick = onRecentlyPlayedClick,
             onLongClick = { p ->
                 onLongPress(
                     PendingItem(
@@ -697,12 +702,21 @@ private fun PlaylistsTab(
     onClick: (Int) -> Unit,
     onMostPlayedClick: () -> Unit,
     onLikelySkipsClick: () -> Unit,
+    onRecentlyPlayedClick: () -> Unit,
     onLongClick: (PlaylistSummary) -> Unit
 ) {
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
+        item {
+            SmartPlaylistRow(
+                icon = Icons.Default.History,
+                title = "Recently played",
+                subtitle = "Tracks you've heard lately",
+                onClick = onRecentlyPlayedClick
+            )
+        }
         item {
             SmartPlaylistRow(
                 icon = Icons.AutoMirrored.Filled.TrendingUp,

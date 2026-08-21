@@ -23,6 +23,7 @@ import com.audiplex.app.ui.music.LikelySkipsScreen
 import com.audiplex.app.ui.music.MostPlayedScreen
 import com.audiplex.app.ui.music.MusicScreen
 import com.audiplex.app.ui.music.PlaylistDetailScreen
+import com.audiplex.app.ui.music.RecentlyPlayedScreen
 import com.audiplex.app.ui.player.PlayerScreen
 import com.audiplex.app.ui.settings.SettingsScreen
 
@@ -41,6 +42,7 @@ object Routes {
     const val MUSIC_PLAYLIST = "music/playlist/{playlistId}"
     const val MUSIC_MOST_PLAYED = "music/most-played"
     const val MUSIC_LIKELY_SKIPS = "music/likely-skips"
+    const val MUSIC_RECENTLY_PLAYED = "music/recently-played"
 
     fun bookDetail(bookId: Int) = "book/$bookId"
     fun musicArtist(artistId: Int) = "music/artist/$artistId"
@@ -129,6 +131,7 @@ fun AppNavigation(navController: NavHostController) {
                 onPlaylistClick = { playlistId -> navController.navigate(Routes.musicPlaylist(playlistId)) },
                 onMostPlayedClick = { navController.navigate(Routes.MUSIC_MOST_PLAYED) },
                 onLikelySkipsClick = { navController.navigate(Routes.MUSIC_LIKELY_SKIPS) },
+                onRecentlyPlayedClick = { navController.navigate(Routes.MUSIC_RECENTLY_PLAYED) },
                 onSettingsClick = { navController.navigate(Routes.SETTINGS) }
             )
         }
@@ -142,6 +145,13 @@ fun AppNavigation(navController: NavHostController) {
 
         composable(Routes.MUSIC_LIKELY_SKIPS) {
             LikelySkipsScreen(
+                onBack = { navController.popBackStack() },
+                onPlayerClick = { navController.navigate(Routes.PLAYER) }
+            )
+        }
+
+        composable(Routes.MUSIC_RECENTLY_PLAYED) {
+            RecentlyPlayedScreen(
                 onBack = { navController.popBackStack() },
                 onPlayerClick = { navController.navigate(Routes.PLAYER) }
             )
