@@ -55,10 +55,11 @@ class MultiTapMediaSessionCallback(
         Log.d(TAG, "dispatch taps=$taps")
         when (taps) {
             1 -> if (player.isPlaying) player.pause() else player.play()
-            2 -> {
-                val target = (player.currentPosition - SKIP_MS).coerceAtLeast(0L)
-                player.seekTo(target)
-            }
+            // #3100 / #992: double-tap = skip to next track (standard media-remote
+            // semantics). Was rewind-30s; repurposed per Todd's ask. A manual
+            // (non-AUTO) transition, so PlaybackManager.onMediaItemTransition already
+            // logs it as an event="skip" play-stat — the DJ-taste feedback comes free.
+            2 -> player.seekToNextMediaItem()
             3 -> {
                 val duration = player.duration.coerceAtLeast(0L)
                 val target = (player.currentPosition + SKIP_MS).coerceAtMost(duration)
