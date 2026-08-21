@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -42,6 +43,16 @@ class SettingsStore @Inject constructor(
     // chance to put a verdict on the 08-14 crash before it rolls out of
     // Android's 16-record history.
     private val lastExitReportedAtKey = longPreferencesKey("last_exit_reported_at_v4")
+
+    // #997/#3111: independent per-channel playback levels (0.0–1.0 linear,
+    // applied as ExoPlayer controller.volume). Todd wanted MUSIC and AUDIOBOOK
+    // dialable separately from the companion VOICE dial so raising one channel
+    // doesn't drag the others with it. Default 1.0 = unchanged from before this
+    // shipped. Music and Stream share the music dial; Audiobook has its own.
+    // These are the BASE volume; Media3's auto-duck (agent speech) multiplies
+    // ~0.2 on top of it, so the effective ducked level is dial × 0.2.
+    private val musicVolumeKey = floatPreferencesKey("music_volume")
+    private val audiobookVolumeKey = floatPreferencesKey("audiobook_volume")
 
     override val serverUrl: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[serverUrlKey] ?: ""
@@ -93,6 +104,27 @@ class SettingsStore @Inject constructor(
     suspend fun setLastExitReportedAt(timestamp: Long) {
         context.dataStore.edit { prefs ->
             prefs[lastExitReportedAtKey] = timestamp
+        }
+    }
+
+    // #997/#3111: per-channel playback levels. Default 1.0 (unchanged).
+    val musicVolume: Flow<Float> = context.dataStore.data.map { prefs ->
+        prefs[musicVolumeKey] ?: 1.0f
+    }
+
+    val audiobookVolume: Flow<Float> = context.dataStore.data.map { prefs ->
+        prefs[audiobookVolumeKey] ?: 1.0f
+    }
+
+    suspend fun setMusicVolume(volume: Float) {
+        context.dataStore.edit { prefs ->
+            prefs[musicVolumeKey] = volume.coerceIn(0f, 1f)
+        }
+    }
+
+    suspend fun setAudiobookVolume(volume: Float) {
+        context.dataStore.edit { prefs ->
+            prefs[audiobookVolumeKey] = volume.coerceIn(0f, 1f)
         }
     }
 

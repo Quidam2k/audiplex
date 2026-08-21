@@ -12,6 +12,7 @@ import androidx.media3.common.Player.DiscontinuityReason
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.audiplex.app.data.ApiServiceHolder
+import com.audiplex.app.data.SettingsStore
 import com.audiplex.app.data.api.AlbumDetail
 import com.audiplex.app.data.api.AudiplexApi
 import com.audiplex.app.data.download.DownloadRepository
@@ -63,9 +64,50 @@ class PlaybackManager @Inject constructor(
     private val downloadRepository: DownloadRepository,
     private val playbackPositionDao: PlaybackPositionDao,
     private val recentlyPlayedDao: RecentlyPlayedDao,
-    private val clientLog: ClientLogReporter
+    private val clientLog: ClientLogReporter,
+    private val settingsStore: SettingsStore
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    // #997/#3111: cached per-channel base volumes (0–1), collected from
+    // SettingsStore below. Applied to controller.volume per PlayerKind at each
+    // play entry (applyAudioAttributesFor) and live when a dial moves while the
+    // matching kind is playing. Music+Stream share musicVolume; Audiobook has
+    // its own. Written on Main by the collectors, read on Main in
+    // applyAudioAttributesFor — no cross-thread hazard, so no @Volatile needed.
+    private var musicVolume: Float = 1f
+    private var audiobookVolume: Float = 1f
+
+    init {
+        scope.launch {
+            settingsStore.musicVolume.collect { v ->
+                musicVolume = v
+                // Live-apply if a music/stream track is currently playing.
+                if (_playerKind.value != PlayerKind.Audiobook) applyVolumeForCurrentKind()
+            }
+        }
+        scope.launch {
+            settingsStore.audiobookVolume.collect { v ->
+                audiobookVolume = v
+                if (_playerKind.value == PlayerKind.Audiobook) applyVolumeForCurrentKind()
+            }
+        }
+    }
+
+    /** #997: the base volume for [kind]. Music and Stream share the music dial. */
+    private fun volumeForKind(kind: PlayerKind): Float =
+        if (kind == PlayerKind.Audiobook) audiobookVolume else musicVolume
+
+    /**
+     * #997: push the dial for the currently-active kind onto the controller.
+     * Reuses setPlayerVolume so the _playerVolume snapshot (read by the DJ
+     * report loop) stays coherent. No-op if nothing is playing yet — the next
+     * play entry applies it via applyAudioAttributesFor.
+     */
+    private fun applyVolumeForCurrentKind() {
+        val kind = _playerKind.value ?: return
+        setPlayerVolume(volumeForKind(kind))
+    }
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var controller: MediaController? = null
     private var progressSyncJob: Job? = null
@@ -333,6 +375,11 @@ class PlaybackManager @Inject constructor(
                 .build(),
             /* handleAudioFocus = */ true
         )
+        // #997/#3111: set this kind's base volume as playback (re)starts. This
+        // is the steady-state level; Media3's auto-duck multiplies ~0.2 on top
+        // during agent speech and restores to this value afterward. Via
+        // setPlayerVolume so the DJ-report volume snapshot stays coherent.
+        setPlayerVolume(volumeForKind(kind))
     }
 
     private fun ensureController(onReady: (MediaController) -> Unit) {

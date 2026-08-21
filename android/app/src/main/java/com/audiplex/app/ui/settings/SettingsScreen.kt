@@ -24,6 +24,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -53,6 +54,8 @@ fun SettingsScreen(
     val updateState by viewModel.updateState.collectAsState()
     val downloadOnCellular by viewModel.downloadOnCellular.collectAsState()
     val djLinkEnabled by viewModel.djLinkEnabled.collectAsState()
+    val musicVolume by viewModel.musicVolume.collectAsState()
+    val audiobookVolume by viewModel.audiobookVolume.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
     val totalStorageUsed by viewModel.totalStorageUsed.collectAsState()
     val username by viewModel.username.collectAsState()
@@ -213,6 +216,18 @@ fun SettingsScreen(
                     onCheckedChange = { viewModel.toggleDjLink(context) }
                 )
             }
+
+            Spacer(Modifier.height(32.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(16.dp))
+
+            // #997/#3111: independent per-channel playback levels.
+            PlaybackLevelsSection(
+                musicVolume = musicVolume,
+                audiobookVolume = audiobookVolume,
+                onMusicChange = { viewModel.setMusicVolume(it) },
+                onAudiobookChange = { viewModel.setAudiobookVolume(it) }
+            )
 
             Spacer(Modifier.height(32.dp))
             HorizontalDivider()
@@ -436,6 +451,59 @@ private fun MusicFoldersSection(
         }
         else -> {}
     }
+}
+
+/**
+ * #997/#3111: independent MUSIC and AUDIOBOOK playback levels. These set each
+ * channel's base volume so it can be balanced against the companion's VOICE
+ * dial without one knob dragging the others. Live-committed on drag release
+ * (PlaybackManager collects the flow and applies it to a playing track at once).
+ */
+@Composable
+private fun PlaybackLevelsSection(
+    musicVolume: Float,
+    audiobookVolume: Float,
+    onMusicChange: (Float) -> Unit,
+    onAudiobookChange: (Float) -> Unit
+) {
+    Text("Playback Levels", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(4.dp))
+    Text(
+        "Set music and audiobook loudness separately. Persona voice has its own " +
+            "level in the Pantheon app — turn a channel down here so raising " +
+            "voice there doesn't blast it back.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Spacer(Modifier.height(12.dp))
+    VolumeSlider(label = "Music", value = musicVolume, onChange = onMusicChange)
+    Spacer(Modifier.height(12.dp))
+    VolumeSlider(label = "Audiobook", value = audiobookVolume, onChange = onAudiobookChange)
+}
+
+@Composable
+private fun VolumeSlider(
+    label: String,
+    value: Float,
+    onChange: (Float) -> Unit
+) {
+    // Local drag state so the thumb tracks the finger; commit on release only,
+    // keeping DataStore writes off the drag path. Re-seeds if the stored value
+    // changes underneath us (e.g. a DJ volume command).
+    var local by remember(value) { mutableStateOf(value) }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Text("${(local * 100).toInt()}%", style = MaterialTheme.typography.bodyMedium)
+    }
+    Slider(
+        value = local,
+        valueRange = 0f..1f,
+        onValueChange = { local = it },
+        onValueChangeFinished = { onChange(local) }
+    )
 }
 
 private fun Double.format(decimals: Int): String = "%.${decimals}f".format(this)

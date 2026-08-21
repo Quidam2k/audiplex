@@ -96,6 +96,21 @@ class SettingsViewModel @Inject constructor(
     val djLinkEnabled: StateFlow<Boolean> = settingsStore.djLinkEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
+    // #997/#3111: per-channel playback levels. Default 1.0 (full).
+    val musicVolume: StateFlow<Float> = settingsStore.musicVolume
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 1f)
+
+    val audiobookVolume: StateFlow<Float> = settingsStore.audiobookVolume
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 1f)
+
+    fun setMusicVolume(volume: Float) {
+        viewModelScope.launch { settingsStore.setMusicVolume(volume) }
+    }
+
+    fun setAudiobookVolume(volume: Float) {
+        viewModelScope.launch { settingsStore.setAudiobookVolume(volume) }
+    }
+
     /**
      * Turning the DJ link off stops the service; turning it on starts it here,
      * where an activity is on screen and a foreground-service start is legal.
