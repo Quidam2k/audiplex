@@ -52,7 +52,13 @@ class PlaybackService : MediaSessionService() {
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
-                    .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
+                    // #3099/#991: default MUSIC so agent speech DUCKS the music
+                    // (talk-over) instead of pausing it. Media3's
+                    // AudioFocusManager.willPauseWhenDucked() returns true ONLY for
+                    // SPEECH content, so SPEECH here made a can-duck focus loss a
+                    // full pause. PlaybackManager overrides this to SPEECH per-kind
+                    // for audiobooks (narrator keeps pause-on-duck).
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
                     .build(),
                 /* handleAudioFocus = */ true
             )

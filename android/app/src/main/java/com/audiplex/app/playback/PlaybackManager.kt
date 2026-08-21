@@ -2,6 +2,8 @@ package com.audiplex.app.playback
 
 import android.content.ComponentName
 import android.content.Context
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
@@ -308,6 +310,28 @@ class PlaybackManager @Inject constructor(
         }
     }
 
+    /**
+     * #3099/#991: set the player's audio content type per PlayerKind on the
+     * controller. MUSIC (music/DJ/stream) lets agent speech DUCK playback;
+     * SPEECH (audiobooks) keeps the narrator PAUSING under other audio, because
+     * Media3's AudioFocusManager.willPauseWhenDucked() converts a can-duck focus
+     * loss into a full pause only for SPEECH content. Called at each play entry
+     * so switching kinds re-applies the right type (the PlaybackService default
+     * is MUSIC, so the priority DJ-duck case is correct even before this fires).
+     */
+    private fun applyAudioAttributesFor(ctrl: MediaController, kind: PlayerKind) {
+        val contentType =
+            if (kind == PlayerKind.Audiobook) C.AUDIO_CONTENT_TYPE_SPEECH
+            else C.AUDIO_CONTENT_TYPE_MUSIC
+        ctrl.setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA)
+                .setContentType(contentType)
+                .build(),
+            /* handleAudioFocus = */ true
+        )
+    }
+
     private fun ensureController(onReady: (MediaController) -> Unit) {
         controller?.let { onReady(it); return }
 
@@ -383,6 +407,7 @@ class PlaybackManager @Inject constructor(
             )
             .build()
         ensureController { ctrl ->
+            applyAudioAttributesFor(ctrl, PlayerKind.Stream) // #3099/#991: stream ducks like music
             ctrl.setMediaItem(item)
             ctrl.prepare()
             ctrl.play()
@@ -403,6 +428,7 @@ class PlaybackManager @Inject constructor(
         scope.launch {
             localFilePath = downloadRepository.getLocalPath(book.id)
             ensureController { ctrl ->
+                applyAudioAttributesFor(ctrl, PlayerKind.Audiobook) // #3099/#991: narrator pauses, not ducks
                 val startMs = (startSeconds * 1000).toLong().coerceAtLeast(0)
                 if (misc) {
                     val items = book.trackUrls.mapIndexed { idx, relUrl ->
@@ -699,6 +725,7 @@ class PlaybackManager @Inject constructor(
         lastReportedTrackIndex = -1
 
         ensureController { ctrl ->
+            applyAudioAttributesFor(ctrl, PlayerKind.Music) // #3099/#991: agent speech ducks music
             val mediaItems = items.map { buildMusicMediaItem(it) }
             // Stage the start index in the timeline setup; setting shuffle
             // before play() ensures the first-track pick is shuffled too.
