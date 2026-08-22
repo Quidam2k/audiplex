@@ -3,7 +3,9 @@
 import pytest
 from sqlalchemy.orm import sessionmaker
 
+from audiplex.config import LibraryRoot, Settings  # #1001
 from audiplex.models import Book, Chapter
+from audiplex.utils.streaming import storage_root_offline  # #1001
 
 
 def _insert_book_with_real_file(db_engine, file_path, file_size):
@@ -117,6 +119,58 @@ class TestStreamAudio:
         book_id = _insert_book_with_real_file(db_engine, "/nonexistent/fake.m4b", 1000)
         resp = client.get(f"/api/stream/{book_id}")
         assert resp.status_code == 404
+
+    def test_503_when_library_root_offline(self, client, db_engine, monkeypatch):
+        """A missing file whose whole library ROOT is unreachable → 503, not 404.
+
+        This is the #1001 incident: the Athena SMB share dropped and every
+        audiobook under it 404'd, which Media3 treats as a permanent source
+        error. 503 is retryable so playback self-heals when the share returns.
+        """
+        offline_root = r"\\Nonexistent.host\Share\Libation\Books"
+        book_id = _insert_book_with_real_file(
+            db_engine, offline_root + r"\Anathem\Anathem.m4b", 1000
+        )
+
+        from audiplex.routers import streaming
+
+        monkeypatch.setattr(
+            streaming,
+            "get_settings",
+            lambda: Settings(
+                library_roots=[LibraryRoot(path=offline_root, category="audiobook_clean")]
+            ),
+        )
+
+        resp = client.get(f"/api/stream/{book_id}")
+        assert resp.status_code == 503
+        assert "offline" in resp.json()["detail"].lower()
+
+
+class TestStorageRootOffline:
+    """Unit tests for the 503-vs-404 decision (#1001)."""
+
+    def test_missing_file_under_unreachable_root_is_offline(self):
+        root = r"\\Nonexistent.host\Share\Books"
+        fp = root + r"\Anathem\Anathem.m4b"
+        assert storage_root_offline(fp, [root]) is True
+
+    def test_missing_file_under_reachable_root_is_not_offline(self, tmp_path):
+        # tmp_path exists; a file missing beneath it is a genuine 404, not offline.
+        fp = str(tmp_path / "gone" / "book.m4b")
+        assert storage_root_offline(fp, [str(tmp_path)]) is False
+
+    def test_file_under_no_known_root_is_not_offline(self):
+        assert storage_root_offline("/nonexistent/fake.m4b", []) is False
+        assert storage_root_offline(
+            "/nonexistent/fake.m4b", [r"\\Other.host\Share"]
+        ) is False
+
+    def test_separator_and_case_insensitive_match(self):
+        # Root stored forward-slash lower, file back-slash mixed-case: still matches.
+        root = "//Nonexistent.host/share/books"
+        fp = r"\\Nonexistent.host\Share\Books\A\x.m4b"
+        assert storage_root_offline(fp, [root]) is True
 
 
 class TestStreamTrack:
