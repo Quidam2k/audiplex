@@ -5,7 +5,14 @@ from sqlalchemy.orm import sessionmaker
 
 from audiplex.config import LibraryRoot, Settings  # #1001
 from audiplex.models import Book, Chapter
-from audiplex.utils.streaming import storage_root_offline  # #1001
+from audiplex.utils.streaming import EXT_MIME, storage_root_offline  # #1001, #3161
+
+
+def test_opus_streams_as_ogg_container():
+    """A standalone .opus file is Ogg-encapsulated Opus, so it must serve
+    under audio/ogg (Media3 decodes it natively) rather than falling back to
+    octet-stream, which would refuse to play (#3161)."""
+    assert EXT_MIME[".opus"] == "audio/ogg"
 
 
 def _insert_book_with_real_file(db_engine, file_path, file_size):

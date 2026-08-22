@@ -31,7 +31,7 @@ from audiplex.utils.cover_art import (
 
 logger = logging.getLogger(__name__)
 
-AUDIO_EXTENSIONS = {".mp3", ".m4a", ".m4b", ".flac", ".ogg", ".wav", ".mpeg", ".mp2"}
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".m4b", ".flac", ".ogg", ".opus", ".wav", ".mpeg", ".mp2"}
 SKIPPED_EXTENSIONS = {".wma"}
 
 ALBUM_COVER_NAMES = (

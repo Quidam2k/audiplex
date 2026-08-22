@@ -123,6 +123,30 @@ class TestScanMusic:
         assert len(tracks) == 1
         assert tracks[0].file_path.endswith("real.mp3")
 
+    def test_opus_ingested_alongside_m4a(self, db_session, tmp_path, mocked_mutagen):
+        """A flat folder of mixed .m4a/.opus ingests BOTH extensions (#3161).
+
+        Mirrors Todd's priority folder E:\\Stacked Deck\\Music\\Todd Walker -
+        music: one flat directory of YouTube rips where some songs are only
+        available as .opus. Before .opus was added to AUDIO_EXTENSIONS those
+        files were silently skipped — not even counted — so the unique-to-opus
+        songs never reached the DJ.
+        """
+        root = tmp_path / "Todd Walker - music"
+        root.mkdir()
+        (root / "Song A (128kbit_AAC).m4a").write_bytes(b"")
+        (root / "Song B (152kbit_Opus).opus").write_bytes(b"")
+
+        scan_music(db_session, str(root), str(tmp_path / "covers"))
+        db_session.commit()
+
+        album = db_session.query(Album).filter(Album.title == "Todd Walker - music").first()
+        assert album is not None
+        assert album.track_count == 2
+        paths = {t.file_path for t in db_session.query(Track).filter(Track.album_id == album.id)}
+        assert any(p.endswith(".opus") for p in paths)
+        assert any(p.endswith(".m4a") for p in paths)
+
     def test_cover_priority_sidecar_then_embedded(
         self, db_session, music_root_layout, mocked_mutagen
     ):

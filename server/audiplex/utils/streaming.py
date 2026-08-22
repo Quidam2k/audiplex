@@ -22,6 +22,9 @@ EXT_MIME = {
     ".m4b": "audio/mp4",
     ".flac": "audio/flac",
     ".ogg": "audio/ogg",
+    # A standalone .opus file is Ogg-encapsulated Opus; Media3 decodes it
+    # natively under the same container MIME as .ogg (#3161).
+    ".opus": "audio/ogg",
     ".wav": "audio/wav",
 }
 
