@@ -2,6 +2,7 @@ package com.audiplex.app.playback
 
 import android.content.ComponentName
 import android.content.Context
+import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -9,6 +10,10 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Player.DiscontinuityReason
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.audiplex.app.data.ApiServiceHolder
@@ -37,6 +42,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -65,7 +71,8 @@ class PlaybackManager @Inject constructor(
     private val playbackPositionDao: PlaybackPositionDao,
     private val recentlyPlayedDao: RecentlyPlayedDao,
     private val clientLog: ClientLogReporter,
-    private val settingsStore: SettingsStore
+    private val settingsStore: SettingsStore,
+    private val okHttpClient: OkHttpClient
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -112,6 +119,16 @@ class PlaybackManager @Inject constructor(
     private var controller: MediaController? = null
     private var progressSyncJob: Job? = null
     private var positionUpdateJob: Job? = null
+
+    // Sleep engine (#1728): a second, independent player for a continuously
+    // looping ambient "bed" plus a fade-out timer on the main controller.
+    // Deliberately NOT routed through MediaController/PlaybackService's
+    // MediaSession — it has no lock-screen UI, so it cannot touch the
+    // existing single-stream session (Audiobook/Music/Stream) at all.
+    private var bedPlayer: ExoPlayer? = null
+    private val _bedPlaying = MutableStateFlow(false)
+    val bedPlaying: StateFlow<Boolean> = _bedPlaying
+    private var sleepTimerJob: Job? = null
 
     /** Synthetic ids for non-catalog queue items (DJ voice breaks, #431). */
     private var nextSyntheticTrackId: Int = -1
@@ -927,6 +944,85 @@ class PlaybackManager @Inject constructor(
         lastReportedTrackIndex = -1
     }
 
+    /**
+     * Start (or replace) the looping sleep-bed layer (#1728). A fresh, private
+     * ExoPlayer — not the shared MediaController — so it can run alongside
+     * whatever the main player is doing with its own volume, and cannot
+     * regress the existing single-stream playback path. Loops forever via
+     * REPEAT_MODE_ONE until [bedStop] is called; the auth'd OkHttp client
+     * matches PlaybackService so a catalog stream URL (not just an external
+     * one) works here too.
+     */
+    @OptIn(UnstableApi::class)
+    fun bedPlay(url: String, volume: Float) {
+        releaseBedPlayer()
+        val mediaSourceFactory = DefaultMediaSourceFactory(OkHttpDataSource.Factory(okHttpClient))
+        val player = ExoPlayer.Builder(context)
+            .setMediaSourceFactory(mediaSourceFactory)
+            .build()
+        bedPlayer = player
+        player.setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA)
+                .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                .build(),
+            /* handleAudioFocus = */ true
+        )
+        player.repeatMode = Player.REPEAT_MODE_ONE
+        player.volume = volume.coerceIn(0f, 1f)
+        player.setMediaItem(MediaItem.fromUri(url))
+        player.prepare()
+        player.play()
+        _bedPlaying.value = true
+    }
+
+    fun bedStop() {
+        releaseBedPlayer()
+    }
+
+    fun bedVolume(volume: Float) {
+        bedPlayer?.volume = volume.coerceIn(0f, 1f)
+    }
+
+    private fun releaseBedPlayer() {
+        bedPlayer?.release()
+        bedPlayer = null
+        _bedPlaying.value = false
+    }
+
+    /**
+     * Fade the MAIN player's volume to 0 over the last [fadeSeconds] of
+     * [minutes] from now, then pause it — the "fade-out" layer (#1728). Only
+     * touches [controller]/[setPlayerVolume]; the bed layer plays on
+     * regardless. Superseded by a later call or [cancelSleepTimer].
+     */
+    fun startSleepTimer(minutes: Float, fadeSeconds: Int) {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = scope.launch {
+            delay((minutes * 60_000).toLong().coerceAtLeast(0))
+            val ctrl = controller ?: return@launch
+            val startVolume = ctrl.volume
+            if (startVolume <= 0f) {
+                ctrl.pause()
+                return@launch
+            }
+            val steps = (fadeSeconds.coerceAtLeast(1) * 4).coerceAtLeast(1)
+            val stepDelayMs = (fadeSeconds * 1000L / steps).coerceAtLeast(50L)
+            for (i in steps downTo 0) {
+                setPlayerVolume(startVolume * (i / steps.toFloat()))
+                delay(stepDelayMs)
+            }
+            controller?.pause()
+        }
+    }
+
+    /** Cancel a pending fade-out and restore the current kind's configured dial. */
+    fun cancelSleepTimer() {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = null
+        applyVolumeForCurrentKind()
+    }
+
     fun pause() {
         controller?.pause()
     }
@@ -1156,6 +1252,8 @@ class PlaybackManager @Inject constructor(
         }
         progressSyncJob?.cancel()
         positionUpdateJob?.cancel()
+        sleepTimerJob?.cancel()
+        releaseBedPlayer()
         controller?.removeListener(playerListener)
         controllerFuture?.let { MediaController.releaseFuture(it) }
         controller = null

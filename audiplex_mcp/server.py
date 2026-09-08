@@ -20,7 +20,15 @@ Config via environment:
 Tools: dj_library, dj_tracks, dj_search, dj_play_now, dj_skip, dj_queue,
 dj_play_next, dj_reorder, dj_queue_by, dj_now_playing, dj_pause, dj_resume,
 dj_previous, dj_seek, dj_volume, dj_play_stream, dj_break_brief, dj_announce,
-dj_recommend, dj_rate, dj_taste.
+dj_recommend, dj_rate, dj_taste, dj_bed_play, dj_bed_stop, dj_bed_volume,
+dj_sleep_timer, dj_cancel_sleep_timer, dj_sleep_start.
+
+dj_bed_play/dj_bed_stop/dj_bed_volume/dj_sleep_timer/dj_cancel_sleep_timer/
+dj_sleep_start are the sleep-engine lane (item #1728): a continuously-looping
+ambient "bed" layer that runs on a second, independent device player
+alongside whatever dj_play_now/dj_play_stream is doing on the main one, plus
+a sleep-timer fade-out for the main layer. Two fixed layers (bed + main), not
+a general mixer — see the section comment above dj_bed_play.
 
 dj_recommend/dj_rate/dj_taste are the discovery + taste lane (item #2945): the
 DJ proposes music the library DOESN'T have, Todd's spoken reaction is relayed
@@ -390,6 +398,115 @@ async def dj_play_stream(url: str, title: str = "Live stream") -> str:
         f"Playing stream '{title}' from {url} "
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
     )
+
+
+# ----- Sleep engine (#1728): a second, independent looping layer plus a -----
+# ----- fade-out timer on the main player.                               -----
+#
+# The "bed" is a SEPARATE player on the device (not the queue/session the
+# tools above control) so it can loop forever underneath whatever else is
+# playing, with its own volume. The "fade" layer is just the EXISTING main
+# player (dj_play_now/dj_play_stream) plus a timer that ramps dj_volume to 0
+# and pauses it — the bed keeps going. Two fixed layers, matching the actual
+# want (a drone bed + one timed thing on top), not a general N-layer mixer.
+
+
+@mcp.tool()
+async def dj_bed_play(url: str, title: str = "Sleep bed", volume: int = 50) -> str:
+    """Start (or replace) the continuously-LOOPING sleep-bed layer — a second,
+    independent audio stream that plays underneath normal playback and repeats
+    forever until dj_bed_stop is called. Does not touch or interrupt the main
+    player (audiobook/music/stream) — the two run at once with independent
+    volume. url is any HTTP audio URL the device can reach (a catalog stream
+    URL, or an external one like Radio Free Luna). volume is 0-100,
+    independent of dj_volume (which only affects the main player).
+    """
+    if not 0 <= volume <= 100:
+        return f"volume must be 0-100 (got {volume})."
+    data = await _enqueue("bed_play", {"url": url, "title": title, "volume": volume / 100.0})
+    if isinstance(data, str):
+        return data
+    return (
+        f"Queued sleep-bed loop '{title}' from {url} at {volume}% "
+        f"(command #{data.get('id')}, {data.get('pending')} pending)."
+    )
+
+
+@mcp.tool()
+async def dj_bed_stop() -> str:
+    """Stop the sleep-bed loop layer started by dj_bed_play. Leaves the main
+    player (audiobook/music/stream) untouched."""
+    data = await _enqueue("bed_stop", {})
+    if isinstance(data, str):
+        return data
+    return f"Queued sleep-bed stop (command #{data.get('id')}, {data.get('pending')} pending)."
+
+
+@mcp.tool()
+async def dj_bed_volume(level: int) -> str:
+    """Set the sleep-bed loop layer's volume, 0-100 — independent of
+    dj_volume, which only affects the main player."""
+    if not 0 <= level <= 100:
+        return f"level must be 0-100 (got {level})."
+    data = await _enqueue("bed_volume", {"volume": level / 100.0})
+    if isinstance(data, str):
+        return data
+    return f"Queued sleep-bed volume {level}% (command #{data.get('id')}, {data.get('pending')} pending)."
+
+
+@mcp.tool()
+async def dj_sleep_timer(minutes: float, fade_seconds: int = 120) -> str:
+    """Fade out and pause the MAIN player (whatever dj_play_now/dj_play_stream
+    started — typically an audiobook) after `minutes`, ramping its volume to 0
+    linearly over the last `fade_seconds` of that. The sleep-bed loop
+    (dj_bed_play) is untouched and keeps playing underneath. Cancel early with
+    dj_cancel_sleep_timer.
+    """
+    if minutes <= 0:
+        return "minutes must be > 0."
+    data = await _enqueue("sleep_timer", {"minutes": minutes, "fade_seconds": fade_seconds})
+    if isinstance(data, str):
+        return data
+    return (
+        f"Queued sleep timer: fade out over the last {fade_seconds}s of {minutes} min "
+        f"(command #{data.get('id')}, {data.get('pending')} pending)."
+    )
+
+
+@mcp.tool()
+async def dj_cancel_sleep_timer() -> str:
+    """Cancel a pending dj_sleep_timer fade-out on the main player, restoring
+    its configured volume. Does not affect the sleep-bed loop."""
+    data = await _enqueue("cancel_sleep_timer", {})
+    if isinstance(data, str):
+        return data
+    return f"Queued sleep-timer cancel (command #{data.get('id')}, {data.get('pending')} pending)."
+
+
+@mcp.tool()
+async def dj_sleep_start(
+    bed_url: str,
+    fade_track_ids: list[int] | None = None,
+    fade_stream_url: str | None = None,
+    fade_after_minutes: float = 45,
+    fade_seconds: int = 120,
+    bed_volume: int = 50,
+    bed_title: str = "Sleep bed",
+) -> str:
+    """One-call nightly setup: start the looping sleep bed and, optionally,
+    the fade-out layer with its sleep timer, so nothing has to be remembered
+    or set up as separate steps. Pass fade_track_ids for an audiobook/music
+    queue, or fade_stream_url for an external stream, to also start the main
+    player and its timer — leave both None to start just the bed on its own.
+    """
+    notes = [await dj_bed_play(bed_url, bed_title, bed_volume)]
+    if fade_track_ids:
+        notes.append(await dj_play_now(fade_track_ids))
+    elif fade_stream_url:
+        notes.append(await dj_play_stream(fade_stream_url))
+    if fade_track_ids or fade_stream_url:
+        notes.append(await dj_sleep_timer(fade_after_minutes, fade_seconds))
+    return "\n".join(notes)
 
 
 @mcp.tool()

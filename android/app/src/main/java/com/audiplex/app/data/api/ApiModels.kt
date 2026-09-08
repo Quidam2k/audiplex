@@ -312,7 +312,11 @@ data class DjCommandPayload(
     @Json(name = "clip_url") val clipUrl: String? = null,
     @Json(name = "duration_seconds") val durationSeconds: Double? = null,
     // 'next' (play after the current track) or 'now' (interrupt).
-    val mode: String? = null
+    val mode: String? = null,
+    // 'sleep_timer' (#1728): fade the main player out after `minutes`, ramping
+    // over the last `fade_seconds` of that.
+    val minutes: Float? = null,
+    @Json(name = "fade_seconds") val fadeSeconds: Int? = null
 )
 
 @JsonClass(generateAdapter = true)

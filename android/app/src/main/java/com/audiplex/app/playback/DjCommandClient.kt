@@ -43,6 +43,12 @@ import kotlin.coroutines.coroutineContext
  * can DJ with visibility and issue index-based reorders. play_stream routes
  * an external HTTP audio stream (e.g. Radio Free Luna) to the device —
  * queue ops don't apply to it, and the reportLoop reports title-only state.
+ *
+ * Sleep engine (#1728): bed_play/bed_stop/bed_volume control a second,
+ * independent looping layer (PlaybackManager.bedPlay et al) that runs
+ * alongside the main player above; sleep_timer/cancel_sleep_timer fade the
+ * MAIN player out after a delay. Neither reports through reportLoop yet
+ * (v1 — status is visible via dj_command_status ack, not dj_now_playing).
  */
 /** What the DJ link is currently doing, for display only. */
 enum class LinkState { UNCONFIGURED, CONNECTED, OFFLINE }
@@ -244,6 +250,25 @@ class DjCommandClient @Inject constructor(
                 val title = cmd.payload?.title ?: "Live stream"
                 withContext(Dispatchers.Main) { playbackManager.playStreamUrl(url, title) }
             }
+            // Sleep engine (#1728): a second, independent looping layer plus a
+            // fade-out timer on the main player. Purely additive — none of the
+            // cases above are touched.
+            "bed_play" -> {
+                val url = cmd.payload?.url ?: return badPayload("url")
+                val volume = cmd.payload.volume ?: 0.5f
+                withContext(Dispatchers.Main) { playbackManager.bedPlay(url, volume) }
+            }
+            "bed_stop" -> withContext(Dispatchers.Main) { playbackManager.bedStop() }
+            "bed_volume" -> {
+                val volume = cmd.payload?.volume ?: return badPayload("volume")
+                withContext(Dispatchers.Main) { playbackManager.bedVolume(volume) }
+            }
+            "sleep_timer" -> {
+                val minutes = cmd.payload?.minutes ?: return badPayload("minutes")
+                val fadeSeconds = cmd.payload.fadeSeconds ?: 120
+                withContext(Dispatchers.Main) { playbackManager.startSleepTimer(minutes, fadeSeconds) }
+            }
+            "cancel_sleep_timer" -> withContext(Dispatchers.Main) { playbackManager.cancelSleepTimer() }
             "announce" -> {
                 // DJ voice break (#431). clip_url is relative so the clip is
                 // fetched from OUR configured base URL, not whatever host the
