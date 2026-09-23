@@ -10,6 +10,7 @@ from audiplex.auth import (
     get_admin_user,
     get_current_user,
     hash_password,
+    token_hours_for,
     verify_password,
 )
 from audiplex.config import get_settings
@@ -88,7 +89,7 @@ def register(body: RegisterRequest, request: Request, db: Session = Depends(get_
     db.refresh(user)
 
     settings = get_settings()
-    token = create_token(user.id, user.username, settings.jwt_secret, settings.token_expiry_hours)
+    token = create_token(user.id, user.username, settings.jwt_secret, token_hours_for(user, settings))
     return LoginResponse(token=token, user=UserResponse.model_validate(user))
 
 
@@ -99,7 +100,7 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     settings = get_settings()
-    token = create_token(user.id, user.username, settings.jwt_secret, settings.token_expiry_hours)
+    token = create_token(user.id, user.username, settings.jwt_secret, token_hours_for(user, settings))
     return LoginResponse(token=token, user=UserResponse.model_validate(user))
 
 
@@ -131,7 +132,7 @@ def change_password(
     # Hand back a fresh token so the caller isn't left holding one it might
     # reasonably assume was invalidated by the password change.
     settings = get_settings()
-    token = create_token(user.id, user.username, settings.jwt_secret, settings.token_expiry_hours)
+    token = create_token(user.id, user.username, settings.jwt_secret, token_hours_for(user, settings))
     return LoginResponse(token=token, user=UserResponse.model_validate(user))
 
 

@@ -303,3 +303,13 @@ def test_reset_password_requires_authentication(auth_client):
         "/api/auth/users/2/reset-password", json={"new_password": "reset-by-admin"}
     )
     assert resp.status_code == 401
+
+
+def test_owner_login_never_expires_invitees_keep_30_days():
+    """Todd's ruling 2026-09-23: admin (his phone) gets no expiry; invitees keep the 30-day sliding login."""
+    from types import SimpleNamespace
+    from audiplex.auth import OWNER_TOKEN_HOURS, token_hours_for
+    settings = SimpleNamespace(token_expiry_hours=720)
+    assert token_hours_for(SimpleNamespace(is_admin=True), settings) == OWNER_TOKEN_HOURS
+    assert OWNER_TOKEN_HOURS >= 24 * 365 * 50
+    assert token_hours_for(SimpleNamespace(is_admin=False), settings) == 720

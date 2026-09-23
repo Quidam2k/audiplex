@@ -54,6 +54,18 @@ def create_token(user_id: int, username: str, secret: str, expires_hours: int = 
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
+# Todd's ruling (2026-09-23, Pantheon msg ~33960): on HIS phone, no password
+# challenge and no expiry. He was locked out after 30 days of not using the app.
+# Audiplex is reachable only over his LAN/Tailscale; worst case with a stolen
+# unlocked phone is his music (he shuts the server down). Scoped to the ADMIN
+# account only - anyone he invites later keeps the normal 30-day sliding login.
+OWNER_TOKEN_HOURS = 24 * 365 * 100
+
+
+def token_hours_for(user, settings) -> int:
+    return OWNER_TOKEN_HOURS if getattr(user, "is_admin", False) else settings.token_expiry_hours
+
+
 def decode_token(token: str, secret: str) -> dict:
     return jwt.decode(token, secret, algorithms=["HS256"])
 
@@ -99,9 +111,10 @@ def get_current_user(request: Request, response: Response, db: Session = Depends
     if not user:
         raise _reject(request, f"token references missing user id={user_id}", "User not found")
 
-    if needs_refresh(payload, settings.token_expiry_hours):
+    hours = token_hours_for(user, settings)
+    if needs_refresh(payload, hours):
         response.headers[REFRESH_HEADER] = create_token(
-            user.id, user.username, settings.jwt_secret, settings.token_expiry_hours
+            user.id, user.username, settings.jwt_secret, hours
         )
 
     return user
