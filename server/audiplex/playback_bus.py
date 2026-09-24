@@ -132,6 +132,9 @@ class PlaybackCommandRecord:
     acked_at: float = 0.0
     ack_status: Optional[str] = None
     ack_detail: str = ""
+    # Set for a command meant for one device regardless of which is active —
+    # the transfer handshake's deactivate/activate. None follows the active device.
+    target_device_id: Optional[str] = None
 
     def summary(self) -> dict[str, Any]:
         """What the DJ tools render — the whole point of the registry."""
@@ -145,6 +148,7 @@ class PlaybackCommandRecord:
             "acked_at": self.acked_at or None,
             "ack_status": self.ack_status,
             "ack_detail": self.ack_detail,
+            "target_device_id": self.target_device_id,
         }
 
 
@@ -201,9 +205,18 @@ class PlaybackBus:
         return self._arrival
 
     async def enqueue(self, type: str, payload: dict[str, Any]) -> PlaybackCommandRecord:
+        return self._enqueue(type, payload)
+
+    def _enqueue(
+        self, type: str, payload: dict[str, Any], target_device_id: Optional[str] = None
+    ) -> PlaybackCommandRecord:
         self._seq += 1
         rec = PlaybackCommandRecord(
-            id=self._seq, type=type, payload=payload, created_at=time.time()
+            id=self._seq,
+            type=type,
+            payload=payload,
+            created_at=time.time(),
+            target_device_id=target_device_id,
         )
         self._commands[rec.id] = rec
         while len(self._commands) > COMMAND_HISTORY_CAPACITY:
@@ -221,10 +234,10 @@ class PlaybackBus:
         that is merely running must never race the phone for commands, or the
         phone-alone behavior (rider R1) would break the moment a PC came online.
         """
-        target = self._target_device_id(now) or LEGACY_DEVICE_ID
-        if target != poller_id:
-            return None
+        route = self._target_device_id(now) or LEGACY_DEVICE_ID
         for rec in self._commands.values():
+            if (rec.target_device_id or route) != poller_id:
+                continue
             if rec.status == STATUS_QUEUED or (
                 rec.status == STATUS_DELIVERED
                 and now - rec.delivered_at >= REDELIVER_AFTER_SECONDS
@@ -303,6 +316,14 @@ class PlaybackBus:
         rec.ack_status = status
         rec.ack_detail = detail
         rec.acked_at = time.time()
+        if rec.type == "deactivate" and rec.target_device_id:
+            # The old device has paused and posted its final state (or said it
+            # can't — an older app acks unknown_type); either way hand over now.
+            self._send_handoff(
+                rec.target_device_id,
+                rec.payload.get("handoff_to"),
+                bool(rec.payload.get("was_playing")),
+            )
         return rec
 
     def command(self, command_id: int) -> Optional[PlaybackCommandRecord]:
@@ -426,6 +447,60 @@ class PlaybackBus:
         if self._arrival is not None:
             self._event().set()
         return rec
+
+    def transfer(self, device_id: str) -> Optional[DeviceRecord]:
+        """Make `device_id` the renderer and move what was playing onto it.
+
+        Handshake: the previous renderer gets a targeted `deactivate` (pause +
+        post final state); its ack triggers a targeted `activate` to the new
+        device carrying the queue and exact position. If the previous renderer
+        is not live, the handoff is sent straight away from its last report.
+        None if the device is unknown.
+        """
+        now = time.time()
+        # The DECLARED renderer, even if it has gone stale: a PC that slept
+        # mid-song still holds the queue the phone should pick up.
+        prev = self._active_device_id or LEGACY_DEVICE_ID
+        rec = self.set_active_device(device_id)
+        if rec is None or prev == device_id:
+            return rec
+        prev_state = self.get_state(prev) or {}
+        was_playing = bool(prev_state.get("playing"))
+        prev_rec = self._devices.get(prev)
+        if prev_rec is not None and now - prev_rec.last_seen < DEVICE_STALE_AFTER_SECONDS:
+            self._enqueue(
+                "deactivate",
+                {"handoff_to": device_id, "was_playing": was_playing},
+                target_device_id=prev,
+            )
+        else:
+            self._send_handoff(prev, device_id, was_playing)
+        return rec
+
+    def _send_handoff(self, from_id: str, to_id: Optional[str], was_playing: bool) -> None:
+        """Queue the `activate` that resumes `from_id`'s music on `to_id`."""
+        if not to_id:
+            return
+        state = self.get_state(from_id) or {}
+        index = state.get("queue_index") or 0
+        # Real tracks only, from the current one on: voice clips and streams
+        # report non-positive ids and can't be replayed elsewhere.
+        upcoming = [
+            q for q in state.get("queue") or [] if q.get("index", 0) >= index
+        ]
+        track_ids = [q["id"] for q in upcoming if isinstance(q.get("id"), int) and q["id"] > 0]
+        current = (state.get("track") or {}).get("id")
+        resumes_current = bool(track_ids) and track_ids[0] == current
+        self._enqueue(
+            "activate",
+            {
+                "from_device": from_id,
+                "track_ids": track_ids,
+                "position_ms": int(state.get("position_ms") or 0) if resumes_current else 0,
+                "playing": was_playing and bool(track_ids),
+            },
+            target_device_id=to_id,
+        )
 
     @property
     def active_device_id(self) -> Optional[str]:

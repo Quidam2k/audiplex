@@ -213,10 +213,10 @@ def list_devices(user: User = Depends(get_current_user)):
 def activate_device(device_id: str, user: User = Depends(get_current_user)):
     """Transfer playback to `device_id` (Spotify-Connect handoff).
 
-    Slice 1 does NOT pause the previously-active device — it simply stops
-    receiving new commands; auto-pause/resume is the slice-2 Android change.
+    The previous renderer is told to pause and report where it was; the new one
+    then resumes that queue at that position (see PlaybackBus.transfer).
     """
-    rec = bus.set_active_device(device_id)
+    rec = bus.transfer(device_id)
     if rec is None:
         raise HTTPException(status_code=404, detail=f"Unknown device {device_id}")
     return {"active_device_id": bus.active_device_id, "devices": bus.devices()}

@@ -868,10 +868,11 @@ async def dj_transfer(device: str) -> str:
     """Transfer playback to a device — Spotify-Connect-style handoff.
 
     `device` matches a device id or friendly name (case-insensitive), e.g.
-    'phone', 'pc-solace', 'Solace'. After transfer, DJ commands drive that
-    device; the previously-active one simply stops receiving new commands
-    (it is not paused — that is the slice-2 phone change). If the target
-    goes stale (PC asleep/closed), playback falls back to the phone.
+    'phone', 'pc-solace', 'Solace'. The music moves with it: the previous
+    device pauses and reports its position, then the new one resumes the same
+    queue from that exact spot (voice clips and streams don't carry over), and
+    DJ commands drive the new device from then on. If the target goes stale
+    (PC asleep/closed), playback falls back to the phone.
     """
     payload = await _get("/api/playback/devices")
     devices = payload.get("devices") or []
