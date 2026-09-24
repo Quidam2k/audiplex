@@ -227,6 +227,34 @@ class DjCommandClient @Inject constructor(
                     playbackManager.moveTrack(from, to)
                 }
             }
+            // Transfer handshake (#2021). deactivate: playback is moving to
+            // another device, so stop here and report exactly where we were;
+            // the server hands off to the new device when we ack. activate: we
+            // are the new device, so resume the old one's queue at its spot.
+            "deactivate" -> {
+                withContext(Dispatchers.Main) { playbackManager.pause() }
+                runCatching { reportOnce(lastKey = "deactivate") }
+            }
+            "activate" -> {
+                val requested = cmd.payload?.trackIds.orEmpty()
+                // Nothing was playing on the old device: we're just the target now.
+                if (requested.isEmpty()) return DispatchResult("ok")
+                val tracks = resolveTracks(requested)
+                if (tracks.isEmpty()) return noTracks(requested)
+                val resumes = tracks.first().id == requested.first()
+                val startMs = if (resumes) cmd.payload?.positionMs ?: 0L else 0L
+                withContext(Dispatchers.Main) {
+                    playbackManager.playTracks(
+                        tracks = tracks,
+                        baseUrl = baseUrl,
+                        title = "DJ Queue",
+                        albumLookup = emptyMap(),
+                        startPositionMs = startMs,
+                    )
+                    if (cmd.payload?.playing == false) playbackManager.pause()
+                }
+                return partialOrOk(requested, tracks.size)
+            }
             "skip" -> {
                 // Advance to the next track in the queue. For music this maps to
                 // seekToNextMediaItem (an existing Media3 op — zero new queue ops).

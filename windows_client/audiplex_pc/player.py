@@ -20,6 +20,12 @@ class QueueItem:
     url: str
 
 
+def _reported_id(item: QueueItem) -> int:
+    """Catalog id for tracks; -1 for clips/streams, which aren't catalog tracks
+    (the phone uses negative ids the same way) and can't follow a transfer."""
+    return item.id if item.kind == "track" else -1
+
+
 class Player:
     def __init__(
         self,
@@ -45,6 +51,7 @@ class Player:
         # Bumped whenever the media changes, so an EndReached/Error for the
         # previous track that lands after a skip can't advance the new one.
         self._gen = 0
+        self._pause_on_start = False
 
         self._event_manager = self._player.event_manager()
         self._event_manager.event_attach(
@@ -60,14 +67,18 @@ class Player:
             self._dispatch_playing,
         )
 
-    def play_now(self, items: Iterable[QueueItem]) -> None:
+    def play_now(
+        self, items: Iterable[QueueItem], start_ms: int = 0, paused: bool = False
+    ) -> None:
+        """Replace the queue. start_ms/paused let a transfer resume mid-track."""
         with self._lock:
             self.queue = list(items)
             if not self.queue:
                 self.index = -1
                 self._stop_player()
                 return
-            self._start(0)
+            self._start(0, start_ms)
+            self._pause_on_start = paused
 
     def enqueue(self, items: Iterable[QueueItem]) -> None:
         with self._lock:
@@ -212,7 +223,7 @@ class Player:
             track = None
             if item is not None:
                 track = {
-                    "id": item.id,
+                    "id": _reported_id(item),
                     "title": item.title,
                     "artist": item.artist,
                 }
@@ -220,7 +231,7 @@ class Player:
             reported_queue = [
                 {
                     "index": queue_index,
-                    "id": queue_item.id,
+                    "id": _reported_id(queue_item),
                     "title": queue_item.title,
                     "artist": queue_item.artist,
                 }
@@ -250,11 +261,14 @@ class Player:
             return self.queue[self.index]
         return None
 
-    def _start(self, index: int) -> None:
+    def _start(self, index: int, start_ms: int = 0) -> None:
         self._gen += 1
+        self._pause_on_start = False
         self.index = index
         item = self.queue[index]
         media = self._instance.media_new(item.url)
+        if start_ms > 0:
+            media.add_option(f":start-time={start_ms / 1000:.3f}")
         self._player.set_media(media)
 
         self._ended = False
@@ -310,6 +324,12 @@ class Player:
     def _on_playing(self) -> None:
         with self._lock:
             self._player.audio_set_volume(round(self.volume * 100))
-            if not self._paused and not self._ended:
+            if self._pause_on_start:
+                # A paused handoff: load at the position, then hold there.
+                self._pause_on_start = False
+                self._player.set_pause(1)
+                self._playing = False
+                self._paused = True
+            elif not self._paused and not self._ended:
                 self._playing = True
 

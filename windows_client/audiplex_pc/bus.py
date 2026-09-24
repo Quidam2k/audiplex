@@ -161,6 +161,28 @@ class BusClient:
                 return "partial", f"{len(items)}/{len(ids)} resolved"
             return "ok", ""
 
+        if command_type == "deactivate":
+            # Playback is moving to another device: stop here and report the
+            # exact spot right away; the server hands off once we ack.
+            self.player.pause()
+            self.report_now()
+            return "ok", ""
+
+        if command_type == "activate":
+            ids = payload.get("track_ids") or []
+            if not ids:
+                return "ok", ""  # nothing was playing; we're simply the target now
+            items = self._resolve_tracks(ids)
+            if not items:
+                return "no_tracks", f"none of {ids} resolved"
+            resumes = items[0].id == ids[0]
+            self.player.play_now(
+                items,
+                start_ms=int(payload.get("position_ms") or 0) if resumes else 0,
+                paused=not payload.get("playing", True),
+            )
+            return "ok", ""
+
         if command_type == "reorder":
             if payload.get("from_index") is None:
                 return "bad_payload", "from_index"
@@ -254,6 +276,17 @@ class BusClient:
             return "unsupported", "not on the Windows renderer yet"
 
         return "unknown_type", command_type
+
+    def report_now(self) -> None:
+        """Post the current state immediately (best effort)."""
+        try:
+            self.client.post(
+                "/api/playback/state",
+                params={"device_id": self.device_id},
+                json=self.player.state(),
+            ).raise_for_status()
+        except Exception as exc:
+            logger.warning("Immediate state report failed: %s", repr(exc)[:300])
 
     def report_loop(self) -> None:
         last_state: dict[str, Any] | None = None

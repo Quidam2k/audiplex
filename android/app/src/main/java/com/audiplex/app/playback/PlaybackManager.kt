@@ -680,7 +680,9 @@ class PlaybackManager @Inject constructor(
         baseUrl: String,
         title: String,
         albumLookup: Map<Int, Pair<String, Boolean>>,
-        shuffle: Boolean = false
+        shuffle: Boolean = false,
+        // Transfer handoff (#2021): resume the first track mid-way.
+        startPositionMs: Long = 0L
     ) {
         val items = tracks.map { track ->
             val (albumTitle, hasCover) = albumLookup[track.albumId] ?: ("Unknown" to false)
@@ -698,7 +700,8 @@ class PlaybackManager @Inject constructor(
             playlistId = null,
             title = title,
             startIndex = 0,
-            shuffle = shuffle
+            shuffle = shuffle,
+            startPositionMs = startPositionMs
         )
     }
 
@@ -867,7 +870,8 @@ class PlaybackManager @Inject constructor(
         playlistId: Int?,
         title: String,
         startIndex: Int,
-        shuffle: Boolean = false
+        shuffle: Boolean = false,
+        startPositionMs: Long = 0L
     ) {
         if (items.isEmpty()) return
         // Clear audiobook state, post final stop for any prior music
@@ -893,7 +897,7 @@ class PlaybackManager @Inject constructor(
             val mediaItems = items.map { buildMusicMediaItem(it) }
             // Stage the start index in the timeline setup; setting shuffle
             // before play() ensures the first-track pick is shuffled too.
-            ctrl.setMediaItems(mediaItems, safeIndex, 0L)
+            ctrl.setMediaItems(mediaItems, safeIndex, startPositionMs)
             ctrl.shuffleModeEnabled = shuffle
             ctrl.prepare()
             ctrl.play()

@@ -316,7 +316,9 @@ data class DjCommandPayload(
     // 'sleep_timer' (#1728): fade the main player out after `minutes`, ramping
     // over the last `fade_seconds` of that.
     val minutes: Float? = null,
-    @Json(name = "fade_seconds") val fadeSeconds: Int? = null
+    @Json(name = "fade_seconds") val fadeSeconds: Int? = null,
+    // 'activate' (#2021 transfer handoff): resume playing, or hold paused.
+    val playing: Boolean? = null
 )
 
 @JsonClass(generateAdapter = true)
