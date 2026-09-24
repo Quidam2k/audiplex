@@ -168,8 +168,9 @@ class PlaybackBus:
         self._commands: "OrderedDict[int, PlaybackCommandRecord]" = OrderedDict()
         self._arrival: Optional[asyncio.Event] = None
         self._seq: int = 0
-        self._state: Optional[dict[str, Any]] = None
-        self._state_updated_at: float = 0.0
+        # Now-playing per device (device_id -> (state, reported_at)). Kept apart
+        # so an idle PC's empty reports can't overwrite the phone's now-playing.
+        self._states: dict[str, tuple[dict[str, Any], float]] = {}
         self._last_poll_at: float = 0.0
         self._last_delivered_at: float = 0.0
         self._last_delivered: Optional[PlaybackCommandRecord] = None
@@ -178,8 +179,8 @@ class PlaybackBus:
         self._poll_history: Deque[float] = deque(maxlen=POLL_HISTORY_CAPACITY)
         self._seen_poll_this_process: bool = False
         # Device registry + Spotify-Connect-style active-device targeting. Empty
-        # + active_device_id None == pre-device behavior: any poller is served,
-        # which is what keeps the phone byte-identical when no PC is present.
+        # + active_device_id None == pre-device behavior: the phone is served,
+        # which is what keeps it byte-identical when no PC is present.
         self._devices: "OrderedDict[str, DeviceRecord]" = OrderedDict()
         self._active_device_id: Optional[str] = None
 
@@ -449,14 +450,19 @@ class PlaybackBus:
             )
         return out
 
-    def set_state(self, state: dict[str, Any]) -> None:
-        self._state = state
-        self._state_updated_at = time.time()
+    def set_state(self, state: dict[str, Any], device_id: Optional[str] = None) -> None:
+        self._states[device_id or LEGACY_DEVICE_ID] = (state, time.time())
 
-    def get_state(self) -> Optional[dict[str, Any]]:
-        if self._state is None:
+    def _renderer_id(self) -> str:
+        """The device whose now-playing counts: the live active one, else the phone."""
+        return self._target_device_id(time.time()) or LEGACY_DEVICE_ID
+
+    def get_state(self, device_id: Optional[str] = None) -> Optional[dict[str, Any]]:
+        entry = self._states.get(device_id or self._renderer_id())
+        if entry is None:
             return None
-        return {**self._state, "updated_at": self._state_updated_at}
+        state, at = entry
+        return {**state, "updated_at": at}
 
     def device_status(self) -> dict[str, Any]:
         """Everything the DJ needs to tell a dead player from a quiet one."""
@@ -467,13 +473,14 @@ class PlaybackBus:
 
         poll_age = age(self._last_poll_at)
         last = self._last_delivered
+        state_at = self._states.get(self._renderer_id(), (None, 0.0))[1]
         return {
             "connected": poll_age is not None and poll_age < DEVICE_STALE_AFTER_SECONDS,
             "last_poll_at": self._last_poll_at or None,
             "last_poll_age_seconds": poll_age,
-            "last_state_at": self._state_updated_at or None,
-            "last_state_age_seconds": age(self._state_updated_at),
-            "ever_reported_state": self._state is not None,
+            "last_state_at": state_at or None,
+            "last_state_age_seconds": age(state_at),
+            "ever_reported_state": bool(state_at),
             "last_command_id": last.id if last else None,
             "last_command_type": last.type if last else None,
             "last_command_delivered_at": self._last_delivered_at or None,

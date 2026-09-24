@@ -143,3 +143,25 @@ class TestStaleFallback:
         status = bus.device_status()
         assert status["active_device_id"] == "pc-solace"
         assert status["effective_target_device_id"] is None
+
+
+class TestPerDeviceState:
+    def _state(self, track_id):
+        return {"playing": True, "track": {"id": track_id}, "queue": []}
+
+    def test_idle_pc_report_does_not_clobber_phone_state(self, client):
+        client.post("/api/playback/state", json=self._state(1))
+        client.post("/api/playback/state?device_id=pc-solace", json={})
+
+        assert client.get("/api/playback/state").json()["track"]["id"] == 1
+
+    def test_active_pc_state_is_the_default(self, client, monkeypatch):
+        monkeypatch.setattr(routers.playback, "LONGPOLL_TIMEOUT_SECONDS", 0.05)
+        client.get("/api/playback/command/next", params=PC_PARAMS)
+        client.post("/api/playback/state", json=self._state(1))
+        client.post("/api/playback/state?device_id=pc-solace", json=self._state(2))
+        client.post("/api/playback/devices/pc-solace/activate")
+
+        assert client.get("/api/playback/state").json()["track"]["id"] == 2
+        phone = client.get("/api/playback/state", params={"device_id": "phone"})
+        assert phone.json()["track"]["id"] == 1

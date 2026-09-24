@@ -176,13 +176,17 @@ def post_state(
     # keeps its device fresh between long-polls (rider R2 accuracy).
     if device_id:
         bus.touch_device(device_id)
-    bus.set_state(state.model_dump())
+    bus.set_state(state.model_dump(), device_id)
     return state
 
 
 @router.get("/state")
-def get_state(user: User = Depends(get_current_user)):
-    return bus.get_state() or {
+def get_state(
+    device_id: str | None = Query(None),
+    user: User = Depends(get_current_user),
+):
+    """Now-playing of `device_id`, or by default of whichever device is rendering."""
+    return bus.get_state(device_id) or {
         "playing": False,
         "track": None,
         "position_ms": 0,
