@@ -837,6 +837,61 @@ async def dj_device_status() -> str:
     return "\n".join(lines)
 
 
+def _describe_devices(payload: dict) -> list[str]:
+    active = payload.get("active_device_id")
+    devices = payload.get("devices") or []
+    if not devices:
+        return ["No renderers registered (no device has polled this server)."]
+    lines = []
+    for d in devices:
+        mark = "* " if d.get("active") else "  "
+        live = "live" if d.get("connected") else f"stale {_describe_age(d.get('last_seen_age_seconds'))}"
+        lines.append(f"{mark}{d.get('id')} ({d.get('name')}, {d.get('type')}) — {live}")
+    if active is None:
+        lines.append("Active: none (any live renderer receives commands — the phone).")
+    return lines
+
+
+@mcp.tool()
+async def dj_devices() -> str:
+    """List the renderers registered on the bus and which one is ACTIVE.
+
+    The active device is the one dj_play_now / dj_queue / etc. currently drive.
+    A '*' marks it. Use dj_transfer to hand playback to a different device
+    (the phone, or a Windows PC running the follow-me client)."""
+    payload = await _get("/api/playback/devices")
+    return "\n".join(_describe_devices(payload))
+
+
+@mcp.tool()
+async def dj_transfer(device: str) -> str:
+    """Transfer playback to a device — Spotify-Connect-style handoff.
+
+    `device` matches a device id or friendly name (case-insensitive), e.g.
+    'phone', 'pc-solace', 'Solace'. After transfer, DJ commands drive that
+    device; the previously-active one simply stops receiving new commands
+    (it is not paused — that is the slice-2 phone change). If the target
+    goes stale (PC asleep/closed), playback falls back to the phone.
+    """
+    payload = await _get("/api/playback/devices")
+    devices = payload.get("devices") or []
+    key = device.strip().lower()
+    match = None
+    for d in devices:
+        if key in (str(d.get("id", "")).lower(), str(d.get("name", "")).lower()):
+            match = d
+            break
+    # 'phone' is always a valid target even if it has not polled yet.
+    target_id = match["id"] if match else ("phone" if key == "phone" else None)
+    if target_id is None:
+        known = ", ".join(f"{d.get('id')} ({d.get('name')})" for d in devices) or "none"
+        return f"No device matches '{device}'. Registered: {known}."
+    result = await _post(f"/api/playback/devices/{target_id}/activate", {})
+    lines = [f"Transferred playback to '{target_id}'."]
+    lines.extend(_describe_devices(result))
+    return "\n".join(lines)
+
+
 @mcp.tool()
 async def dj_client_log(limit: int = 25) -> str:
     """Recent diagnostics shipped up by the Android player — playback errors and
@@ -1081,6 +1136,13 @@ async def dj_now_playing() -> str:
             )
     if device_line:
         lines.append(device_line)
+    active = device.get("active_device_id")
+    effective = device.get("effective_target_device_id")
+    if active is not None:
+        note = f"Active device: {active}"
+        if effective is None:
+            note += " (STALE — playback has fallen back to any live renderer, i.e. the phone)"
+        lines.append(note)
     return "\n".join(lines)
 
 

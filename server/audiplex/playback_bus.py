@@ -70,6 +70,12 @@ from typing import Any, Deque, Optional
 # ~2 missed cycles means it is gone, not slow.
 DEVICE_STALE_AFTER_SECONDS = 60.0
 
+# The reserved id for the legacy/anonymous renderer — today's Android app, which
+# long-polls with no device_id. It auto-registers under this id so device
+# targeting is uniform, and it is always a valid transfer target (the phone is
+# assumed present even before its first poll of this process).
+LEGACY_DEVICE_ID = "phone"
+
 CLIENT_LOG_CAPACITY = 200
 
 # An un-acked delivery is re-offered after this long. 60s is comfortably past
@@ -142,6 +148,21 @@ class PlaybackCommandRecord:
         }
 
 
+@dataclass
+class DeviceRecord:
+    """A renderer that has announced itself on the bus.
+
+    `last_seen` is bumped on every poll/state/ack from the device; it is the
+    same liveness signal the phone's ~25s long-poll already provides, so a
+    device that stops polling ages out of `connected` on its own.
+    """
+    id: str
+    name: str
+    type: str
+    first_seen: float
+    last_seen: float
+
+
 class PlaybackBus:
     def __init__(self) -> None:
         self._commands: "OrderedDict[int, PlaybackCommandRecord]" = OrderedDict()
@@ -156,6 +177,11 @@ class PlaybackBus:
         self._log_seq: int = 0
         self._poll_history: Deque[float] = deque(maxlen=POLL_HISTORY_CAPACITY)
         self._seen_poll_this_process: bool = False
+        # Device registry + Spotify-Connect-style active-device targeting. Empty
+        # + active_device_id None == pre-device behavior: any poller is served,
+        # which is what keeps the phone byte-identical when no PC is present.
+        self._devices: "OrderedDict[str, DeviceRecord]" = OrderedDict()
+        self._active_device_id: Optional[str] = None
 
     def reset(self) -> None:
         """Drop all state — used by tests, which share this global singleton."""
@@ -184,12 +210,18 @@ class PlaybackBus:
         self._event().set()
         return rec
 
-    def _claim(self, now: float) -> Optional[PlaybackCommandRecord]:
-        """The oldest command owed to the device, or None.
+    def _claim(self, now: float, poller_id: str) -> Optional[PlaybackCommandRecord]:
+        """The oldest command owed to `poller_id`, or None.
 
         Owed means never delivered, or delivered long enough ago that the ack
-        should have come back and did not.
+        should have come back and did not — AND this poller is the one the bus
+        is currently targeting. When targeting is off (no active device, or the
+        active device has gone stale) every poller is eligible, which is the
+        pre-device single-renderer behavior.
         """
+        target = self._target_device_id(now)
+        if target is not None and target != poller_id:
+            return None
         for rec in self._commands.values():
             if rec.status == STATUS_QUEUED or (
                 rec.status == STATUS_DELIVERED
@@ -212,16 +244,26 @@ class PlaybackBus:
         ]
         return min(waits) if waits else None
 
-    async def next(self, timeout: float) -> Optional[PlaybackCommandRecord]:
+    async def next(
+        self,
+        timeout: float,
+        device_id: Optional[str] = None,
+        device_name: Optional[str] = None,
+        device_type: Optional[str] = None,
+    ) -> Optional[PlaybackCommandRecord]:
         """Block up to `timeout` seconds for the next command. None on timeout.
 
         Records the poll itself as a liveness beat: a client that times out
-        empty-handed has still proven it is alive and listening.
+        empty-handed has still proven it is alive and listening. A paramless
+        poll (today's Android app) registers under LEGACY_DEVICE_ID so device
+        targeting can treat it uniformly without any client change.
 
         Delivery MARKS the record, it does not consume it — the command stays
         in the registry until the device acks, so a client that dies between
         this response and dispatch is offered it again instead of losing it.
         """
+        poller_id = device_id or LEGACY_DEVICE_ID
+        self.register_device(poller_id, device_name, device_type)
         self._record_poll()
         deadline = time.time() + timeout
         while True:
@@ -229,7 +271,7 @@ class PlaybackBus:
             # event and the wait below returns at once instead of parking.
             self._event().clear()
             now = time.time()
-            rec = self._claim(now)
+            rec = self._claim(now, poller_id)
             if rec is not None:
                 return rec
             remaining = deadline - now
@@ -316,6 +358,96 @@ class PlaybackBus:
         entries = list(self._poll_history)
         return entries[-limit:] if limit > 0 else entries
 
+    # ----- Device registry + active-device targeting (Spotify-Connect style) -----
+
+    def register_device(
+        self,
+        device_id: str,
+        name: Optional[str] = None,
+        type: Optional[str] = None,
+    ) -> DeviceRecord:
+        """Upsert a device and bump its liveness. Called on every poll."""
+        now = time.time()
+        rec = self._devices.get(device_id)
+        if rec is None:
+            rec = DeviceRecord(
+                id=device_id,
+                name=name or device_id,
+                type=type or "unknown",
+                first_seen=now,
+                last_seen=now,
+            )
+            self._devices[device_id] = rec
+        else:
+            rec.last_seen = now
+            if name:
+                rec.name = name
+            if type:
+                rec.type = type
+        return rec
+
+    def touch_device(self, device_id: str) -> None:
+        """Bump a known device's liveness without changing its metadata."""
+        rec = self._devices.get(device_id)
+        if rec is not None:
+            rec.last_seen = time.time()
+
+    def _target_device_id(self, now: float) -> Optional[str]:
+        """Which device commands go to right now, or None for 'anyone'.
+
+        None (no active device, or the active device has aged past
+        DEVICE_STALE_AFTER_SECONDS) is the fallback that stops a sleeping or
+        closed PC from stranding playback (rider R2): commands revert to any
+        live poller, i.e. the phone.
+        """
+        if self._active_device_id is None:
+            return None
+        active = self._devices.get(self._active_device_id)
+        if active is None or now - active.last_seen > DEVICE_STALE_AFTER_SECONDS:
+            return None
+        return self._active_device_id
+
+    def set_active_device(self, device_id: str) -> Optional[DeviceRecord]:
+        """Make `device_id` the active renderer. None if it is unknown.
+
+        The phone (LEGACY_DEVICE_ID) is always accepted so playback can be
+        handed back to it even before it has polled this process. Wakes any
+        parked poller so the newly-active device can claim immediately.
+        """
+        if device_id != LEGACY_DEVICE_ID and device_id not in self._devices:
+            return None
+        rec = self._devices.get(device_id)
+        if rec is None:
+            # Register the phone lazily so it shows up in devices() as active.
+            rec = self.register_device(device_id, name="Phone", type="android")
+        self._active_device_id = device_id
+        if self._arrival is not None:
+            self._event().set()
+        return rec
+
+    @property
+    def active_device_id(self) -> Optional[str]:
+        return self._active_device_id
+
+    def devices(self) -> list[dict[str, Any]]:
+        """Every known renderer, with liveness + which one is active."""
+        now = time.time()
+        out = []
+        for rec in self._devices.values():
+            age = now - rec.last_seen
+            out.append(
+                {
+                    "id": rec.id,
+                    "name": rec.name,
+                    "type": rec.type,
+                    "last_seen_at": rec.last_seen,
+                    "last_seen_age_seconds": round(age, 1),
+                    "connected": age < DEVICE_STALE_AFTER_SECONDS,
+                    "active": rec.id == self._active_device_id,
+                }
+            )
+        return out
+
     def set_state(self, state: dict[str, Any]) -> None:
         self._state = state
         self._state_updated_at = time.time()
@@ -353,6 +485,12 @@ class PlaybackBus:
             "pending": self.pending(),
             "outstanding": self.outstanding(),
             "polls_recorded": len(self._poll_history),
+            # Which renderer commands currently target. active_device_id is the
+            # DECLARED active device; effective_target_device_id is None when it
+            # has gone stale and playback has fallen back to any live poller.
+            "active_device_id": self._active_device_id,
+            "effective_target_device_id": self._target_device_id(now),
+            "devices": self.devices(),
         }
 
     def add_client_log(self, entry: dict[str, Any]) -> dict[str, Any]:

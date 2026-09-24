@@ -7,6 +7,8 @@ Endpoints:
   GET  /api/playback/commands      — recent commands + their delivery status
   POST /api/playback/state         — client reports now-playing
   GET  /api/playback/state         — agent reads now-playing
+  GET  /api/playback/devices       — registered renderers + which is active
+  POST /api/playback/devices/{id}/activate — transfer playback to a device
   GET  /api/playback/device        — device liveness (last poll / state / command)
   POST /api/playback/client-log    — client ships a diagnostic up
   GET  /api/playback/client-log    — agent reads recent client diagnostics
@@ -103,9 +105,25 @@ async def post_command(cmd: PlaybackCommand, user: User = Depends(get_current_us
 
 
 @router.get("/command/next")
-async def next_command(user: User = Depends(get_current_user)):
-    """Long-poll for the next command. 204 (empty) on timeout — re-issue."""
-    rec = await bus.next(LONGPOLL_TIMEOUT_SECONDS)
+async def next_command(
+    device_id: str | None = Query(None),
+    device_name: str | None = Query(None),
+    device_type: str | None = Query(None),
+    user: User = Depends(get_current_user),
+):
+    """Long-poll for the next command. 204 (empty) on timeout — re-issue.
+
+    A paramless poll (today's Android app) is served exactly as before. A
+    client that identifies itself with device_id joins the device registry and
+    only receives commands while it is the active device (Spotify-Connect-style
+    targeting); see playback_bus for the fallback rules.
+    """
+    rec = await bus.next(
+        LONGPOLL_TIMEOUT_SECONDS,
+        device_id=device_id,
+        device_name=device_name,
+        device_type=device_type,
+    )
     if rec is None:
         return Response(status_code=204)
     return JSONResponse(
@@ -149,7 +167,15 @@ def list_commands(
 
 
 @router.post("/state", response_model=PlaybackState)
-def post_state(state: PlaybackState, user: User = Depends(get_current_user)):
+def post_state(
+    state: PlaybackState,
+    device_id: str | None = Query(None),
+    user: User = Depends(get_current_user),
+):
+    # A state report is also a liveness beat: a client that identifies itself
+    # keeps its device fresh between long-polls (rider R2 accuracy).
+    if device_id:
+        bus.touch_device(device_id)
     bus.set_state(state.model_dump())
     return state
 
@@ -167,6 +193,29 @@ def get_state(user: User = Depends(get_current_user)):
         "volume": None,
         "updated_at": None,
     }
+
+
+@router.get("/devices")
+def list_devices(user: User = Depends(get_current_user)):
+    """Every renderer that has announced itself, with liveness + which is active.
+
+    This is how the DJ (and a follow-me client) learns what it can hand playback
+    to. A device drops out of `connected` on its own once it stops polling.
+    """
+    return {"active_device_id": bus.active_device_id, "devices": bus.devices()}
+
+
+@router.post("/devices/{device_id}/activate")
+def activate_device(device_id: str, user: User = Depends(get_current_user)):
+    """Transfer playback to `device_id` (Spotify-Connect handoff).
+
+    Slice 1 does NOT pause the previously-active device — it simply stops
+    receiving new commands; auto-pause/resume is the slice-2 Android change.
+    """
+    rec = bus.set_active_device(device_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail=f"Unknown device {device_id}")
+    return {"active_device_id": bus.active_device_id, "devices": bus.devices()}
 
 
 @router.get("/device")
