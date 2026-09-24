@@ -28,6 +28,7 @@ class PlaybackService : MediaSessionService() {
     @Inject lateinit var okHttpClient: OkHttpClient
 
     private var mediaSession: MediaSession? = null
+    private var audioFocusManager: AudioFocusManager? = null
 
     @OptIn(UnstableApi::class)
     override fun onCreate() {
@@ -53,17 +54,33 @@ class PlaybackService : MediaSessionService() {
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
                     // #3099/#991: default MUSIC so agent speech DUCKS the music
-                    // (talk-over) instead of pausing it. Media3's
-                    // AudioFocusManager.willPauseWhenDucked() returns true ONLY for
-                    // SPEECH content, so SPEECH here made a can-duck focus loss a
-                    // full pause. PlaybackManager overrides this to SPEECH per-kind
-                    // for audiobooks (narrator keeps pause-on-duck).
+                    // (talk-over) instead of pausing it. PlaybackManager overrides
+                    // this to SPEECH per-kind for audiobooks; FocusPolicy reads the
+                    // content type on each focus change and pauses SPEECH under a
+                    // can-duck loss (narrator rule) while music ducks to ~5%.
                     .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
                     .build(),
-                /* handleAudioFocus = */ true
+                // Media3's built-in focus handling only ducks to ~20%, which bleeds
+                // into the headset mic under agent TTS. AudioFocusManager below owns
+                // focus instead (request on play, abandon on user pause / destroy).
+                /* handleAudioFocus = */ false
             )
             .setHandleAudioBecomingNoisy(true)
             .build()
+
+        val focusManager = AudioFocusManager(this, player)
+        audioFocusManager = focusManager
+        player.addListener(object : Player.Listener {
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (playWhenReady) {
+                    // Every play re-requests (idempotent); denied focus means we
+                    // must not start over a call or another exclusive holder.
+                    if (!focusManager.requestFocus()) player.pause()
+                } else if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST) {
+                    focusManager.onUserPause()
+                }
+            }
+        })
 
         val forwardingPlayer = object : ForwardingPlayer(player) {
             override fun getSeekForwardIncrement(): Long = 30_000L
@@ -95,6 +112,8 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        audioFocusManager?.abandonFocus()
+        audioFocusManager = null
         mediaSession?.run {
             player.release()
             release()

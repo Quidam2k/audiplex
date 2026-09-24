@@ -375,10 +375,13 @@ class PlaybackManager @Inject constructor(
     /**
      * #3099/#991: set the player's audio content type per PlayerKind on the
      * controller. MUSIC (music/DJ/stream) lets agent speech DUCK playback;
-     * SPEECH (audiobooks) keeps the narrator PAUSING under other audio, because
-     * Media3's AudioFocusManager.willPauseWhenDucked() converts a can-duck focus
-     * loss into a full pause only for SPEECH content. Called at each play entry
-     * so switching kinds re-applies the right type (the PlaybackService default
+     * SPEECH (audiobooks) keeps the narrator PAUSING under other audio. The
+     * service-side FocusPolicy reads this content type on every focus change
+     * and turns a can-duck loss into a full pause only for SPEECH (it replaced
+     * Media3's willPauseWhenDucked, which did the same but ducked to ~20%).
+     * handleAudioFocus stays false here: focus is owned by the service's
+     * AudioFocusManager, not by the controller. Called at each play entry so
+     * switching kinds re-applies the right type (the PlaybackService default
      * is MUSIC, so the priority DJ-duck case is correct even before this fires).
      */
     private fun applyAudioAttributesFor(ctrl: MediaController, kind: PlayerKind) {
@@ -390,12 +393,13 @@ class PlaybackManager @Inject constructor(
                 .setUsage(C.USAGE_MEDIA)
                 .setContentType(contentType)
                 .build(),
-            /* handleAudioFocus = */ true
+            /* handleAudioFocus = */ false  // Audio focus handled by PlaybackService
         )
         // #997/#3111: set this kind's base volume as playback (re)starts. This
-        // is the steady-state level; Media3's auto-duck multiplies ~0.2 on top
-        // during agent speech and restores to this value afterward. Via
-        // setPlayerVolume so the DJ-report volume snapshot stays coherent.
+        // is the steady-state level; the service's AudioFocusManager ducks to
+        // ~5% during a transient focus loss and restores to whatever the dial
+        // was (it records the pre-duck volume, never a hardcoded 1.0).
+        // Via setPlayerVolume so the DJ-report volume snapshot stays coherent.
         setPlayerVolume(volumeForKind(kind))
     }
 
@@ -966,7 +970,11 @@ class PlaybackManager @Inject constructor(
                 .setUsage(C.USAGE_MEDIA)
                 .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
                 .build(),
-            /* handleAudioFocus = */ true
+            // Secondary player: must never compete with the main session for
+            // focus. Trade-off: the bed no longer ducks under agent TTS (Media3
+            // used to); it is ambient at low volume, revisit if it bleeds into
+            // the mic.
+            /* handleAudioFocus = */ false
         )
         player.repeatMode = Player.REPEAT_MODE_ONE
         player.volume = volume.coerceIn(0f, 1f)
