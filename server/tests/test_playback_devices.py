@@ -39,6 +39,17 @@ class TestBackCompat:
 
 
 class TestTargeting:
+    def test_inactive_pc_never_takes_untargeted_commands(self, client, monkeypatch):
+        # A PC that is running but not activated must not race the phone (R1).
+        monkeypatch.setattr(routers.playback, "LONGPOLL_TIMEOUT_SECONDS", 0.05)
+        client.post("/api/playback/command", json=COMMAND)
+
+        assert client.get(
+            "/api/playback/command/next", params=PC_PARAMS
+        ).status_code == 204
+        assert bus.pending() == 1
+        assert client.get("/api/playback/command/next").status_code == 200
+
     def test_active_pc_receives_command_instead_of_phone(self, client, monkeypatch):
         monkeypatch.setattr(routers.playback, "LONGPOLL_TIMEOUT_SECONDS", 0.05)
         assert client.get(

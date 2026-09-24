@@ -216,11 +216,12 @@ class PlaybackBus:
         Owed means never delivered, or delivered long enough ago that the ack
         should have come back and did not — AND this poller is the one the bus
         is currently targeting. When targeting is off (no active device, or the
-        active device has gone stale) every poller is eligible, which is the
-        pre-device single-renderer behavior.
+        active device has gone stale) only the phone is eligible: a PC renderer
+        that is merely running must never race the phone for commands, or the
+        phone-alone behavior (rider R1) would break the moment a PC came online.
         """
-        target = self._target_device_id(now)
-        if target is not None and target != poller_id:
+        target = self._target_device_id(now) or LEGACY_DEVICE_ID
+        if target != poller_id:
             return None
         for rec in self._commands.values():
             if rec.status == STATUS_QUEUED or (
@@ -397,8 +398,8 @@ class PlaybackBus:
 
         None (no active device, or the active device has aged past
         DEVICE_STALE_AFTER_SECONDS) is the fallback that stops a sleeping or
-        closed PC from stranding playback (rider R2): commands revert to any
-        live poller, i.e. the phone.
+        closed PC from stranding playback (rider R2): commands revert to the
+        phone.
         """
         if self._active_device_id is None:
             return None
@@ -487,7 +488,7 @@ class PlaybackBus:
             "polls_recorded": len(self._poll_history),
             # Which renderer commands currently target. active_device_id is the
             # DECLARED active device; effective_target_device_id is None when it
-            # has gone stale and playback has fallen back to any live poller.
+            # has gone stale and playback has fallen back to the phone.
             "active_device_id": self._active_device_id,
             "effective_target_device_id": self._target_device_id(now),
             "devices": self.devices(),
