@@ -75,7 +75,7 @@ from urllib.parse import quote
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-from audiplex_mcp import dj_persona, tts_backend
+from audiplex_mcp import dj_bridge_watcher, dj_persona, tts_backend  # #2858 dj_patter
 
 AUDIPLEX_URL = os.environ.get("AUDIPLEX_URL", "http://localhost:8000").rstrip("/")
 
@@ -627,6 +627,33 @@ async def dj_announce(text: str, mode: str = "next", title: str = "DJ break") ->
         f"Queued a {length} voice break to play {when} "
         f"(clip #{clip['clip_id']}, command #{data.get('id')}, "
         f"{data.get('pending')} pending)."
+    )
+
+
+@mcp.tool()
+async def dj_patter(
+    on: bool, every_min: int | None = None, every_max: int | None = None
+) -> str:
+    """Turn DJ patter on or off ("DJ patter on/off"). #2858
+
+    While on, the dj_bridge_watcher invites a persona (Jarvis, Karen, Orolo in
+    rotation) to speak a short bridge early in the new song, on every
+    every_min-every_max music track changes (default 2-3). Takes effect on
+    the watcher's next 2 s tick; nothing is restarted and no music is touched.
+    """
+    settings = dj_bridge_watcher.load_settings()
+    settings["on"] = bool(on)
+    if every_min is not None:
+        settings["every_min"] = max(1, int(every_min))
+    if every_max is not None:
+        settings["every_max"] = int(every_max)
+    settings["every_max"] = max(settings["every_min"], settings["every_max"])
+    dj_bridge_watcher.write_settings(settings)
+    state = "on" if settings["on"] else "off"
+    return (
+        f"DJ patter {state} (a bridge every {settings['every_min']}-"
+        f"{settings['every_max']} track changes). The watcher process must be "
+        "running (launch-dj-bridge-hidden.vbs)."
     )
 
 

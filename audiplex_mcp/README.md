@@ -122,6 +122,21 @@ keeps Audiplex decoupled from any particular TTS project:
 Only `dj_announce` needs a TTS backend; the other 13 tools work without one,
 and `dj_break_brief` warns when it's unconfigured.
 
+## Live DJ bridges (patter, #2858)
+
+`dj_bridge_watcher.py` is a separate long-running process (start it with
+`launch-dj-bridge-hidden.vbs`). It polls `GET /api/playback/state` every 2 s,
+read-only, and on every 2nd-3rd music track change runs the `DJ_BRIDGE_CMD` hook
+with the prev/now/next tags, so a voice persona can talk over the song intro.
+It never sends playback commands. The default hook is Pantheon's
+`scripts/dj_bridge_push.py`, which invites Jarvis, Karen and Orolo in rotation
+through Pantheon's own inbox path. Audiplex never imports Pantheon.
+
+- On/off: the `dj_patter(on, every_min, every_max)` tool, or
+  `python -m audiplex_mcp.dj_bridge_watcher on|off|status`. The setting lives in
+  `data/dj_patter.json` and is re-read every tick.
+- Log: `data/dj_bridge.log`.
+
 ## Verifying the whole lane
 
 ```bash

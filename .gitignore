@@ -61,3 +61,7 @@ data/dj/
 
 # Runtime diagnostics written by the server (process-exit reports, #3021).
 server/data/
+
+# DJ bridge watcher (#2858) runtime state
+data/dj_patter.json
+data/dj_bridge.log
