@@ -271,3 +271,20 @@ class TestOwnerScopedTasteReads:
         monkeypatch.setattr(get_settings(), "dj_owner_username", "nobody-configured")
         assert client.get("/api/playback/most-played").status_code == 404
         assert client.get("/api/playback/likely-skips").status_code == 404
+
+
+class TestCommandIdsSurviveRestart:
+    """#2843: ids restarted at 1 after a server restart, and the phone's
+    dedupe set — which outlives the server — ate the "new" commands 1 and 2
+    as duplicates. A fresh process must never reissue an earlier one's ids."""
+
+    def test_fresh_bus_ids_exceed_a_previous_process(self):
+        from audiplex.playback_bus import PlaybackBus
+
+        before = PlaybackBus()
+        old_id = before._enqueue("play_now", {"track_ids": [1]}).id
+        time.sleep(0.002)
+        after = PlaybackBus()  # stands in for the restarted server
+        new_id = after._enqueue("play_now", {"track_ids": [1]}).id
+        assert new_id > old_id
+        assert new_id > 1_000_000_000_000  # clock-seeded, not a small counter

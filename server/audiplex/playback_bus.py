@@ -168,10 +168,15 @@ class DeviceRecord:
 
 
 class PlaybackBus:
-    def __init__(self) -> None:
+    def __init__(self, seq_start: Optional[int] = None) -> None:
         self._commands: "OrderedDict[int, PlaybackCommandRecord]" = OrderedDict()
         self._arrival: Optional[asyncio.Event] = None
-        self._seq: int = 0
+        # Command ids start at wall-clock ms, not 0 (#2843). They live only in
+        # memory, so a counter from 0 hands out 1, 2, ... again after every
+        # restart — and a phone still holding "already executed 1, 2" in its
+        # dedupe set silently no-ops them. Seeding from the clock keeps ids
+        # monotonic across restarts. Tests pass 0 via reset() for stable ids.
+        self._seq: int = int(time.time() * 1000) if seq_start is None else seq_start
         # Now-playing per device (device_id -> (state, reported_at)). Kept apart
         # so an idle PC's empty reports can't overwrite the phone's now-playing.
         self._states: dict[str, tuple[dict[str, Any], float]] = {}
@@ -189,8 +194,12 @@ class PlaybackBus:
         self._active_device_id: Optional[str] = None
 
     def reset(self) -> None:
-        """Drop all state — used by tests, which share this global singleton."""
-        PlaybackBus.__init__(self)
+        """Drop all state — used by tests, which share this global singleton.
+
+        Ids restart at 1 here so tests can assert on them; production never
+        resets, so its ids stay clock-seeded.
+        """
+        PlaybackBus.__init__(self, seq_start=0)
 
     def _event(self) -> asyncio.Event:
         """The "a command arrived" signal, created lazily.
