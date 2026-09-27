@@ -281,8 +281,12 @@ def run_loop():
             last_error = None
 
             payload = counter.observe(state, settings, time.time())
-            if counter.last_skip_reason == "stale":
-                log_line("stale")
+            reason = counter.last_skip_reason
+            if payload is not None or reason in ("counting", "off", "stale", "init"):
+                # #2858: one line per track change, so a missing bridge is explainable
+                title = (state.get("track") or {}).get("title")
+                verdict = "FIRE" if payload is not None else reason
+                log_line(f"track -> {title!r}: {verdict} ({counter.counter}/{counter.target})")
             if payload is not None:
                 fire_hook(payload)
 
