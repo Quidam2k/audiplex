@@ -116,6 +116,7 @@ keeps Audiplex decoupled from any particular TTS project:
 | `DJ_TTS_FORMAT` | `wav` | `wav` or `mp3` |
 | `DJ_TTS_API_KEY` | — | optional bearer token |
 | `DJ_TTS_CMD` | — | generic subprocess fallback with `{text}`/`{out}` |
+| `DJ_SPEECH_STATE_FILE` | — | JSON with `stt_active`/`talk_active`/`composing`; `dj_announce` waits up to 20 s and then declines while any is true (#2858) |
 | `DJ_PERSONA_NAME` | `the DJ` | on-air name |
 | `DJ_LAT` / `DJ_LON` | — | optional keyless Open-Meteo weather line |
 

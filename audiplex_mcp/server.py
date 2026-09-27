@@ -563,6 +563,26 @@ async def dj_break_brief() -> str:
     return "\n".join(lines)
 
 
+SPEECH_GATE_WAIT_SECONDS = 20  # #2858
+
+
+def _someone_talking() -> bool:  # #2858
+    """True while DJ_SPEECH_STATE_FILE says the listener is talking or typing.
+
+    The file is a JSON object; any truthy stt_active / talk_active / composing
+    means "busy" (Pantheon's data/runtime/speech_state.json has this shape).
+    Unset or unreadable means not busy, because the gate is advisory.
+    """
+    path = os.environ.get("DJ_SPEECH_STATE_FILE")
+    if not path:
+        return False
+    try:
+        state = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return any(state.get(k) for k in ("stt_active", "talk_active", "composing"))
+
+
 @mcp.tool()
 async def dj_announce(text: str, mode: str = "next", title: str = "DJ break") -> str:
     """Speak a DJ voice break on the device: synthesizes YOUR copy to audio,
@@ -581,6 +601,15 @@ async def dj_announce(text: str, mode: str = "next", title: str = "DJ break") ->
     text = (text or "").strip()
     if not text:
         return "No text given; nothing to announce."
+
+    # #2858: never start a break while Todd is talking. Checked at queue
+    # time only; a 'next' break still plays whenever the current song ends.
+    for _ in range(SPEECH_GATE_WAIT_SECONDS):
+        if not _someone_talking():
+            break
+        await asyncio.sleep(1)
+    else:
+        return "Todd is talking, so no break was queued. Try again in a moment."
 
     try:
         clip_path = await tts_backend.synthesize(text)
