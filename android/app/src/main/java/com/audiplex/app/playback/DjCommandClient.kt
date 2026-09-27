@@ -17,10 +17,15 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.dropWhile
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.coroutineContext
@@ -38,7 +43,7 @@ import kotlin.coroutines.coroutineContext
  *    see what's playing via dj_now_playing.
  *
  * Handles command types: play_now, skip, queue, play_next, reorder, pause,
- * resume, previous, seek, volume, play_stream. The reportLoop also publishes
+ * resume, previous, seek, volume, play_stream, replace_upcoming. The reportLoop also publishes
  * the full queue (with indices) and the current player volume so the agent
  * can DJ with visibility and issue index-based reorders. play_stream routes
  * an external HTTP audio stream (e.g. Radio Free Luna) to the device —
@@ -78,6 +83,53 @@ internal fun badPayload(field: String) =
 /** How many recent command ids to remember for dedupe. */
 private const val EXECUTED_MEMORY = 64
 
+/** How long a play_now gets to produce sound before its ack says it failed. */
+private const val START_TIMEOUT_MS = 8_000L
+
+/** Idle now-playing heartbeat, so a restarted server never shows "never". */
+private const val IDLE_REPORT_INTERVAL_MS = 60_000L
+
+/**
+ * Whether a play request actually produced sound, as an ack (#2843).
+ *
+ * [started] is true once the player reports playing; [error] is a player
+ * error raised after the request. Neither means it sat silent until timeout.
+ */
+internal fun startResult(
+    started: Boolean,
+    error: String?,
+    base: DispatchResult,
+    wasPlaying: Boolean = false,
+    stillPlaying: Boolean = false,
+): DispatchResult =
+    when {
+        error != null -> DispatchResult("failed", "player error: $error")
+        started -> base
+        // Something was already playing and never visibly stopped: the swap
+        // may have been seamless, so don't call it a failure — say it's unproven.
+        wasPlaying && stillPlaying -> DispatchResult(
+            base.status,
+            listOf(base.detail, "start not confirmed: audio never paused during the swap")
+                .filter { it.isNotEmpty() }.joinToString("; "),
+        )
+        else -> DispatchResult("failed", "not playing ${START_TIMEOUT_MS / 1000}s after load")
+    }
+
+/**
+ * The ack for a redelivered command: the ORIGINAL outcome, marked as a replay.
+ * A redelivery normally means our first ack was lost, so answering "failed"
+ * would misreport a command that worked. Null = no record (evicted).
+ */
+internal fun replayResult(original: DispatchResult?, deliveryCount: Int): DispatchResult {
+    val note = "redelivery $deliveryCount, already executed"
+    return if (original == null) DispatchResult("duplicate", note)
+    else DispatchResult(original.status, listOf(note, original.detail).filter { it.isNotEmpty() }.joinToString("; "))
+}
+
+/** Should this tick post now-playing? Always while playing, else on change or heartbeat. */
+internal fun shouldReport(playing: Boolean, key: String, lastKey: String, sinceLastMs: Long): Boolean =
+    playing || key != lastKey || sinceLastMs >= IDLE_REPORT_INTERVAL_MS
+
 @Singleton
 class DjCommandClient @Inject constructor(
     private val apiHolder: ApiServiceHolder,
@@ -92,7 +144,16 @@ class DjCommandClient @Inject constructor(
     /** Command ids already executed, so an at-least-once redelivery is a
      *  no-op rather than a second skip. Bounded; insertion-ordered so the
      *  oldest id is the one evicted. */
-    private val executed = linkedSetOf<Long>()
+    private val executed = LinkedHashMap<Long, DispatchResult?>()
+
+    /** Serializes now-playing posts so a slow older snapshot can't land after
+     *  a newer one (the loop and the post-command report can overlap). */
+    private val reportMutex = Mutex()
+
+    /** Last now-playing post: its dedup key and when it went up. Shared by
+     *  the 5s loop and the post-command report. */
+    @Volatile private var lastReportKey = ""
+    @Volatile private var lastReportAt = 0L
 
     private val _linkState = MutableStateFlow(LinkState.UNCONFIGURED)
 
@@ -153,15 +214,19 @@ class DjCommandClient @Inject constructor(
      * from one still in flight. Every exit path from here reports something.
      */
     private suspend fun handle(cmd: DjCommandDto) {
-        if (!executed.add(cmd.id)) {
+        if (executed.containsKey(cmd.id)) {
             // Delivery is at-least-once: the server re-offers a command it
             // never heard an ack for. Executing it twice would double-skip or
-            // restart a track, so re-ack instead and do nothing.
-            ack(cmd.id, "ok", "duplicate delivery ${cmd.deliveryCount}, already executed")
+            // restart a track, so re-ack the ORIGINAL outcome and do nothing.
+            // The detail always says it's a replay — a bare "ok" here is what
+            // hid the 2026-09-27 silent phone (#2843).
+            val replay = replayResult(executed[cmd.id], cmd.deliveryCount)
+            ack(cmd.id, replay.status, replay.detail)
             return
         }
+        executed[cmd.id] = null
         while (executed.size > EXECUTED_MEMORY) {
-            executed.remove(executed.first())
+            executed.remove(executed.keys.first())
         }
         val result = try {
             dispatch(cmd)
@@ -176,7 +241,46 @@ class DjCommandClient @Inject constructor(
             )
             DispatchResult("error", e.message ?: e.javaClass.simpleName)
         }
+        executed[cmd.id] = result
         ack(cmd.id, result.status, result.detail)
+        // Tell the DJ what the command did right away rather than on the next
+        // tick; best-effort, like the loop.
+        runCatching { reportOnce(force = true) }
+    }
+
+    /**
+     * Wait until the player is actually playing, or a NEW player error fires,
+     * or [START_TIMEOUT_MS] passes, and turn that into the ack. "ok" used to
+     * mean "handed to the player", which is how a silent phone acked every
+     * command it swallowed (#2843).
+     */
+    private suspend fun awaitStart(
+        errorSeqBefore: Long,
+        wasPlaying: Boolean,
+        base: DispatchResult,
+    ): DispatchResult {
+        val outcome = withTimeoutOrNull(START_TIMEOUT_MS) {
+            val signals = combine(playbackManager.isPlaying, playbackManager.lastPlayerError) { playing, err ->
+                playing to err?.takeIf { it.seq > errorSeqBefore }?.message
+            }
+            // If the old song was playing, its isPlaying=true is stale: wait
+            // for the swap to stop it (buffering) before a "true" counts.
+            val fresh = if (wasPlaying) {
+                var sawStop = false
+                signals.dropWhile { (playing, err) ->
+                    if (!playing) sawStop = true
+                    err == null && !sawStop
+                }
+            } else signals
+            fresh.first { (playing, err) -> playing || err != null }
+        }
+        return startResult(
+            started = outcome?.first == true && outcome.second == null,
+            error = outcome?.second,
+            base = base,
+            wasPlaying = wasPlaying,
+            stillPlaying = playbackManager.isPlaying.value,
+        )
     }
 
     /** Best-effort ack; a failure here must never break the command loop. */
@@ -192,6 +296,8 @@ class DjCommandClient @Inject constructor(
                 val requested = cmd.payload?.trackIds.orEmpty()
                 val tracks = resolveTracks(requested)
                 if (tracks.isEmpty()) return noTracks(requested)
+                val errorSeq = playbackManager.lastPlayerError.value?.seq ?: 0L
+                val wasPlaying = playbackManager.isPlaying.value
                 withContext(Dispatchers.Main) {
                     playbackManager.playTracks(
                         tracks = tracks,
@@ -199,6 +305,23 @@ class DjCommandClient @Inject constructor(
                         title = "DJ Queue",
                         albumLookup = emptyMap(),
                     )
+                }
+                return awaitStart(errorSeq, wasPlaying, partialOrOk(requested, tracks.size))
+            }
+            // DJ mix (#2842): keep the current song, replace everything after
+            // it. An empty list is legitimate: it trims the tail.
+            "replace_upcoming" -> {
+                val requested = cmd.payload?.trackIds.orEmpty()
+                val tracks = resolveTracks(requested)
+                if (requested.isNotEmpty() && tracks.isEmpty()) return noTracks(requested)
+                // Only a music queue has a "rest of the queue". An audiobook or
+                // stream is left alone; the DJ starts a mix with play_now.
+                val kind = playbackManager.playerKind.value
+                if (kind != null && kind != PlayerKind.Music) {
+                    return DispatchResult("no_music_queue", "current player: $kind")
+                }
+                withContext(Dispatchers.Main) {
+                    playbackManager.replaceUpcoming(tracks, baseUrl)
                 }
                 return partialOrOk(requested, tracks.size)
             }
@@ -233,7 +356,7 @@ class DjCommandClient @Inject constructor(
             // are the new device, so resume the old one's queue at its spot.
             "deactivate" -> {
                 withContext(Dispatchers.Main) { playbackManager.pause() }
-                runCatching { reportOnce(lastKey = "deactivate") }
+                runCatching { reportOnce(force = true) }
             }
             "activate" -> {
                 val requested = cmd.payload?.trackIds.orEmpty()
@@ -243,6 +366,8 @@ class DjCommandClient @Inject constructor(
                 if (tracks.isEmpty()) return noTracks(requested)
                 val resumes = tracks.first().id == requested.first()
                 val startMs = if (resumes) cmd.payload?.positionMs ?: 0L else 0L
+                val errorSeq = playbackManager.lastPlayerError.value?.seq ?: 0L
+                val wasPlaying = playbackManager.isPlaying.value
                 withContext(Dispatchers.Main) {
                     playbackManager.playTracks(
                         tracks = tracks,
@@ -253,7 +378,9 @@ class DjCommandClient @Inject constructor(
                     )
                     if (cmd.payload?.playing == false) playbackManager.pause()
                 }
-                return partialOrOk(requested, tracks.size)
+                // A handoff that arrives paused is meant to stay silent.
+                if (cmd.payload?.playing == false) return partialOrOk(requested, tracks.size)
+                return awaitStart(errorSeq, wasPlaying, partialOrOk(requested, tracks.size))
             }
             "skip" -> {
                 // Advance to the next track in the queue. For music this maps to
@@ -342,11 +469,10 @@ class DjCommandClient @Inject constructor(
      * loop must survive anything a single tick can throw.
      */
     private suspend fun reportLoop() {
-        var lastKey = ""
         while (coroutineContext[Job]?.isActive == true) {
             delay(5000)
             try {
-                lastKey = reportOnce(lastKey)
+                reportOnce()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -359,9 +485,13 @@ class DjCommandClient @Inject constructor(
         }
     }
 
-    /** One state report. Returns the new dedup key. */
-    private suspend fun reportOnce(lastKey: String): String {
-        val api = apiHolder.api ?: return lastKey
+    /** One state report, unless nothing changed and the heartbeat isn't due. */
+    private suspend fun reportOnce(force: Boolean = false) = reportMutex.withLock {
+        reportOnceLocked(force)
+    }
+
+    private suspend fun reportOnceLocked(force: Boolean) {
+        val api = apiHolder.api ?: return
         val music = playbackManager.currentMusic.value
         val playing = playbackManager.isPlaying.value
         val streamTitle = playbackManager.currentStreamTitle.value
@@ -388,15 +518,17 @@ class DjCommandClient @Inject constructor(
             // only and we are on Dispatchers.IO here (#2961).
             volume = playbackManager.playerVolume(),
         )
-        // Always refresh while playing (position moves); otherwise only on
-        // a meaningful state change so we don't spam the server when idle.
-        // Device liveness does NOT depend on this — the server tracks that
-        // from the command long-poll, which beats every ~25s regardless.
+        // Always refresh while playing (position moves); otherwise on a
+        // meaningful state change, plus a slow idle heartbeat. Without it a
+        // server restart left now-playing at "never" until something changed
+        // (#2843). Device liveness does NOT depend on this — the server
+        // tracks that from the command long-poll, every ~25s regardless.
         val key = "${state.playing}:${trackDto?.id}:${state.queueIndex}"
-        if (playing || key != lastKey) {
+        val now = System.currentTimeMillis()
+        if (force || shouldReport(playing, key, lastReportKey, now - lastReportAt)) {
             api.postPlaybackState(state)
-            return key
+            lastReportKey = key
+            lastReportAt = now
         }
-        return lastKey
     }
 }

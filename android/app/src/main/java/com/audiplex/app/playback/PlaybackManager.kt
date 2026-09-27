@@ -55,6 +55,17 @@ data class MusicQueueItem(
     val albumHasCover: Boolean
 )
 
+/** One player error, numbered so a waiter can tell a fresh one from an old one. */
+data class PlayerErrorEvent(val seq: Long, val message: String)
+
+/**
+ * The queue after a DJ mix replaces its tail: items up to and including
+ * [currentIndex] are untouched, then [newTail]. Pure, so the "never touch the
+ * current song" invariant is unit-testable without a player.
+ */
+internal fun <T> replaceTail(items: List<T>, currentIndex: Int, newTail: List<T>): List<T> =
+    items.take((currentIndex + 1).coerceIn(0, items.size)) + newTail
+
 data class MusicQueueState(
     val items: List<MusicQueueItem>,
     val albumId: Int?,
@@ -147,6 +158,14 @@ class PlaybackManager @Inject constructor(
 
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying
+
+    /**
+     * The most recent player error, numbered so a waiter can tell a NEW one
+     * from a stale one. Lets the DJ ack say "failed: <why>" instead of "ok"
+     * when a play_now never actually started (#2843).
+     */
+    private val _lastPlayerError = MutableStateFlow<PlayerErrorEvent?>(null)
+    val lastPlayerError: StateFlow<PlayerErrorEvent?> = _lastPlayerError
 
     private val _positionMs = MutableStateFlow(0L)
     val positionMs: StateFlow<Long> = _positionMs
@@ -253,6 +272,10 @@ class PlaybackManager @Inject constructor(
          * malformed file — ended as silence with no trace anywhere. Ship it.
          */
         override fun onPlayerError(error: PlaybackException) {
+            _lastPlayerError.value = PlayerErrorEvent(
+                seq = (_lastPlayerError.value?.seq ?: 0L) + 1,
+                message = error.message ?: error.errorCodeName,
+            )
             val item = _currentMusic.value
                 ?.let { it.items.getOrNull(it.currentIndex) }
                 ?.track
@@ -728,6 +751,31 @@ class PlaybackManager @Inject constructor(
         _currentMusic.value = music.copy(items = music.items + newItems)
         ensureController { ctrl ->
             ctrl.addMediaItems(newItems.map { buildMusicMediaItem(it) })
+        }
+    }
+
+    /**
+     * DJ mix (#2842): keep the current item exactly as it is — still playing,
+     * same position — and replace everything AFTER it with [tracks]. An empty
+     * list just trims the tail. Nothing loaded → starts [tracks]; an audiobook
+     * or stream is never replaced.
+     */
+    fun replaceUpcoming(tracks: List<TrackSchema>, baseUrl: String) {
+        val music = _currentMusic.value
+        if (_playerKind.value != null && _playerKind.value != PlayerKind.Music) return
+        if (music == null) {
+            if (tracks.isNotEmpty()) {
+                playTracks(tracks, baseUrl, title = "DJ Queue", albumLookup = emptyMap())
+            }
+            return
+        }
+        val keep = (music.currentIndex + 1).coerceIn(0, music.items.size)
+        val newItems = tracks.map { toDjQueueItem(it) }
+        val oldSize = music.items.size
+        _currentMusic.value = music.copy(items = replaceTail(music.items, music.currentIndex, newItems))
+        ensureController { ctrl ->
+            if (keep < oldSize) ctrl.removeMediaItems(keep, oldSize)
+            if (newItems.isNotEmpty()) ctrl.addMediaItems(newItems.map { buildMusicMediaItem(it) })
         }
     }
 
