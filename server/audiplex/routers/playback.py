@@ -24,6 +24,7 @@ Endpoints:
   GET  /api/playback/tracks/{id}/identity   — recording + work keys for a track
   GET  /api/playback/cooldown               — what the owner heard recently
   POST /api/playback/candidates/filter      — advisory: which picks repeat, and why
+  POST /api/playback/mix/plan               — dj_mix: trim, dedupe, shuffle the queue tail
 
 All require a valid Bearer token (get_current_user). v1 is single-device, so
 the bus is global: agent and device share one queue + one state regardless of
@@ -44,6 +45,8 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, selectinload
 
 from audiplex import taste
+from audiplex.identity import build_identity_map
+from audiplex.mix import plan_mix, plan_summary
 from audiplex.auth import get_current_user
 from audiplex.config import get_settings
 from audiplex.database import get_db
@@ -63,6 +66,8 @@ from audiplex.schemas import (
     CandidateFilterResult,
     ClientLogEntry,
     CooldownStateSchema,
+    MixPlanRequest,
+    MixPlanResult,
     RecentPlaySchema,
     RecordingStatsSchema,
     SuppressionSchema,
@@ -514,4 +519,41 @@ def filter_owner_candidates(
         ],
         recording_cooldown_minutes=verdict.recording_cooldown_minutes,
         work_cooldown_minutes=verdict.work_cooldown_minutes,
+    )
+
+
+@router.post("/mix/plan", response_model=MixPlanResult)
+def plan_owner_mix(
+    body: MixPlanRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Plan the queue tail for a dj_mix add — Todd's standing order (#2842).
+
+    Pure planning: queues nothing. Dedupes on RECORDING identity so the same
+    file in two folders is one entry, and counts as played both what the phone
+    already got through this set (body.played_ids) and anything the owner heard
+    inside the recording cooldown window, so a mix built after a restart still
+    doesn't open with the song that just ended.
+    """
+    identities = build_identity_map(db)
+    recording_minutes, _ = _cooldown_settings(None, None)
+    owner = _resolve_owner(db)
+    recent = taste.recent_plays_for(db, owner.id, recording_minutes, identities)
+    plan = plan_mix(
+        body.current_id,
+        list(body.played_ids) + [p.track_id for p in recent],
+        body.upcoming_ids,
+        body.new_ids,
+        {track_id: ident.recording_id for track_id, ident in identities.items()},
+        shuffle=body.shuffle,
+        seed=body.seed,
+    )
+    return MixPlanResult(
+        upcoming=plan.upcoming,
+        kept_from_queue=plan.kept_from_queue,
+        added=plan.added,
+        trimmed_played=plan.trimmed_played,
+        trimmed_duplicates=plan.trimmed_duplicates,
+        summary=plan_summary(plan),
     )

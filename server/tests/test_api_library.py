@@ -208,6 +208,17 @@ class TestSeries:
 class TestMusicOnlyScan:
     """#2947 — the narrow rescan the DJ service account may fire itself."""
 
+    @pytest.fixture(autouse=True)
+    def _empty_music_root(self, tmp_path, monkeypatch):
+        """Scan a temp dir, never the real config.yaml roots. Without this the
+        test walked Todd's actual library — ~74k files once E:\Stacked Deck\Music
+        became a root (#2842) — and hung the suite."""
+        from audiplex.config import LibraryRoot, Settings
+        from audiplex.routers import library
+
+        settings = Settings(library_roots=[LibraryRoot(path=str(tmp_path), category="music")])
+        monkeypatch.setattr(library, "get_settings", lambda: settings)
+
     def test_music_scan_returns_scan_result(self, client):
         r = client.post("/api/library/scan/music")
         assert r.status_code == 200

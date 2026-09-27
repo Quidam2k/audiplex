@@ -63,6 +63,7 @@ safe to extend to other stream-carrying commands.
 import asyncio
 import contextlib
 import datetime
+import json
 import os
 import re
 import shutil
@@ -694,6 +695,59 @@ def _best_match(items: list[dict], name_key: str, q: str) -> dict | None:
 _MODE_CMD = {"now": "play_now", "queue": "queue", "next": "play_next"}
 
 
+async def _resolve_source(kind: str, query: str) -> tuple[str, list[dict]]:
+    """Resolve one (kind, query) to (label, tracks) over the catalog API.
+
+    Shared by dj_queue_by and dj_mix. Raises LookupError with a sayable
+    message when nothing matches, PermissionError on a 401.
+    """
+    if kind == "artist":
+        artists = await _get("/api/music/artists")
+        m = _best_match(artists, "name", query)
+        if not m:
+            raise LookupError(f"No artist matching '{query}'.")
+        label = f"artist '{m['name']}'"
+        tracks = await _get(f"/api/music/artists/{m['id']}/tracks")
+    elif kind == "album":
+        albums = await _get("/api/music/albums")
+        m = _best_match(albums, "title", query)
+        if not m:
+            raise LookupError(f"No album matching '{query}'.")
+        artist = m.get("artist_name")
+        label = f"album '{m['title']}'" + (f" by {artist}" if artist else "")
+        detail = await _get(f"/api/music/albums/{m['id']}")
+        tracks = detail.get("tracks", [])
+    elif kind == "genre":
+        genres = await _get("/api/music/genres")
+        m = _best_match(genres, "name", query)
+        if not m:
+            raise LookupError(f"No genre matching '{query}'.")
+        label = f"genre '{m['name']}'"
+        tracks = await _get(f"/api/music/genres/{quote(m['name'], safe='')}/tracks")
+    elif kind == "playlist":
+        playlists = await _get("/api/playback/playlists")
+        m = _best_match(playlists, "name", query)
+        if not m:
+            raise LookupError(f"No playlist matching '{query}'.")
+        label = f"playlist '{m['name']}'"
+        detail = await _get(f"/api/playback/playlists/{m['id']}")
+        tracks = detail.get("tracks", [])
+    elif kind == "folder":
+        tracks = await _get(f"/api/music/folders/tracks?path={quote(query, safe='')}")
+        label = f"folder '{query}'"
+    elif kind == "favorites":
+        favorites = await _get("/api/playback/favorites?entity_type=track")
+        label = "favorite tracks"
+        track_ids_str = [f["entity_key"] for f in favorites]
+        tracks = [{"id": int(tid)} for tid in track_ids_str if tid.isdigit()]
+    else:
+        raise LookupError(
+            f"Unknown kind '{kind}'. Use 'artist', 'album', 'genre', "
+            "'folder', 'playlist', or 'favorites'."
+        )
+    return label, tracks
+
+
 @mcp.tool()
 async def dj_queue_by(
     query: str,
@@ -722,51 +776,8 @@ async def dj_queue_by(
     if cmd_type is None:
         return f"Unknown mode '{mode}'. Use 'now', 'queue', or 'next'."
     try:
-        if kind == "artist":
-            artists = await _get("/api/music/artists")
-            m = _best_match(artists, "name", query)
-            if not m:
-                return f"No artist matching '{query}'."
-            label = f"artist '{m['name']}'"
-            tracks = await _get(f"/api/music/artists/{m['id']}/tracks")
-        elif kind == "album":
-            albums = await _get("/api/music/albums")
-            m = _best_match(albums, "title", query)
-            if not m:
-                return f"No album matching '{query}'."
-            artist = m.get("artist_name")
-            label = f"album '{m['title']}'" + (f" by {artist}" if artist else "")
-            detail = await _get(f"/api/music/albums/{m['id']}")
-            tracks = detail.get("tracks", [])
-        elif kind == "genre":
-            genres = await _get("/api/music/genres")
-            m = _best_match(genres, "name", query)
-            if not m:
-                return f"No genre matching '{query}'."
-            label = f"genre '{m['name']}'"
-            tracks = await _get(f"/api/music/genres/{quote(m['name'], safe='')}/tracks")
-        elif kind == "playlist":
-            playlists = await _get("/api/playback/playlists")
-            m = _best_match(playlists, "name", query)
-            if not m:
-                return f"No playlist matching '{query}'."
-            label = f"playlist '{m['name']}'"
-            detail = await _get(f"/api/playback/playlists/{m['id']}")
-            tracks = detail.get("tracks", [])
-        elif kind == "folder":
-            tracks = await _get(f"/api/music/folders/tracks?path={quote(query, safe='')}")
-            label = f"folder '{query}'"
-        elif kind == "favorites":
-            favorites = await _get("/api/playback/favorites?entity_type=track")
-            label = "favorite tracks"
-            track_ids_str = [f["entity_key"] for f in favorites]
-            tracks = [{"id": int(tid)} for tid in track_ids_str if tid.isdigit()]
-        else:
-            return (
-                f"Unknown kind '{kind}'. Use 'artist', 'album', 'genre', "
-                "'folder', 'playlist', or 'favorites'."
-            )
-    except PermissionError as e:
+        label, tracks = await _resolve_source(kind, query)
+    except (PermissionError, LookupError) as e:
         return str(e)
 
     track_ids = [t["id"] for t in tracks][: max(0, limit)]
@@ -781,6 +792,131 @@ async def dj_queue_by(
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
     )
 
+
+
+async def _await_ack(command_id: int, timeout: float = 12.0) -> dict | None:
+    """The registry row for one command once the device acks it, else None."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            for row in await _get("/api/playback/commands"):
+                if row.get("id") == command_id and row.get("ack_status"):
+                    return row
+        except Exception:
+            pass
+        await asyncio.sleep(1.0)
+    return None
+
+
+@mcp.tool()
+async def dj_mix(
+    sources: list[dict] | None = None,
+    track_ids: list[int] | None = None,
+    track_ids_file: str = "",
+    shuffle: bool = True,
+    seed: int | None = None,
+) -> str:
+    """Build or extend a shuffled mix from several sources — Todd's standing order.
+
+    On every add: trim what already played, dedupe across folders (same
+    recording = one entry), reshuffle everything still to come, and NEVER
+    interrupt the current song — the new mix is queued after it.
+
+    sources:        [{"kind": "folder", "query": "<path>"}, {"kind": "artist",
+                    "query": "Heart"}, ...] — same kinds as dj_queue_by.
+    track_ids:      explicit Audiplex track ids to add as well.
+    track_ids_file: path to a JSON list of track ids (e.g. a saved shuffle).
+    shuffle:        reshuffle the whole upcoming tail (default True).
+    seed:           make the shuffle repeatable.
+
+    Nothing loaded on the phone → starts the mix with play_now. A live stream
+    playing → refuses (a stream has no queue to add after).
+    """
+    new_ids: list[int] = list(track_ids or [])
+    labels: list[str] = []
+    try:
+        for src in sources or []:
+            label, tracks = await _resolve_source(
+                str(src.get("kind", "folder")), str(src.get("query", ""))
+            )
+            labels.append(f"{label} ({len(tracks)})")
+            new_ids.extend(int(t["id"]) for t in tracks)
+    except (PermissionError, LookupError) as e:
+        return str(e)
+    if track_ids_file:
+        try:
+            loaded = json.loads(Path(track_ids_file).read_text(encoding="utf-8"))
+            new_ids.extend(int(i) for i in loaded)
+            labels.append(f"{Path(track_ids_file).name} ({len(loaded)})")
+        except (OSError, ValueError, TypeError) as e:
+            return f"Couldn't read track_ids_file: {e}"
+    if track_ids:
+        labels.append(f"{len(track_ids)} explicit id(s)")
+    if not new_ids:
+        return "Nothing to mix: no sources, track_ids or track_ids_file resolved to tracks."
+
+    try:
+        state = await _get("/api/playback/state")
+    except PermissionError as e:
+        return str(e)
+    track = state.get("track") or {}
+    if track.get("id") == -1:
+        return "A live stream is playing; dj_mix works on the music queue. Nothing sent."
+    # "Loaded" is judged on the raw queue: a DJ voice break (negative id) is
+    # still the current item and must not be interrupted by a play_now.
+    raw_queue = state.get("queue") or []
+    loaded_now = track.get("id") is not None and bool(raw_queue)
+    queue = [q for q in raw_queue if (q.get("id") or 0) > 0]
+    idx = state.get("queue_index") or 0
+    body = {"new_ids": new_ids, "shuffle": shuffle, "seed": seed}
+    if loaded_now:
+        body |= {
+            "current_id": track["id"],
+            "played_ids": [q["id"] for q in queue if q.get("index", 0) < idx],
+            "upcoming_ids": [q["id"] for q in queue if q.get("index", 0) > idx],
+        }
+    try:
+        plan = await _post("/api/playback/mix/plan", body)
+    except PermissionError as e:
+        return str(e)
+    upcoming = plan.get("upcoming") or []
+    head = f"Mix from {', '.join(labels)}: {plan.get('summary')}."
+
+    if not loaded_now:
+        if not upcoming:
+            return head + " Nothing left to play."
+        data = await _enqueue("play_now", {"track_ids": upcoming})
+        if isinstance(data, str):
+            return data
+        return head + f" Nothing was loaded, so it starts now (command #{data.get('id')})."
+
+    data = await _enqueue("replace_upcoming", {"track_ids": upcoming})
+    if isinstance(data, str):
+        return data
+    ack = await _await_ack(int(data["id"]))
+    if ack is None:
+        return head + (
+            f" Sent replace_upcoming (command #{data['id']}) after the current song;"
+            " no ack yet — check dj_command_status."
+        )
+    if ack.get("ack_status") == "ok":
+        return head + f" Queued after the current song (command #{data['id']})."
+    if ack.get("ack_status") != "unknown_type":
+        return head + f" The phone refused it: {ack.get('ack_status')} {ack.get('ack_detail') or ''}".rstrip()
+
+    # Older phone build without replace_upcoming: it can only append, so send
+    # just the new tracks that survived trimming. The old tail stays as it was.
+    old_tail = set(body.get("upcoming_ids") or [])
+    fresh = [i for i in upcoming if i not in old_tail]
+    if not fresh:
+        return head + " (Old phone build: can't reshuffle the tail, and nothing new survived.)"
+    data = await _enqueue("queue", {"track_ids": fresh})
+    if isinstance(data, str):
+        return data
+    return head + (
+        f" Old phone build can't reshuffle the queue, so appended the {len(fresh)}"
+        f" new track(s) to the end instead (command #{data.get('id')})."
+    )
 
 def _describe_age(seconds: float | None) -> str:
     if seconds is None:

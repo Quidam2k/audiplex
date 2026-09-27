@@ -426,6 +426,37 @@ class TestOwnerScopedTasteReads:
         # DJ nothing and leaves Todd wondering.
         assert data["suppressed"][0]["title"] == "Barracuda"
 
+    def test_mix_plan_dedupes_across_folders_and_spares_current(
+        self, dj_agent_client, db_session
+    ):
+        """#2842: same bytes in two folders is one entry; the current song and
+        anything the owner just heard never come back in the queue tail."""
+        owner = self._owner(db_session)
+        current = _add_track(db_session, "Heart", "Barracuda", 260.0)
+        copy_a = _add_track(db_session, "Heart", "Alone", 220.0, file_hash="h1")
+        copy_b = _add_track(
+            db_session, "Heart", "Alone", 220.0, file_hash="h1", album="Other Folder"
+        )
+        heard = _add_track(db_session, "Heart", "Magic Man", 330.0)
+        fresh = _add_track(db_session, "Heart", "Crazy On You", 290.0)
+        _play(db_session, owner.id, heard.id, "complete", 330.0, minutes_ago=3)
+
+        resp = dj_agent_client.post(
+            "/api/playback/mix/plan",
+            json={
+                "current_id": current.id,
+                "upcoming_ids": [copy_a.id, current.id],
+                "new_ids": [copy_b.id, heard.id, fresh.id],
+                "shuffle": False,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["upcoming"] == [copy_a.id, fresh.id]
+        assert data["trimmed_duplicates"] == [copy_b.id]
+        assert set(data["trimmed_played"]) == {current.id, heard.id}
+        assert data["kept_from_queue"] == 1 and data["added"] == 1
+
     def test_the_window_is_tunable_per_request(self, dj_agent_client, db_session):
         owner = self._owner(db_session)
         track = _add_track(db_session, "Heart", "Barracuda", 260.0)

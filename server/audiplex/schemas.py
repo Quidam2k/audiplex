@@ -305,6 +305,28 @@ class CandidateFilterResult(BaseModel):
     work_cooldown_minutes: float
 
 
+class MixPlanRequest(BaseModel):
+    """What the phone is doing now, plus the tracks a dj_mix call adds (#2842)."""
+
+    current_id: int | None = None
+    played_ids: list[int] = []
+    upcoming_ids: list[int] = []
+    new_ids: list[int] = []
+    shuffle: bool = True
+    seed: int | None = None
+
+
+class MixPlanResult(BaseModel):
+    """The new tail of the queue — everything AFTER the current track."""
+
+    upcoming: list[int]
+    kept_from_queue: int
+    added: int
+    trimmed_played: list[int]
+    trimmed_duplicates: list[int]
+    summary: str
+
+
 # ----- DJ playback command bus (remote control) -----
 
 
