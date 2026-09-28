@@ -17,8 +17,9 @@ Config:
   DJ_TTS_API_KEY  optional bearer token
 
   DJ_TTS_CMD      escape hatch: a shell command template containing {text}
-                  and {out} placeholders, e.g.
-                  'my-tts --say {text} --out {out}'. Used only when
+                  and {out} placeholders (and optionally {voice}, filled from
+                  DJ_TTS_VOICE), e.g.
+                  'my-tts --voice {voice} --say {text} --out {out}'. Used only when
                   DJ_TTS_URL is unset. Deliberately generic — it is NOT
                   wired to any particular project's synthesizer.
 
@@ -114,14 +115,22 @@ async def _synth_http(text: str, out_path: Path) -> Path:
     return out_path
 
 
+def _unquote(part: str) -> str:
+    if len(part) >= 2 and part[0] == part[-1] and part[0] in "\"'":
+        return part[1:-1]
+    return part
+
+
 def _synth_cmd(text: str, out_path: Path) -> Path:
     template = os.environ["DJ_TTS_CMD"]
     if "{out}" not in template:
         raise TtsNotConfigured("DJ_TTS_CMD must contain an {out} placeholder")
     # Substitute after splitting so text containing spaces/quotes stays one argv
     # entry instead of being re-parsed as extra arguments.
+    # posix=False keeps quote characters, so strip a surrounding pair: a quoted
+    # exe path ("C:/Program Files/.../python.exe") must reach CreateProcess bare.
     argv = [
-        part.replace("{text}", text).replace("{out}", str(out_path))
+        _unquote(part).replace("{text}", text).replace("{out}", str(out_path)).replace("{voice}", voice())
         for part in shlex.split(template, posix=False)
     ]
     try:
