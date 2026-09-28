@@ -2877,6 +2877,12 @@ async def dj_ingest(
     return "\n".join(lines)
 
 
+# #5448: dj_fetch_from_playlists lives in its own module (server runs as __main__).
+from audiplex_mcp import playlist_fetch  # noqa: E402  #5448
+
+playlist_fetch.register(mcp, globals())  # #5448
+
+
 def main() -> None:
     mcp.run()
 
