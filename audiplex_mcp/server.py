@@ -1013,10 +1013,20 @@ async def _resolve_source(kind: str, query: str, recursive: bool = True) -> tupl
         label = "favorite tracks"
         track_ids_str = [f["entity_key"] for f in favorites]
         tracks = [{"id": int(tid)} for tid in track_ids_str if tid.isdigit()]
+    elif kind == "bucket":  # #5518: a themed bucket (audiplex_mcp/buckets.py) as a source
+        from audiplex_mcp import buckets  # #5518
+        try:  # #5518
+            b = buckets.find_bucket(query)  # #5518
+        except ValueError as e:  # #5518: ambiguous name
+            raise LookupError(str(e)) from None  # #5518
+        if not b:  # #5518
+            raise LookupError(f"No bucket matching '{query}'.")  # #5518
+        label = f"bucket '{b['name']}'"  # #5518
+        tracks = [{"id": t["track_id"], "path": t["path"]} for t in b["tracks"]]  # #5518
     else:
         raise LookupError(
             f"Unknown kind '{kind}'. Use 'artist', 'album', 'genre', "
-            "'folder', 'folder_match', 'playlist', or 'favorites'."  # #5473
+            "'folder', 'folder_match', 'playlist', 'favorites', or 'bucket'."  # #5473 #5518
         )
     return label, tracks
 
@@ -3414,6 +3424,10 @@ async def dj_spec_show(spec: str) -> str:
 from audiplex_mcp import playlist_fetch  # noqa: E402  #5448
 
 playlist_fetch.register(mcp, globals())  # #5448
+
+from audiplex_mcp import bucket_tools  # noqa: E402  #5518: themed music buckets
+
+bucket_tools.register(mcp, globals())  # #5518
 
 
 def main() -> None:
