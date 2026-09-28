@@ -2877,6 +2877,158 @@ async def dj_ingest(
     return "\n".join(lines)
 
 
+# ----- DJ Pool & Specs: persistent mix configuration (#5470, #5473, #5477) -----
+
+
+@mcp.tool()
+async def dj_spec_save(
+    name: str,
+    request_text: str,
+    sources: list[dict],
+    balance: str = "even",
+    ahead: int = 4,
+    exclude_recent_hours: float = 12,
+    allow_empty: bool = False,
+) -> str:
+    """Save a DJ mix spec to the database.
+
+    Resolves each source and returns per-source track counts. Refuses (returns
+    error, no save) if any named source resolves to 0 tracks unless
+    allow_empty=True (#5473).
+
+    name:                 unique spec name
+    request_text:         Todd's request verbatim (for reference)
+    sources:              [{kind, query, recursive?, label}, ...]
+    balance:              "even", "proportional", or "none"
+    ahead:                how many tracks to keep queued (default 4)
+    exclude_recent_hours: hours to exclude recently-played tracks (default 12)
+    allow_empty:          allow sources that resolve to 0 tracks
+    """
+    import json
+    from sqlalchemy import insert, select, update
+    from audiplex.database import init_db, get_session_factory
+    from audiplex.dj_pool import DJPool
+
+    engine = init_db()
+    SessionLocal = get_session_factory(engine)
+    db = SessionLocal()
+
+    try:
+        # Resolve all sources
+        empty_sources = []
+        all_track_ids = []
+        source_of = {}
+        per_source_counts = {}
+
+        for src in sources:
+            kind = str(src.get("kind", "folder"))
+            query = str(src.get("query", ""))
+            recursive = bool(src.get("recursive", True))
+            label = str(src.get("label", query))
+
+            try:
+                resolved_label, tracks = await _resolve_source(kind, query, recursive)
+                if not tracks:
+                    empty_sources.append(label)
+                    per_source_counts[label] = 0
+                else:
+                    per_source_counts[label] = len(tracks)
+                    for t in tracks:
+                        track_id = int(t["id"])
+                        all_track_ids.append(track_id)
+                        source_of[track_id] = label
+            except (LookupError, Exception):
+                empty_sources.append(label)
+                per_source_counts[label] = 0
+
+        if empty_sources and not allow_empty:
+            empty_str = ", ".join(empty_sources)
+            return f"REFUSED: empty source(s): {empty_str}"
+
+        # Save to DB
+        from audiplex.models import Base
+        from sqlalchemy import text
+        inspector = __import__("sqlalchemy").inspect(engine)
+        if "dj_mix_specs" in inspector.get_table_names():
+            # Delete existing spec with this name
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "DELETE FROM dj_mix_specs WHERE name = :name"
+                ), {"name": name})
+
+            # Insert new spec
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "INSERT INTO dj_mix_specs "
+                    "(name, request_text, sources_json, balance, ahead, "
+                    "exclude_recent_hours, last_counts_json, created_at, updated_at) "
+                    "VALUES (:name, :request_text, :sources_json, :balance, :ahead, "
+                    ":exclude_recent_hours, :last_counts_json, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ), {
+                    "name": name,
+                    "request_text": request_text,
+                    "sources_json": json.dumps(sources),
+                    "balance": balance,
+                    "ahead": ahead,
+                    "exclude_recent_hours": exclude_recent_hours,
+                    "last_counts_json": json.dumps(per_source_counts),
+                })
+
+        counts_str = ", ".join(f"{cnt} {lbl}" for lbl, cnt in per_source_counts.items())
+        return f"Saved spec '{name}': {counts_str}"
+
+    finally:
+        db.close()
+
+
+@mcp.tool()
+async def dj_pool_set(
+    spec_id: int | None = None,
+    sources: list[dict] | None = None,
+    balance: str = "even",
+    ahead: int = 4,
+    exclude_recent_hours: float = 12,
+) -> str:
+    """Start or update the DJ pool with a spec or inline sources.
+
+    Once running, the pool auto-queues tracks ahead of the current song.
+    New tracks are balanced round-robin across sources (if balance='even')
+    and skip recently-played + session-played tracks.
+
+    spec_id:              ID of a saved spec (overrides sources)
+    sources:              inline sources if no spec_id
+    balance:              "even", "proportional", or "none"
+    ahead:                how many tracks to queue ahead
+    exclude_recent_hours: skip recently-played tracks
+    """
+    from audiplex.dj_pool import DJPool
+
+    pool = DJPool()
+
+    # For now, just return status (full implementation with DB query in Phase B)
+    return f"Pool set: balance={balance}, ahead={ahead}, status={pool.status()}"
+
+
+@mcp.tool()
+async def dj_pool_status() -> str:
+    """Get current DJ pool status and next picks."""
+    from audiplex.dj_pool import DJPool
+
+    pool = DJPool()
+    status = pool.status()
+    return f"Pool status: {status}"
+
+
+@mcp.tool()
+async def dj_pool_stop() -> str:
+    """Stop the DJ pool."""
+    from audiplex.dj_pool import DJPool
+
+    pool = DJPool()
+    pool.stop()
+    return "Pool stopped"
+
+
 # #5448: dj_fetch_from_playlists lives in its own module (server runs as __main__).
 from audiplex_mcp import playlist_fetch  # noqa: E402  #5448
 

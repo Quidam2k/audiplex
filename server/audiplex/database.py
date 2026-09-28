@@ -247,6 +247,36 @@ def _migrate_create_track_tag_repairs(engine):
         ))
 
 
+def _migrate_create_dj_mix_specs(engine):
+    """Create the DJ mix spec table (#5470/#5473/#5477).
+
+    Stores named mix specifications: sources, balance, ahead depth, and
+    cue list (patter + track injections at specific points).
+    """
+    inspector = inspect(engine)
+    if "dj_mix_specs" in inspector.get_table_names():
+        return
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE dj_mix_specs ("
+            "  id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,"
+            "  name VARCHAR(100) NOT NULL UNIQUE,"
+            "  request_text TEXT,"
+            "  sources_json TEXT NOT NULL,"
+            "  balance VARCHAR(20) NOT NULL DEFAULT 'even',"
+            "  ahead INTEGER NOT NULL DEFAULT 4,"
+            "  exclude_recent_hours REAL NOT NULL DEFAULT 12,"
+            "  notes_json TEXT,"
+            "  last_counts_json TEXT,"
+            "  created_at TIMESTAMP,"
+            "  updated_at TIMESTAMP"
+            ")"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_dj_mix_specs_name ON dj_mix_specs (name)"
+        ))
+
+
 def init_db(database_url: str | None = None):
     """Initialize the database engine and session factory.
 
@@ -267,6 +297,7 @@ def init_db(database_url: str | None = None):
     _migrate_playback_positions_constraint(_engine)
     _migrate_favorites_constraint(_engine)
     _migrate_create_track_tag_repairs(_engine)
+    _migrate_create_dj_mix_specs(_engine)
     Base.metadata.create_all(bind=_engine)
     return _engine
 

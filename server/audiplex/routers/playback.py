@@ -601,3 +601,44 @@ def playable_tracks(
         else:
             missing.append(i)
     return PlayableResult(playable=playable, missing=missing)
+
+
+# ----- DJ Pool: persistent mix state (#5470, #5473, #5477) -----
+
+
+@router.get("/pool", tags=["dj_pool"])
+def get_pool_status(user: User = Depends(get_current_user)):
+    """Get current DJ pool status."""
+    from audiplex.dj_pool import DJPool
+    pool = DJPool()
+    return pool.status()
+
+
+@router.post("/pool", tags=["dj_pool"])
+def set_pool(
+    body: dict,
+    user: User = Depends(get_current_user),
+):
+    """Set/start DJ pool with spec or sources."""
+    from audiplex.dj_pool import DJPool
+    pool = DJPool()
+    spec_id = body.get("spec_id")
+    track_ids = body.get("track_ids", [])
+    source_labels = body.get("source_labels", {})
+    balance = body.get("balance", "even")
+    ahead = body.get("ahead", 4)
+    exclude_recent_hours = body.get("exclude_recent_hours", 12)
+    return pool.set_pool(
+        spec_id, track_ids, source_labels,
+        balance=balance, ahead=ahead,
+        exclude_recent_hours=exclude_recent_hours
+    )
+
+
+@router.delete("/pool", tags=["dj_pool"])
+def stop_pool(user: User = Depends(get_current_user)):
+    """Stop DJ pool."""
+    from audiplex.dj_pool import DJPool
+    pool = DJPool()
+    pool.stop()
+    return {"status": "stopped"}
