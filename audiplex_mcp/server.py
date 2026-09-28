@@ -924,7 +924,33 @@ def _best_match(items: list[dict], name_key: str, q: str) -> dict | None:
 _MODE_CMD = {"now": "play_now", "queue": "queue", "next": "play_next"}
 
 
-async def _resolve_source(kind: str, query: str) -> tuple[str, list[dict]]:
+async def _match_folders(query: str, max_depth: int = 8) -> list[str]:  # #5473
+    """Topmost indexed folders whose path contains `query` (case-insensitive).
+
+    Walks the folder tree from the music roots; a match's subfolders are not
+    listed separately (the recursive folder read already includes them).
+    """
+    ql = query.strip().lower().replace("\\", "/")
+    found: list[str] = []
+    frontier = [n["path"] for n in (await _get("/api/music/folders")).get("folders") or []]
+    for _ in range(max_depth):
+        nxt: list[str] = []
+        for path in frontier:
+            if ql and ql in path.lower():
+                found.append(path)
+                continue
+            try:
+                listing = await _get(f"/api/music/folders?path={quote(path, safe='')}")
+            except httpx.HTTPStatusError:
+                continue
+            nxt.extend(n["path"] for n in listing.get("folders") or [])
+        if not nxt:
+            break
+        frontier = nxt
+    return found
+
+
+async def _resolve_source(kind: str, query: str, recursive: bool = True) -> tuple[str, list[dict]]:
     """Resolve one (kind, query) to (label, tracks) over the catalog API.
 
     Shared by dj_queue_by and dj_mix. Raises LookupError with a sayable
@@ -961,9 +987,27 @@ async def _resolve_source(kind: str, query: str) -> tuple[str, list[dict]]:
         label = f"playlist '{m['name']}'"
         detail = await _get(f"/api/playback/playlists/{m['id']}")
         tracks = detail.get("tracks", [])
+    elif kind == "folder" and not recursive:  # #5473: loose files only, no subfolders
+        try:
+            listing = await _get(f"/api/music/folders?path={quote(query, safe='')}")
+        except httpx.HTTPStatusError:
+            listing = {}
+        tracks = []
+        for album in listing.get("albums") or []:
+            tracks.extend((await _get(f"/api/music/albums/{album['id']}")).get("tracks", []))
+        label = f"loose files in '{query}'"
     elif kind == "folder":
         tracks = await _get(f"/api/music/folders/tracks?path={quote(query, safe='')}")
         label = f"folder '{query}'"
+    elif kind == "folder_match":  # #5473: every indexed folder whose path contains query
+        paths = await _match_folders(query)
+        tracks, seen = [], set()
+        for path in paths:
+            for t in await _get(f"/api/music/folders/tracks?path={quote(path, safe='')}"):
+                if t["id"] not in seen:
+                    seen.add(t["id"])
+                    tracks.append(t)
+        label = f"folders matching '{query}' ({len(paths)} folder(s))"
     elif kind == "favorites":
         favorites = await _get("/api/playback/favorites?entity_type=track")
         label = "favorite tracks"
@@ -972,7 +1016,7 @@ async def _resolve_source(kind: str, query: str) -> tuple[str, list[dict]]:
     else:
         raise LookupError(
             f"Unknown kind '{kind}'. Use 'artist', 'album', 'genre', "
-            "'folder', 'playlist', or 'favorites'."
+            "'folder', 'folder_match', 'playlist', or 'favorites'."  # #5473
         )
     return label, tracks
 
@@ -1190,6 +1234,7 @@ async def dj_mix(
     seed: int | None = None,
     balance: str = "even",
     exclude_recent_hours: float = 12,
+    allow_empty: bool = False,
 ) -> str:
     """Build or extend a shuffled mix from several sources — Todd's standing order.
 
@@ -1215,6 +1260,12 @@ async def dj_mix(
                     spread evenly by pool size (~80/20 for those two).
                     "none" = one-pot shuffle. Tracks already queued keep their
                     source; unknown ones count as one "already queued" source.
+    allow_empty:    by default a named source that resolves to 0 tracks makes
+                    the whole call REFUSE (nothing sent), naming the empty
+                    source (#5473: faster/slower silently missing on a ride).
+                    Sources may also carry "recursive": false (loose files in
+                    that folder only) or use kind "folder_match" (every indexed
+                    folder whose path contains the query).
     exclude_recent_hours: drop tracks Todd heard in the last N hours
                     (default 12; 0 = off). Explicit dj_play_now/dj_queue never
                     filter — a song asked for by name plays.
@@ -1231,12 +1282,21 @@ async def dj_mix(
     new_ids: list[int] = list(track_ids or [])
     labels: list[str] = []
     source_of = _load_source_map()  # #5463
+    empty: list[str] = []  # #5473
     try:
         for src in sources or []:
-            label, tracks = await _resolve_source(
-                str(src.get("kind", "folder")), str(src.get("query", ""))
-            )
+            try:
+                label, tracks = await _resolve_source(
+                    str(src.get("kind", "folder")), str(src.get("query", "")),
+                    recursive=bool(src.get("recursive", True)),  # #5473
+                )
+            except LookupError as e:  # #5473: a no-match is an empty source, named
+                label, tracks = f"{src.get('kind', 'folder')} '{src.get('query', '')}' ({e})", []
+            except httpx.HTTPStatusError:  # #5473: unknown folder path
+                label, tracks = f"{src.get('kind', 'folder')} '{src.get('query', '')}'", []
             labels.append(f"{label} ({len(tracks)})")
+            if not tracks:
+                empty.append(label)
             short = _source_label(src)  # #5463
             for t in tracks:
                 new_ids.append(int(t["id"]))
@@ -1256,6 +1316,10 @@ async def dj_mix(
         labels.append(f"{len(track_ids)} explicit id(s)")
         for i in track_ids:  # #5463
             source_of.setdefault(int(i), "requested")
+    if empty and not allow_empty:  # #5473: never report success with a source missing
+        return ("REFUSED, nothing sent: " + "; ".join(f"{e}: 0 tracks" for e in empty)
+                + " (not in the library index, or the name/path is wrong). Per source: "
+                + ", ".join(labels) + ". Fix the source, or pass allow_empty=True to mix without it.")
     if not new_ids:
         return "Nothing to mix: no sources, track_ids or track_ids_file resolved to tracks."
 

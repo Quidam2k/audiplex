@@ -1,0 +1,51 @@
+{
+  "_note": "#5473 seed mix spec. request_text is Todd's words VERBATIM (Pantheon msgs 36454 + 37026). Sources are the first resolution; dj_spec_save validates them (refuses any that resolve to 0 tracks) once Phase B is live. Folder paths are unverified: the H: library index was still being rebuilt on 2026-09-28.",
+  "name": "todd-ride-mix",
+  "request_text": [
+    {
+      "msg_id": 36454,
+      "at": "2026-09-27T20:14:04.044Z",
+      "text": "Alright, so just the watch started talking.  Um, I'm curious to what extent I can say,  Hey, I would like you guys to shuffle together a playlist  that contains the individual tracks, faster folder,  and the slower folder, and all of the Winfair CDs.  Plus, oh you know, honestly, that's, oh, and plus the Todd YouTube Music playlist,  which I think has its own folder.  That's pretty vague, but I'm curious, if I asked you to do that, could you do it?  Someone answer me quickly while someone else is seeing if you can."
+    },
+    {
+      "msg_id": 37026,
+      "at": "2026-09-28T21:13:18.726Z",
+      "text": "Alright, so I'm just skipped forward. Five or six tracks, and I'm pretty sure every single one of them is from one of the old Renfaire CDs. And the mix is supposed to include the slower folder, the faster folder, the Renfaire CDs, everything by Cirque du Soleil. The stack deck is on H Drive, so all of this should be easily available to you. Can you help me understand why you told me you fixed it, but it sounds like you didn't  [recovered from recording] All right, so I've just skipped forward five or six tracks, and I'm pretty sure every single  one of them is from one of the old Renfair CDs.  And the mix is supposed to include the slower folder, the faster folder, the Renfair CDs,  everything by Cirque du Soleil.  The stack deck is on H Drive, so all of this should be easily available to you.  Can you help me understand why you told me you fixed it, but it sounds like you didn't."
+    }
+  ],
+  "balance": "even",
+  "ahead": 4,
+  "sources": [
+    {
+      "kind": "folder",
+      "query": "H:/Stacked Deck/Music",
+      "recursive": false,
+      "label": "individual tracks"
+    },
+    {
+      "kind": "folder_match",
+      "query": "faster",
+      "label": "faster"
+    },
+    {
+      "kind": "folder_match",
+      "query": "slower",
+      "label": "slower"
+    },
+    {
+      "kind": "folder_match",
+      "query": "faire",
+      "label": "Ren Faire CDs"
+    },
+    {
+      "kind": "folder_match",
+      "query": "cirque",
+      "label": "Cirque du Soleil"
+    },
+    {
+      "kind": "folder_match",
+      "query": "youtube",
+      "label": "Todd YouTube Music playlist"
+    }
+  ]
+}

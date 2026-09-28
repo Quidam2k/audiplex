@@ -208,7 +208,7 @@ def phone(monkeypatch, isolated):
     async def fake_ack(command_id, timeout=12.0):
         return {"ack_status": "unknown_type"}
 
-    async def fake_resolve(kind, query):
+    async def fake_resolve(kind, query, recursive=True):
         return query, [{"id": i} for i in (REN if "Ren" in query else YT)]
 
     monkeypatch.setattr(mcp_server, "_get", fake_get)
@@ -278,7 +278,7 @@ def test_one_call_two_sources_is_even_by_default(wire):
     sent, _, calls = wire
     calls["state"] = {"track": None, "queue": [], "queue_index": 0}
 
-    async def fake_resolve(kind, query):
+    async def fake_resolve(kind, query, recursive=True):
         return query, [{"id": i} for i in (REN if query == "Ren" else YT)]
 
     mcp_server._resolve_source, orig = fake_resolve, mcp_server._resolve_source
@@ -287,3 +287,59 @@ def test_one_call_two_sources_is_even_by_default(wire):
     finally:
         mcp_server._resolve_source = orig
     assert _alternates(sent[0][1])
+
+
+# ----- #5473: per-source counts, zero-source refusal, loose files, folder_match -----
+
+TREE = {  # folder listing by path (None = roots)
+    None: {"folders": [{"path": "H:/Deck"}]},
+    "H:/Deck": {"folders": [{"path": "H:/Deck/Ren Faire 1"}, {"path": "H:/Deck/Individual"}],
+                "albums": [{"id": 90}]},
+    "H:/Deck/Individual": {"folders": [{"path": "H:/Deck/Individual/faster"}], "albums": []},
+}
+FOLDER_TRACKS = {"H:/Deck/Ren Faire 1": [1, 2], "H:/Deck/Individual/faster": [], "H:/Deck": [1, 2, 7, 8]}
+
+
+@pytest.fixture
+def library(wire, monkeypatch):
+    sent, posted, calls = wire
+    calls["state"] = {"track": None, "queue": [], "queue_index": 0}
+    base_get = mcp_server._get
+
+    async def fake_get(path):
+        from urllib.parse import unquote
+        if path == "/api/music/folders":
+            return TREE[None]
+        if path.startswith("/api/music/folders?path="):
+            p = unquote(path.split("=", 1)[1])
+            if p not in TREE:
+                raise mcp_server.httpx.HTTPStatusError("404", request=None, response=None)
+            return TREE[p]
+        if path.startswith("/api/music/folders/tracks?path="):
+            return [{"id": i} for i in FOLDER_TRACKS.get(unquote(path.split("=", 1)[1]), [])]
+        if path == "/api/music/albums/90":
+            return {"tracks": [{"id": 7}, {"id": 8}]}
+        return await base_get(path)
+
+    monkeypatch.setattr(mcp_server, "_get", fake_get)
+    return sent
+
+
+def test_zero_track_source_refuses_and_names_it(library):
+    out = run(sources=[{"kind": "folder", "query": "H:/Deck/Ren Faire 1"},
+                       {"kind": "folder", "query": "H:/Deck/Individual/faster"}])
+    assert library == []
+    assert out.startswith("REFUSED") and "faster" in out and "(2)" in out
+
+
+def test_allow_empty_mixes_without_the_empty_source(library):
+    run(sources=[{"kind": "folder", "query": "H:/Deck/Ren Faire 1"},
+                 {"kind": "folder", "query": "H:/Nope"}], allow_empty=True, shuffle=False)
+    assert library == [("play_now", [1, 2])]
+
+
+def test_loose_files_only_and_folder_match(library):
+    out = run(sources=[{"kind": "folder", "query": "H:/Deck", "recursive": False},
+                       {"kind": "folder_match", "query": "ren faire"}], shuffle=False)
+    assert sorted(library[0][1]) == [1, 2, 7, 8]
+    assert "loose files in 'H:/Deck' (2)" in out and "folders matching 'ren faire' (1 folder(s)) (2)" in out
