@@ -535,7 +535,11 @@ class PlaybackBus:
         return out
 
     def set_state(self, state: dict[str, Any], device_id: Optional[str] = None) -> None:
-        self._states[device_id or LEGACY_DEVICE_ID] = (state, time.time())
+        device_key = device_id or LEGACY_DEVICE_ID
+        self._states[device_key] = (state, time.time())
+
+        # Hook: top_up the DJ pool if it's running (#5495, item 1)
+        self._maybe_top_up_pool(state, device_key)
 
     def _renderer_id(self) -> str:
         """The device whose now-playing counts: the live active one, else the phone."""
@@ -584,6 +588,50 @@ class PlaybackBus:
             "effective_target_device_id": self._target_device_id(now),
             "devices": self.devices(),
         }
+
+    def _maybe_top_up_pool(self, state: dict[str, Any], device_key: str) -> None:
+        """Keep the DJ pool `ahead` tracks deep, append-only (#5495 item 1).
+
+        Runs on the renderer's state reports, once per track change: a report
+        for the same current track is the phone repeating itself, and topping
+        up again before it has applied the last "queue" command would double
+        the picks. Paused, a live stream (-1) or a DJ break (<0) never tops up.
+        """
+        try:
+            from audiplex.dj_pool import get_pool
+
+            pool = get_pool()
+            if not pool.is_active() or device_key != self._renderer_id():
+                return
+            track = state.get("track") or {}
+            current = track.get("id") if isinstance(track, dict) else None
+            if current is None or current < 0 or not state.get("playing"):
+                return
+            previous = pool.state.get("last_topup_current_track_id")
+            if current == previous:
+                return  # no track change since the last look
+
+            idx = state.get("queue_index") or 0
+            queue = [q for q in state.get("queue") or [] if isinstance(q, dict)]
+            after = [q.get("id") for q in queue if (q.get("index") or 0) > idx]
+            in_queue = [q.get("id") for q in queue if isinstance(q.get("id"), int)]
+
+            db = _pool_session()
+            try:
+                result = pool.top_up(
+                    current_track_id=current,
+                    upcoming_track_ids=[current] + after,
+                    current_played_track_ids=in_queue,
+                    db=db,
+                    previous_track_id=previous,
+                )
+            finally:
+                if db is not None:
+                    db.close()
+            if result.get("picks"):
+                self._enqueue("queue", {"track_ids": list(result["picks"])})
+        except Exception as e:  # never let the pool break a state report
+            print(f"[dj_pool] top-up skipped: {e}", flush=True)
 
     def add_client_log(self, entry: dict[str, Any]) -> dict[str, Any]:
         """Append a client-shipped log entry. Server clock is authoritative for
@@ -669,4 +717,13 @@ def read_persisted_exits(limit: int = 50) -> list[dict[str, Any]]:
 
 
 # Module-level singleton (single-device v1).
+def _pool_session():
+    """A DB session for the DJ pool top-up hook (#5495; tests monkeypatch this)."""
+    from audiplex import database
+
+    if database._SessionLocal is None:
+        database.init_db()
+    return database._SessionLocal()
+
+
 bus = PlaybackBus()

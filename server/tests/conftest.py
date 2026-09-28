@@ -400,3 +400,31 @@ def isolated_client_logs(tmp_path, monkeypatch):
     monkeypatch.setattr(
         playback_bus, "LINK_LOG_PATH", tmp_path / "link-history.jsonl"
     )
+
+
+@pytest.fixture(autouse=True)
+def isolated_dj_pool(tmp_path, monkeypatch):
+    """Keep the DJ pool singleton off the real dj_pool.json (#5495), and keep
+    the MCP server's DELETE/PATCH helpers from ever reaching a live server:
+    dj_mix / dj_play_now stop the pool over HTTP, and a test that stubs only
+    _get/_post would otherwise send a real DELETE. Tests that care stub these
+    themselves (their monkeypatch runs after this one and wins)."""
+    import sys
+
+    from audiplex import dj_pool
+
+    monkeypatch.setenv("AUDIPLEX_DJ_POOL_STATE", str(tmp_path / "dj_pool.json"))
+    dj_pool.reset_pool_singleton()
+    mcp = sys.modules.get("audiplex_mcp.server")
+    if mcp is not None:
+        async def no_delete(path):
+            return {"stopped": False}
+
+        async def no_patch(path, body):
+            raise AssertionError(f"unstubbed PATCH {path} in a test")
+
+        monkeypatch.setattr(mcp, "_delete", no_delete)
+        if hasattr(mcp, "_patch"):
+            monkeypatch.setattr(mcp, "_patch", no_patch)
+    yield
+    dj_pool.reset_pool_singleton()

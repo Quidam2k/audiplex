@@ -605,45 +605,109 @@ def playable_tracks(
     return PlayableResult(playable=playable, missing=missing)
 
 
-# ----- DJ Pool: persistent mix state (#5470, #5473, #5477) -----
+# ----- DJ Pool: persistent mix state (#5470, #5473, #5477, #5495) -----
+#
+# The pool lives in THIS process (get_pool() singleton) because the bus hook
+# that tops it up runs here. The MCP server is a separate process and must go
+# through these routes; a DJPool() it builds itself never reaches the bus.
+
+
+def _spec_row(db: Session, name: str):
+    from sqlalchemy import text
+
+    return db.execute(
+        text("SELECT id, name, request_text, sources_json, balance, ahead, "
+             "exclude_recent_hours, notes_json FROM dj_mix_specs WHERE name = :name"),
+        {"name": name},
+    ).first()
+
+
+def _spec_cues(db: Session, spec_id) -> list[dict]:
+    """A spec's not-yet-fired cues, ready to become the pool's pending_cues."""
+    from sqlalchemy import text
+
+    if not spec_id:
+        return []
+    row = db.execute(
+        text("SELECT notes_json FROM dj_mix_specs WHERE id = :id"), {"id": spec_id}
+    ).first()
+    notes = json.loads(row[0]) if row and row[0] else []
+    return [
+        {**n, "done": False, "held_boundaries": n.get("held_boundaries", 0)}
+        for n in notes
+        if n.get("status", "pending") == "pending"
+    ]
 
 
 @router.get("/pool", tags=["dj_pool"])
 def get_pool_status(user: User = Depends(get_current_user)):
-    """Get current DJ pool status."""
-    from audiplex.dj_pool import DJPool
-    pool = DJPool()
-    return pool.status()
+    """Current DJ pool status: per-lane details, pending cues."""
+    from audiplex.dj_pool import get_pool
+
+    return get_pool().status()
 
 
 @router.post("/pool", tags=["dj_pool"])
 def set_pool(
     body: dict,
+    db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Set/start DJ pool with spec or sources."""
-    from audiplex.dj_pool import DJPool
-    pool = DJPool()
+    """Start (or replace) the DJ pool.
+
+    body: {spec_id?, lanes: {label: [track_ids]}, balance, ahead,
+           exclude_recent_hours, starvation_config?, prime_current_id?}
+    Legacy body {track_ids, source_labels} still works (one "default" lane).
+    Lanes are resolved by the caller; a zero-track lane is kept, marked
+    zero_on_resolve and exhausted. With spec_id, the spec's pending cues load.
+    prime_current_id (the track playing now, 0 if nothing is loaded) runs one
+    top-up immediately and returns its picks as initial_picks, so the caller
+    can replace the upcoming queue once; after that the bus hook appends.
+    """
+    from audiplex.dj_pool import get_pool, lanes_from_ids
+
+    pool = get_pool()
     spec_id = body.get("spec_id")
-    track_ids = body.get("track_ids", [])
-    source_labels = body.get("source_labels", {})
     balance = body.get("balance", "even")
-    ahead = body.get("ahead", 4)
+    ahead = int(body.get("ahead", 4))
     exclude_recent_hours = body.get("exclude_recent_hours", 12)
-    return pool.set_pool(
-        spec_id, track_ids, source_labels,
-        balance=balance, ahead=ahead,
-        exclude_recent_hours=exclude_recent_hours
-    )
+    raw_lanes = body.get("lanes")
+    if raw_lanes:
+        lanes = {str(label): [int(t) for t in ids] for label, ids in raw_lanes.items()}
+        track_ids = [t for ids in lanes.values() for t in ids]
+        source_labels = {t: label for label, ids in lanes.items() for t in ids}
+        result = pool.set_pool(
+            spec_id, track_ids, source_labels, lanes=lanes_from_ids(lanes),
+            balance=balance, ahead=ahead, exclude_recent_hours=exclude_recent_hours,
+        )
+    else:
+        result = pool.set_pool(
+            spec_id, body.get("track_ids", []), body.get("source_labels", {}),
+            balance=balance, ahead=ahead, exclude_recent_hours=exclude_recent_hours,
+        )
+    if isinstance(body.get("starvation_config"), dict):
+        pool.state["starvation_config"].update(body["starvation_config"])
+    pool.state["pending_cues"] = _spec_cues(db, spec_id)
+    pool._persist()
+
+    prime = body.get("prime_current_id")
+    if prime is not None:
+        top = pool.top_up(
+            current_track_id=int(prime),
+            upcoming_track_ids=[int(prime)],
+            current_played_track_ids=[int(t) for t in body.get("queued_ids") or []],
+            db=db,
+        )
+        result["initial_picks"] = top.get("picks", [])
+    return result
 
 
 @router.delete("/pool", tags=["dj_pool"])
 def stop_pool(user: User = Depends(get_current_user)):
-    """Stop DJ pool."""
-    from audiplex.dj_pool import DJPool
-    pool = DJPool()
-    pool.stop()
-    return {"status": "stopped"}
+    """Stop the DJ pool. stopped is true only if one was running."""
+    from audiplex.dj_pool import get_pool
+
+    return {"stopped": get_pool().stop()}
 
 
 # ----- DJ Specs: persistent mix specs with cues (#5477) -----
@@ -657,40 +721,39 @@ def create_mix_spec(
 ):
     """Create or replace a DJ mix spec.
 
-    body: {name, request_text, sources, balance, ahead, exclude_recent_hours, notes_json}
+    body: {name, request_text, sources, balance, ahead, exclude_recent_hours,
+           notes_json?, last_counts?}
     """
-    from sqlalchemy import insert, text
+    from sqlalchemy import text
 
     name = body.get("name", "")
     if not name:
         raise HTTPException(status_code=400, detail="name required")
 
-    # Delete existing spec with this name
-    with db.engine.begin() as conn:
-        conn.execute(
-            text("DELETE FROM dj_mix_specs WHERE name = :name"),
-            {"name": name}
-        )
-
-        # Insert new spec
-        conn.execute(
-            text("""
-                INSERT INTO dj_mix_specs
-                (name, request_text, sources_json, balance, ahead, exclude_recent_hours, notes_json, created_at, updated_at)
-                VALUES (:name, :request_text, :sources_json, :balance, :ahead, :exclude_recent_hours, :notes_json, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """),
-            {
-                "name": name,
-                "request_text": body.get("request_text", ""),
-                "sources_json": json.dumps(body.get("sources", [])),
-                "balance": body.get("balance", "even"),
-                "ahead": body.get("ahead", 4),
-                "exclude_recent_hours": body.get("exclude_recent_hours", 12),
-                "notes_json": json.dumps(body.get("notes_json", [])),
-            }
-        )
-
-    return {"name": name, "status": "saved"}
+    db.execute(text("DELETE FROM dj_mix_specs WHERE name = :name"), {"name": name})
+    db.execute(
+        text("""
+            INSERT INTO dj_mix_specs
+            (name, request_text, sources_json, balance, ahead, exclude_recent_hours,
+             notes_json, last_counts_json, created_at, updated_at)
+            VALUES (:name, :request_text, :sources_json, :balance, :ahead,
+                    :exclude_recent_hours, :notes_json, :last_counts_json,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """),
+        {
+            "name": name,
+            "request_text": body.get("request_text", ""),
+            "sources_json": json.dumps(body.get("sources", [])),
+            "balance": body.get("balance", "even"),
+            "ahead": body.get("ahead", 4),
+            "exclude_recent_hours": body.get("exclude_recent_hours", 12),
+            "notes_json": json.dumps(body.get("notes_json", [])),
+            "last_counts_json": json.dumps(body.get("last_counts", {})),
+        },
+    )
+    db.commit()
+    row = _spec_row(db, name)
+    return {"name": name, "id": row[0] if row else None, "status": "saved"}
 
 
 @router.get("/mix-specs", tags=["dj_specs"])
@@ -701,9 +764,11 @@ def list_mix_specs(
     """List all saved mix specs."""
     from sqlalchemy import text
 
-    result = db.execute(text("SELECT name, request_text, balance, ahead FROM dj_mix_specs ORDER BY name"))
-    specs = [{"name": row[0], "request_text": row[1], "balance": row[2], "ahead": row[3]} for row in result]
-    return specs
+    result = db.execute(text("SELECT id, name, request_text, balance, ahead FROM dj_mix_specs ORDER BY name"))
+    return [
+        {"id": row[0], "name": row[1], "request_text": row[2], "balance": row[3], "ahead": row[4]}
+        for row in result
+    ]
 
 
 @router.get("/mix-specs/{name}", tags=["dj_specs"])
@@ -713,24 +778,18 @@ def get_mix_spec(
     user: User = Depends(get_current_user),
 ):
     """Get a specific mix spec by name."""
-    from sqlalchemy import text
-
-    result = db.execute(
-        text("SELECT name, request_text, sources_json, balance, ahead, exclude_recent_hours, notes_json FROM dj_mix_specs WHERE name = :name"),
-        {"name": name}
-    ).first()
-
-    if not result:
+    row = _spec_row(db, name)
+    if not row:
         raise HTTPException(status_code=404, detail=f"Spec '{name}' not found")
-
     return {
-        "name": result[0],
-        "request_text": result[1],
-        "sources": json.loads(result[2]) if result[2] else [],
-        "balance": result[3],
-        "ahead": result[4],
-        "exclude_recent_hours": result[5],
-        "notes": json.loads(result[6]) if result[6] else [],
+        "id": row[0],
+        "name": row[1],
+        "request_text": row[2],
+        "sources": json.loads(row[3]) if row[3] else [],
+        "balance": row[4],
+        "ahead": row[5],
+        "exclude_recent_hours": row[6],
+        "notes": json.loads(row[7]) if row[7] else [],
     }
 
 
@@ -741,35 +800,45 @@ def update_mix_spec(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Update a mix spec by adding/removing sources or tracks."""
+    """Edit a spec's sources; re-sync the running pool if it is this spec's.
+
+    body: {add_sources?: [src], remove_sources?: [query or label],
+           lanes?: {label: [track_ids]}}
+    `lanes` is the caller's resolution of the spec's sources AFTER the edit.
+    When the active pool was started from this spec, its lanes are replaced
+    with them (per-lane history kept for labels that survive).
+    """
     from sqlalchemy import text
+    from audiplex.dj_pool import get_pool
 
-    # Get current spec
-    result = db.execute(
-        text("SELECT sources_json FROM dj_mix_specs WHERE name = :name"),
-        {"name": name}
-    ).first()
-
-    if not result:
+    row = _spec_row(db, name)
+    if not row:
         raise HTTPException(status_code=404, detail=f"Spec '{name}' not found")
+    spec_id = row[0]
+    sources = json.loads(row[3]) if row[3] else []
 
-    sources = json.loads(result[0]) if result[0] else []
-
-    # Apply changes
-    if "add_sources" in body:
+    if body.get("add_sources"):
         sources.extend(body["add_sources"])
-    if "remove_sources" in body:
-        for src_query in body["remove_sources"]:
-            sources = [s for s in sources if s.get("query") != src_query]
+    if body.get("remove_sources"):
+        gone = set(body["remove_sources"])
+        sources = [s for s in sources if s.get("query") not in gone and s.get("label") not in gone]
 
-    # Update in DB
-    with db.engine.begin() as conn:
-        conn.execute(
-            text("UPDATE dj_mix_specs SET sources_json = :sources_json, updated_at = CURRENT_TIMESTAMP WHERE name = :name"),
-            {"sources_json": json.dumps(sources), "name": name}
-        )
+    db.execute(
+        text("UPDATE dj_mix_specs SET sources_json = :sources_json, "
+             "updated_at = CURRENT_TIMESTAMP WHERE id = :id"),
+        {"sources_json": json.dumps(sources), "id": spec_id},
+    )
+    db.commit()
 
-    return {"name": name, "sources": sources, "status": "updated"}
+    resynced = False
+    pool = get_pool()
+    lanes = body.get("lanes")
+    if lanes is not None and pool.is_active() and pool.state.get("spec_id") == spec_id:
+        pool.resync_lanes({str(k): [int(t) for t in v] for k, v in lanes.items()})
+        resynced = True
+
+    return {"name": name, "id": spec_id, "sources": sources, "status": "updated",
+            "pool_resynced": resynced}
 
 
 @router.post("/mix-specs/{name}/notes", tags=["dj_specs"])
@@ -782,25 +851,19 @@ def add_spec_note(
     """Add a cue/note to a mix spec.
 
     body: {after_track_id?, play_track_id?, say?, trigger_kind?, clip_id?}
+    If the running pool is this spec's, the cue is armed on it as well.
     """
     from sqlalchemy import text
     import time
+    from audiplex.dj_pool import get_pool
 
-    # Get current notes
-    result = db.execute(
-        text("SELECT notes_json FROM dj_mix_specs WHERE name = :name"),
-        {"name": name}
-    ).first()
-
-    if not result:
+    row = _spec_row(db, name)
+    if not row:
         raise HTTPException(status_code=404, detail=f"Spec '{name}' not found")
+    notes = json.loads(row[7]) if row[7] else []
 
-    notes = json.loads(result[0]) if result[0] else []
-
-    # Add new note
-    cue_id = int(time.time() * 1000) % 1000000
     note = {
-        "id": cue_id,
+        "id": int(time.time() * 1000) % 1000000,
         "trigger": {
             "kind": body.get("trigger_kind", "track_end"),
             "track_id": body.get("after_track_id"),
@@ -812,13 +875,17 @@ def add_spec_note(
     }
     notes.append(note)
 
-    # Update in DB
-    with db.engine.begin() as conn:
-        conn.execute(
-            text("UPDATE dj_mix_specs SET notes_json = :notes_json, updated_at = CURRENT_TIMESTAMP WHERE name = :name"),
-            {"notes_json": json.dumps(notes), "name": name}
-        )
+    db.execute(
+        text("UPDATE dj_mix_specs SET notes_json = :notes_json, "
+             "updated_at = CURRENT_TIMESTAMP WHERE id = :id"),
+        {"notes_json": json.dumps(notes), "id": row[0]},
+    )
+    db.commit()
 
+    pool = get_pool()
+    if pool.is_active() and pool.state.get("spec_id") == row[0]:
+        pool.state.setdefault("pending_cues", []).append({**note, "done": False, "held_boundaries": 0})
+        pool._persist()
     return note
 
 
@@ -829,15 +896,7 @@ def get_spec_notes(
     user: User = Depends(get_current_user),
 ):
     """Get all cues/notes for a mix spec."""
-    from sqlalchemy import text
-
-    result = db.execute(
-        text("SELECT notes_json FROM dj_mix_specs WHERE name = :name"),
-        {"name": name}
-    ).first()
-
-    if not result:
+    row = _spec_row(db, name)
+    if not row:
         raise HTTPException(status_code=404, detail=f"Spec '{name}' not found")
-
-    notes = json.loads(result[0]) if result[0] else []
-    return {"name": name, "notes": notes}
+    return {"name": name, "notes": json.loads(row[7]) if row[7] else []}

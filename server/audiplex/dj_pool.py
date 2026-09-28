@@ -10,9 +10,12 @@ separate named lane, never flattened. Pool state keeps per-lane eligible ids.
 Picker: round-robin by lane (balance=even), PLUS starvation rule: if a lane
 hasn't had a pick in N picks (default 6) or M minutes (default 25), it jumps
 the line. A lane with no candidates left is marked exhausted and skipped.
+
+Module-level singleton: _pool_instance is shared across routes and the PlaybackBus hook.
 """
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -21,7 +24,13 @@ from audiplex import taste
 from audiplex.identity import build_identity_map
 
 
-DEFAULT_POOL_STATE_FILE = "data/dj_pool.json"
+def _get_pool_state_path() -> Path:
+    """Resolve pool state file path from env or default data directory."""
+    explicit = os.environ.get("AUDIPLEX_DJ_POOL_STATE")
+    if explicit:
+        return Path(explicit)
+    # Default: server/data/dj_pool.json
+    return Path(__file__).resolve().parent.parent / "data" / "dj_pool.json"
 
 
 def _load_json_safe(path: Path, default: Any = None) -> Any:
@@ -42,11 +51,42 @@ def _write_json_atomic(path: Path, data: Any) -> None:
     temp.replace(path)
 
 
+def _lane(track_ids: list[int], prior: Optional[dict] = None) -> dict[str, Any]:
+    """One lane record; a zero-track lane is born exhausted (#5495)."""
+    ids = [int(t) for t in track_ids]
+    prior = prior or {}
+    return {
+        "track_ids": ids,
+        "played_count": prior.get("played_count", 0),
+        "last_played_at": prior.get("last_played_at"),
+        "exhausted": not ids,
+        "zero_on_resolve": not ids,
+    }
+
+
+def lanes_from_ids(lanes: dict[str, list[int]]) -> dict[str, dict]:
+    """{label: [track_ids]} -> full lane records (#5495)."""
+    return {label: _lane(ids) for label, ids in lanes.items()}
+
+
+def owner_user_id(db: Any) -> Optional[int]:
+    """The DJ owner's user id (settings.dj_owner_username), same lookup the
+    owner-scoped playback routes use; None when that user doesn't exist."""
+    from audiplex.config import get_settings
+    from audiplex.models import User
+
+    owner = db.query(User).filter(User.username == get_settings().dj_owner_username).first()
+    return owner.id if owner else None
+
+
 class DJPool:
     """Persistent DJ pool state: lanes, eligible tracks, top-up + cue logic."""
 
-    def __init__(self, state_file: str = DEFAULT_POOL_STATE_FILE):
-        self.state_file = Path(state_file)
+    def __init__(self, state_file: Path | str | None = None):
+        if state_file is None:
+            self.state_file = _get_pool_state_path()
+        else:
+            self.state_file = Path(state_file)
         self.state = _load_json_safe(self.state_file, self._empty_state())
         # Normalize lanes if missing (backward compat)
         if "lanes" not in self.state:
@@ -63,6 +103,7 @@ class DJPool:
     def _empty_state() -> dict[str, Any]:
         """Default pool state."""
         return {
+            "active": False,  # #5495: inline pools have no spec_id
             "spec_id": None,
             "eligible_track_ids": [],  # Legacy: kept for backward compat
             "source_labels": {},  # Legacy: track_id -> source label
@@ -101,6 +142,7 @@ class DJPool:
         lanes: {lane_name: {track_ids: [...], played_count: 0, last_played_at: None, exhausted: False}}
         """
         self.state.update({
+            "active": True,
             "spec_id": spec_id,
             "eligible_track_ids": track_ids,  # Legacy flat list
             "source_labels": source_labels,
@@ -140,10 +182,16 @@ class DJPool:
             "ready": True,
         }
 
-    def stop(self) -> None:
-        """Clear pool state."""
+    def is_active(self) -> bool:
+        """True while a pool is running (spec-backed or inline)."""
+        return bool(self.state.get("active") or self.state.get("spec_id"))
+
+    def stop(self) -> bool:
+        """Clear pool state. Returns True only if a pool was running (#5495)."""
+        was_active = self.is_active()
         self.state = self._empty_state()
         self._persist()
+        return was_active
 
     def status(self) -> dict[str, Any]:
         """Current pool status with per-lane details."""
@@ -168,6 +216,7 @@ class DJPool:
             })
 
         return {
+            "active": self.is_active(),
             "spec_id": self.state.get("spec_id"),
             "eligible_count": sum(d["remaining"] for d in lane_details),
             "balance_mode": self.state.get("balance_mode"),
@@ -177,6 +226,7 @@ class DJPool:
             "lanes": lane_details,
             "source_counts": self._count_sources(),  # Backward compat
             "starvation_config": self.state.get("starvation_config", {}),
+            "pending_cues": self.get_pending_cues(),
         }
 
     def _count_sources(self) -> dict[str, int]:
@@ -240,6 +290,25 @@ class DJPool:
 
         return selected
 
+    def resync_lanes(self, lanes: dict[str, list[int]]) -> dict[str, int]:
+        """Replace lane track lists after a spec edit, keeping per-lane stats (#5495).
+
+        lanes: {label: [track_ids]} resolved by the caller. A label that keeps
+        its name keeps its played_count / last_played_at; new labels start
+        fresh; labels no longer present are dropped. Session history, balance
+        and ahead are untouched.
+        """
+        old = self.state.get("lanes", {})
+        self.state["lanes"] = {
+            label: _lane(ids, old.get(label)) for label, ids in lanes.items()
+        }
+        self.state["eligible_track_ids"] = [int(t) for ids in lanes.values() for t in ids]
+        self.state["source_labels"] = {
+            int(t): label for label, ids in lanes.items() for t in ids
+        }
+        self._persist()
+        return {name: len(ids) for name, ids in lanes.items()}
+
     def top_up(
         self,
         current_track_id: Optional[int],
@@ -248,20 +317,25 @@ class DJPool:
         cues: Optional[list[dict]] = None,
         match_trigger_fn=None,
         db: Optional[Any] = None,
+        owner_id: Optional[int] = None,
+        previous_track_id: Optional[int] = None,
     ) -> dict[str, Any]:
         """
         Suggest picks to top up the queue.
 
         current_track_id: track currently playing (None if nothing loaded)
-        upcoming_track_ids: queue after current (may include current)
-        current_played_track_ids: tracks played in this session (outside this pool)
-        cues: list of cues with triggers to check
-        match_trigger_fn: function(event, cues) -> list[cue_ids]
+        upcoming_track_ids: queue from current onward ([0] is the current track)
+        current_played_track_ids: ids already in the device queue (never re-picked)
+        cues: cue list to match; defaults to this pool's pending_cues
+        match_trigger_fn: kept for back-compat; cues are always matched now
         db: SQLAlchemy session for taste.recent_plays_for and identity lookup
+        owner_id: whose play history counts as "recent"; looked up from
+            settings.dj_owner_username when omitted (#5495)
+        previous_track_id: the track that just ended (for track_end cues)
 
         Returns: {picks, reason, per_lane_details, pending_cues, next_picks_preview}
         """
-        if not self.state.get("spec_id"):
+        if not self.is_active():
             return {"picks": [], "reason": "no pool set", "pending_cues": []}
 
         # Don't top up if paused, stream (id=-1), or DJ break (id<0)
@@ -274,124 +348,111 @@ class DJPool:
         )
 
         ahead = self.state.get("ahead", 4)
-        if real_count >= ahead:
-            return {"picks": [], "reason": f"already {real_count} tracks ahead", "pending_cues": []}
 
-        # Check for matching cues first
+        # Matching cues first (#5495): their play_track leads the picks.
+        from audiplex.trigger_matcher import match_triggers
+        if cues is None:
+            cues = self.state.setdefault("pending_cues", [])
+        events = [{"kind": "track_start", "track_id": current_track_id}]
+        if previous_track_id is not None:
+            events.append({"kind": "track_end", "track_id": previous_track_id})
         pending_cues = []
-        cue_picks = []
-        if cues and match_trigger_fn:
-            try:
-                from audiplex.trigger_matcher import match_triggers
-                event = {"kind": "track_end", "track_id": current_track_id}
-                matched = match_triggers(event, cues)
-                for cue in matched:
-                    if cue.get("play_track"):
-                        cue_picks.append(cue.get("play_track"))
-                        # Mark cue as done
-                        cue["done"] = True
-                        pending_cues.append({
-                            "id": cue.get("id"),
-                            "status": "fired",
-                            "say": cue.get("say"),
-                        })
-            except ImportError:
-                pass
+        cue_picks: list[int] = []
+        for event in events:
+            for cue in match_triggers(event, cues):
+                cue["done"] = True
+                cue["status"] = "fired"
+                pending_cues.append({"id": cue.get("id"), "status": "fired", "say": cue.get("say")})
+                if cue.get("play_track"):
+                    cue_picks.append(int(cue["play_track"]))
 
-        # Get recently played tracks to exclude (via taste module)
+        if real_count >= ahead and not cue_picks:
+            self.state["last_topup_current_track_id"] = current_track_id
+            self._persist()
+            return {"picks": [], "reason": f"already {real_count} tracks ahead", "pending_cues": pending_cues}
+
+        # What must not be picked: this session's picks, whatever is already in
+        # the device queue, and (by recording identity) recent plays.
         skip_ids = set(self.state.get("played_this_session", []))
-        skip_recordings = set()
-        skip_works = set()
+        skip_ids.update(t for t in (current_played_track_ids or []) if isinstance(t, int))
+        skip_ids.update(t for t in upcoming_track_ids if isinstance(t, int))
+        skip_ids.update(cue_picks)
+        skip_recordings: set[str] = set()
+        identities: dict = {}
 
-        if db:
+        if db is not None:
             try:
-                exclude_hours = self.state.get("exclude_recent_hours", 12)
-                # Get window in minutes
-                window_minutes = exclude_hours * 60
-
                 identities = build_identity_map(db)
-                recent_plays = taste.recent_plays_for(db, 1, window_minutes, identities)  # user_id=1 (owner)
-
-                for play in recent_plays:
-                    skip_recordings.add(play.recording_id)
-                    skip_works.add(play.work_id)
+                if owner_id is None:
+                    owner_id = owner_user_id(db)
+                window_minutes = float(self.state.get("exclude_recent_hours", 12)) * 60
+                if owner_id is not None and window_minutes > 0:
+                    for play in taste.recent_plays_for(db, owner_id, window_minutes, identities):
+                        skip_recordings.add(play.recording_id)
             except Exception:
                 # If taste lookup fails, just skip session-played tracks
                 pass
 
-        # Collect candidates from lanes, filtering by identity + recent plays
-        candidates_by_lane = {}
+        def recording_of(tid: int) -> Optional[str]:
+            ident = identities.get(tid) if identities else None
+            return ident.recording_id if ident is not None else None
 
-        for lane_name, lane_data in self.state.get("lanes", {}).items():
-            if lane_data.get("exhausted"):
-                continue
+        # Anything already queued/played/cued blocks its other copies too.
+        for tid in skip_ids:
+            rec = recording_of(tid)
+            if rec is not None:
+                skip_recordings.add(rec)
 
-            lane_track_ids = lane_data.get("track_ids", [])
-            candidates = []
+        def eligible(tid: Any) -> bool:
+            if not isinstance(tid, int) or tid <= 0 or tid in skip_ids:
+                return False
+            rec = recording_of(tid)
+            return rec is None or rec not in skip_recordings
 
-            for tid in lane_track_ids:
-                if tid <= 0 or tid in skip_ids:  # Skip played-this-session
-                    continue
-
-                # TODO: check identity for deduplication if identities available
-                # For now, just exclude by recording_id if we have it
-                candidates.append(tid)
-
-            candidates_by_lane[lane_name] = candidates
-
-        # Select picks using round-robin + starvation
-        picks = []
+        picks: list[int] = list(cue_picks)
         to_pick = ahead - real_count
-        picks_made = 0
 
-        # First add cue picks
-        picks.extend(cue_picks)
-        picks_made = len(cue_picks)
-
-        # Then round-robin + starvation
-        while picks_made < to_pick:
+        # Round-robin + starvation; filtered lazily so a pick blocks its own
+        # recording's other copies within the same top-up.
+        while len(picks) < to_pick:
             selected_lane = self._select_next_lane()
             if not selected_lane:
                 break
-
-            candidates = candidates_by_lane.get(selected_lane, [])
-            if not candidates:
-                # Mark lane as exhausted
-                self.state["lanes"][selected_lane]["exhausted"] = True
+            lane = self.state["lanes"][selected_lane]
+            pick = next((t for t in lane.get("track_ids", []) if eligible(t)), None)
+            if pick is None:
+                lane["exhausted"] = True
                 continue
 
-            # Pick first candidate from lane
-            pick = candidates[0]
             picks.append(pick)
-            candidates.pop(0)
-            picks_made += 1
+            skip_ids.add(pick)
+            rec = recording_of(pick)
+            if rec is not None:
+                skip_recordings.add(rec)
 
-            # Update lane stats
-            now = time.time()
-            self.state["lanes"][selected_lane]["played_count"] += 1
-            self.state["lanes"][selected_lane]["last_played_at"] = now
+            lane["played_count"] = lane.get("played_count", 0) + 1
+            lane["last_played_at"] = time.time()
+            self.state["round_robin_index"] = self.state.get("round_robin_index", 0) + 1
 
-            # Move to next lane for round-robin
-            self.state["round_robin_index"] += 1
-
+        self.state["last_topup_current_track_id"] = current_track_id
         if not picks:
+            self._persist()
             return {"picks": [], "reason": "no eligible candidates", "pending_cues": pending_cues}
 
         # Record picks as played
-        self.state["played_this_session"].extend(picks)
+        self.state.setdefault("played_this_session", []).extend(picks)
         self.state["last_topup_at"] = time.time()
-        self.state["last_topup_current_track_id"] = current_track_id
         self._persist()
 
-        # Build per-lane details for response
-        lane_details = []
-        for lane_name, lane_data in self.state.get("lanes", {}).items():
-            lane_details.append({
+        lane_details = [
+            {
                 "label": lane_name,
                 "remaining": len(lane_data.get("track_ids", [])),
                 "played_count": lane_data.get("played_count", 0),
                 "exhausted": lane_data.get("exhausted", False),
-            })
+            }
+            for lane_name, lane_data in self.state.get("lanes", {}).items()
+        ]
 
         return {
             "picks": picks,
@@ -437,3 +498,21 @@ class DJPool:
                 self._persist()
                 return True
         return False
+
+
+# Module-level singleton: shared by routes and PlaybackBus hook
+_pool_instance: DJPool | None = None
+
+
+def get_pool() -> DJPool:
+    """Get or create the module-level pool singleton."""
+    global _pool_instance
+    if _pool_instance is None:
+        _pool_instance = DJPool()
+    return _pool_instance
+
+
+def reset_pool_singleton() -> None:
+    """Clear the singleton (for testing)."""
+    global _pool_instance
+    _pool_instance = None
