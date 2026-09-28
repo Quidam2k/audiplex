@@ -12,6 +12,11 @@ from pydantic_settings import BaseSettings
 class LibraryRoot(BaseModel):
     path: str
     category: str = "audiobook_clean"  # "audiobook_clean" | "audiobook_misc"
+    # Music only (#5448): folders under this root to leave out of the scan,
+    # relative to the root. "." means the root's own loose files. Used when a
+    # removable drive holds the full tree and part of it has been copied to a
+    # permanent root, so the copy isn't catalogued twice.
+    exclude: list[str] = Field(default_factory=list)
 
 
 class Settings(BaseSettings):
@@ -126,7 +131,12 @@ def set_library_roots_for_category(
         r for r in existing
         if not (isinstance(r, dict) and r.get("category") == category)
     ]
-    kept.extend({"path": p, "category": category} for p in paths)
+    # Keep per-root options (e.g. `exclude`, #5448) for paths that survive.
+    prior = {
+        r["path"]: r for r in existing
+        if isinstance(r, dict) and r.get("category") == category and r.get("path")
+    }
+    kept.extend(prior.get(p) or {"path": p, "category": category} for p in paths)
     data["library_roots"] = kept
 
     _write_yaml_atomic(yaml_path, data)

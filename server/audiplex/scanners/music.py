@@ -228,17 +228,32 @@ def _build_track_list(album_folder: Path) -> list[tuple[Path, int]]:
     return out
 
 
-def _walk_album_folders(root: Path):
+def _walk_album_folders(root: Path, exclude=()):
     """Yield album folders. An album = folder whose tracks live directly in
     it OR whose only audio content is in disc subfolders.
 
     Walks `os.walk` once; uses topdown=True so we can prune disc subfolders
     out of the recursion when we've claimed them as part of a parent album.
+
+    exclude (#5448): folders relative to `root` that are neither yielded nor
+    descended into. "." skips the root's own loose files but still walks it.
     """
     skipped_disc_dirs: set[str] = set()
+    excluded = {
+        os.path.normcase(os.path.normpath(os.path.join(str(root), e)))
+        for e in exclude
+    }
 
     for current, dirnames, filenames in os.walk(root):
         current_path = Path(current)
+        if excluded:
+            dirnames[:] = [
+                d for d in dirnames
+                if os.path.normcase(os.path.normpath(os.path.join(current, d)))
+                not in excluded
+            ]
+            if os.path.normcase(os.path.normpath(current)) in excluded:
+                continue
 
         if str(current_path) in skipped_disc_dirs:
             # We'll still descend (in case of weird layouts), but parent
@@ -604,7 +619,7 @@ def _sync_tracks(
 
 
 def scan_music(
-    db: Session, music_root: str, cover_cache_dir: str
+    db: Session, music_root: str, cover_cache_dir: str, exclude=()  # #5448
 ) -> tuple[ScanResultSchema, set[str]]:
     """Scan a music library root.
 
@@ -623,7 +638,7 @@ def scan_music(
         errors.append(f"Music root does not exist: {music_root}")
         return ScanResultSchema(added=0, updated=0, removed=0, errors=errors), found_paths
 
-    for album_folder in _walk_album_folders(root):
+    for album_folder in _walk_album_folders(root, exclude):  # #5448
         found_paths.add(str(album_folder))
         skipped_wma += _count_skipped_wma(album_folder)
         try:
