@@ -112,26 +112,20 @@ async def dj_play_now(track_ids: list[int]) -> str:
     """
     if not track_ids:
         return "No track_ids given; nothing to play."
+    data = await _enqueue("play_now", {"track_ids": track_ids})  # #3249: gated
+    if isinstance(data, str):
+        return data
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            f"{AUDIPLEX_URL}/api/playback/command",
-            headers=_headers(),
-            json={"type": "play_now", "payload": {"track_ids": track_ids}},
-        )
-        if resp.status_code == 401:
-            return "Auth failed (401). Check AUDIPLEX_TOKEN."
-        resp.raise_for_status()
         device_resp = await client.get(
             f"{AUDIPLEX_URL}/api/playback/device", headers=_headers()
         )
-    data = resp.json()
     device = device_resp.json() if device_resp.status_code == 200 else {}
-    head = (
-        f"Queued play_now for {len(track_ids)} track(s) "
+    head = (_missing_note(data) + (  # #3249
+        f" Queued play_now for {_sent_count(data, len(track_ids))} track(s) "
         f"(command #{data.get('id')}, {data.get('pending')} pending). "
         f"Confirm with dj_command_status({data.get('id')}) — it reports whether "
         f"the device acked, which is the difference between 'sent' and 'played'. "
-    )
+    )).lstrip()  # #3249
     # Never claim "it's playing" — say whether anything is listening, so a dead
     # player reads as a failure instead of a success (#2961).
     note = await _repeat_note(track_ids)
@@ -196,7 +190,38 @@ async def dj_command_status(command_id: int = 0, limit: int = 10) -> str:
         elif r.get("status") == "delivered":
             line += " — handed over, no ack yet"
         lines.append(line)
+    lines += await _player_error_lines()  # #3249
     return "\n".join(lines)
+
+
+PLAYER_ERROR_WINDOW_S = 900  # #3249
+
+
+async def _player_error_lines(window_s: float = PLAYER_ERROR_WINDOW_S) -> list[str]:  # #3249
+    """Recent phone player_error entries, loudly worded, newest last.
+
+    An acked command only means the phone TOOK it. 2026-09-28 13:17 play_now
+    acked, then the stream 404'd and nothing played; the DJ said "it accepted".
+    """
+    import time
+    try:
+        entries = await _get("/api/playback/client-log?limit=50")
+    except Exception:
+        return []
+    cutoff = time.time() - window_s
+    out = []
+    for e in entries or []:
+        when = e.get("received_at") or e.get("at") or 0  # server clock first
+        if e.get("event") != "player_error" or when < cutoff:
+            continue
+        d = e.get("detail") or {}
+        mins = max(0, int((time.time() - when) // 60))
+        out.append(
+            f"PHONE COULD NOT PLAY track {d.get('trackId', '?')} "
+            f"({d.get('trackTitle', '?')}): {d.get('causeMessage') or e.get('message')} "
+            f"[{mins} min ago]. An ack does not mean it played."
+        )
+    return out
 
 
 @mcp.tool()
@@ -263,7 +288,154 @@ async def dj_skip() -> str:
     )
 
 
+# --- #3249: announce before music starts, and never send a dead file -------
+#
+# Todd's rule (2026-09-28 13:20): a persona ANNOUNCES before music starts, so he
+# can pause his audiobook first. Any command that could start playback on an
+# idle player is refused unless a persona said something about the music in
+# Pantheon chat in the last ANNOUNCE_WINDOW_S. The refusal says what to say.
+
+START_CMDS = {"play_now", "resume", "play_stream", "queue", "play_next"}  # #3249
+ANNOUNCE_WINDOW_S = 180  # #3249
+_PERSONA_SENDERS = ("claude", "gemini", "orolo", "bosley")  # #3249
+_MUSIC_WORDS = re.compile(  # #3249
+    r"\b(music|tunes?|songs?|tracks?|mix|set|first up|audiplex|dj|playlist|album|"
+    r"pause your|playing|starting)\b",
+    re.IGNORECASE,
+)
+ANNOUNCE_REFUSAL = (  # #3249
+    "REFUSED (announce first): Todd's rule is that a persona announces before any "
+    "music starts, so he can pause his audiobook or YouTube. Nothing was sent. Do "
+    "this now: say() one line such as \"Starting the music in ten seconds, Boss: "
+    "first up <title> by <artist>. Pause your book.\" Wait about ten seconds, then "
+    "call this tool again. Keep it to ten seconds; he notices when it runs long."
+)
+
+
+def _pantheon_db_path() -> Path:  # #3249
+    return Path(os.environ.get("DJ_PANTHEON_DB") or "Q:/Pantheon/data/pantheon.db")
+
+
+def _recent_announcement(now: "datetime.datetime | None" = None) -> bool | None:  # #3249
+    """True if a persona mentioned the music in chat recently; None if unreadable."""
+    path = _pantheon_db_path()
+    if not path.exists():
+        return None
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    cutoff = (now - datetime.timedelta(seconds=ANNOUNCE_WINDOW_S)).strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        con = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = con.execute(
+                "SELECT content FROM messages WHERE timestamp >= ? AND sender IN "
+                f"({','.join('?' * len(_PERSONA_SENDERS))})",
+                (cutoff, *_PERSONA_SENDERS),
+            ).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+    return any(_MUSIC_WORDS.search(r[0] or "") for r in rows)
+
+
+async def _announce_gate(cmd_type: str) -> str | None:  # #3249
+    """The refusal text if this command would start music unannounced, else None."""
+    if cmd_type not in START_CMDS:
+        return None
+    try:
+        state = await _get("/api/playback/state")
+    except Exception:
+        state = {}
+    if state.get("playing"):
+        return None  # already playing: nothing new starts
+    if cmd_type in ("queue", "play_next") and state.get("queue"):
+        return None  # appending to a loaded (paused) queue doesn't start it
+    announced = _recent_announcement()
+    if announced is None:
+        return None  # can't read chat: don't block music on our own blindness
+    return None if announced else ANNOUNCE_REFUSAL
+
+
+async def _playable_split(track_ids: list[int]) -> tuple[list[int], list[int]]:  # #3249
+    """(playable, missing). A server without /tracks/playable passes all through."""
+    # Fail-open on purpose: a server not yet restarted onto /tracks/playable must
+    # not stop all music. The stream still 404s a dead file; this is the guard.
+    try:
+        verdict = await _post("/api/playback/tracks/playable", {"track_ids": track_ids})
+    except Exception:
+        return list(track_ids), []
+    return list(verdict.get("playable") or []), list(verdict.get("missing") or [])
+
+
+def _missing_note(data) -> str:  # #3249
+    n = len(data.get("dropped_missing") or []) if isinstance(data, dict) else 0
+    if not n:
+        return ""
+    return (f" Skipped {n} track(s) whose file isn't on disk (they would 404 on the "
+            "phone and play nothing).")
+
+
+def _sent_count(data, asked: int) -> int:  # #3249: count what was SENT, not asked
+    return int(data.get("sent_count", asked)) if isinstance(data, dict) else asked
+
+
+# The phone resolves a queued list with one GET per track, in sequence, and its
+# command loop stops polling meanwhile: a 990-track queue went dark ~3 min on
+# 2026-09-28 (13:17 and 13:37) and read as "no player connected". Big lists go
+# out as several small commands so the first lands fast and polling continues.
+QUEUE_CHUNK = 40  # #3249
+_CHUNKABLE = {"play_now", "queue"}  # #3249
+
+
 async def _enqueue(cmd_type: str, payload: dict) -> str:
+    refusal = await _announce_gate(cmd_type)  # #3249
+    if refusal:
+        return refusal
+    dropped: list[int] = []  # #3249
+    kept: list[int] = []
+    if payload.get("track_ids"):
+        kept, dropped = await _playable_split(payload["track_ids"])
+        if not kept:
+            return (f"None of those {len(dropped)} track(s) has a file on disk, so "
+                    "nothing was sent: it would ack and play silence. (#3249)")
+        payload = {**payload, "track_ids": kept}
+    rest: list[int] = []  # #3249
+    if cmd_type in _CHUNKABLE and len(kept) > QUEUE_CHUNK:
+        payload = {**payload, "track_ids": kept[:QUEUE_CHUNK]}
+        rest = kept[QUEUE_CHUNK:]
+    data = await _enqueue_raw(cmd_type, payload)
+    if not isinstance(data, dict):
+        return data
+    chunks, sent = 1, len(payload.get("track_ids") or [])
+    for i in range(0, len(rest), QUEUE_CHUNK):  # #3249: FIFO bus keeps order
+        piece = rest[i:i + QUEUE_CHUNK]
+        more = await _enqueue_raw("queue", {"track_ids": piece})
+        if not isinstance(more, dict):
+            break
+        chunks, sent = chunks + 1, sent + len(piece)
+    if kept:
+        data["sent_count"], data["chunks"] = sent, chunks
+    if dropped:
+        data["dropped_missing"] = dropped
+    return data
+
+
+async def _device_lacks_replace_upcoming() -> bool:  # #3249
+    """True if the phone's latest answer to replace_upcoming was unknown_type.
+
+    Read from the server's command history, so every persona's MCP process
+    learns it from one failure instead of each re-sending it (13:37:21 failed,
+    13:37:32 was sent again).
+    """
+    try:
+        rows = await _get("/api/playback/commands?limit=50")
+    except Exception:
+        return False
+    latest = [r for r in rows or [] if r.get("type") == "replace_upcoming" and r.get("ack_status")]
+    return bool(latest) and latest[-1].get("ack_status") == "unknown_type"
+
+
+async def _enqueue_raw(cmd_type: str, payload: dict) -> str:  # #3249: pre-gate send
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
             f"{AUDIPLEX_URL}/api/playback/command",
@@ -289,10 +461,10 @@ async def dj_queue(track_ids: list[int]) -> str:
     if isinstance(data, str):
         return data
     return (
-        f"Queued {len(track_ids)} track(s) to the end "
+        f"Queued {_sent_count(data, len(track_ids))} track(s) to the end "
         f"(command #{data.get('id')}, {data.get('pending')} pending). "
         "Appended when the device next polls."
-    ) + await _repeat_note(track_ids)
+    ) + _missing_note(data) + await _repeat_note(track_ids)  # #3249
 
 
 @mcp.tool()
@@ -308,9 +480,9 @@ async def dj_play_next(track_ids: list[int]) -> str:
     if isinstance(data, str):
         return data
     return (
-        f"Inserted {len(track_ids)} track(s) to play next "
+        f"Inserted {_sent_count(data, len(track_ids))} track(s) to play next "
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
-    ) + await _repeat_note(track_ids)
+    ) + _missing_note(data) + await _repeat_note(track_ids)  # #3249
 
 
 @mcp.tool()
@@ -844,9 +1016,9 @@ async def dj_queue_by(
         return data
     verb = {"now": "Playing", "queue": "Queued", "next": "Playing next"}[mode]
     return (
-        f"{verb} {len(track_ids)} track(s) from {label} "
+        f"{verb} {_sent_count(data, len(track_ids))} track(s) from {label} "
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
-    )
+    ) + _missing_note(data)  # #3249
 
 
 
@@ -937,6 +1109,9 @@ async def dj_mix(
         return str(e)
     upcoming = plan.get("upcoming") or []
     head = f"Mix from {', '.join(labels)}: {plan.get('summary')}."
+    if loaded_now and not state.get("playing"):  # #3249: 13:17 mixed into a stopped player
+        head += (" NOTE: the player is loaded but NOT playing, so this mix will sit"
+                 " there silently until you dj_resume (announce first).")
 
     if not loaded_now:
         if not upcoming:
@@ -944,21 +1119,28 @@ async def dj_mix(
         data = await _enqueue("play_now", {"track_ids": upcoming})
         if isinstance(data, str):
             return data
-        return head + f" Nothing was loaded, so it starts now (command #{data.get('id')})."
+        return head + f" Nothing was loaded, so it starts now (command #{data.get('id')})." + _missing_note(data)  # #3249
 
-    data = await _enqueue("replace_upcoming", {"track_ids": upcoming})
-    if isinstance(data, str):
-        return data
-    ack = await _await_ack(int(data["id"]))
-    if ack is None:
-        return head + (
-            f" Sent replace_upcoming (command #{data['id']}) after the current song;"
-            " no ack yet — check dj_command_status."
-        )
-    if ack.get("ack_status") == "ok":
-        return head + f" Queued after the current song (command #{data['id']})."
-    if ack.get("ack_status") != "unknown_type":
-        return head + f" The phone refused it: {ack.get('ack_status')} {ack.get('ack_detail') or ''}".rstrip()
+    if not await _device_lacks_replace_upcoming():  # #3249: don't re-send a known failure
+        # Only the first chunk rides replace_upcoming; the rest is appended once
+        # the phone has said yes (an unknown_type must not leave stray appends).
+        first, tail = upcoming[:QUEUE_CHUNK], upcoming[QUEUE_CHUNK:]  # #3249
+        data = await _enqueue("replace_upcoming", {"track_ids": first})
+        if isinstance(data, str):
+            return data
+        ack = await _await_ack(int(data["id"]))
+        if ack is None:
+            return head + (
+                f" Sent replace_upcoming (command #{data['id']}) after the current song;"
+                " no ack yet — check dj_command_status."
+                + (f" {len(tail)} more track(s) NOT sent yet; add them once it acks." if tail else "")
+            )
+        if ack.get("ack_status") == "ok":
+            more = await _enqueue("queue", {"track_ids": tail}) if tail else None  # #3249
+            extra = f" plus {_sent_count(more, len(tail))} appended" if isinstance(more, dict) else ""
+            return head + f" Queued after the current song (command #{data['id']}){extra}."
+        if ack.get("ack_status") != "unknown_type":
+            return head + f" The phone refused it: {ack.get('ack_status')} {ack.get('ack_detail') or ''}".rstrip()
 
     # Older phone build without replace_upcoming: it can only append, so send
     # just the new tracks that survived trimming. The old tail stays as it was.
@@ -970,9 +1152,9 @@ async def dj_mix(
     if isinstance(data, str):
         return data
     return head + (
-        f" Old phone build can't reshuffle the queue, so appended the {len(fresh)}"
+        f" Old phone build can't reshuffle the queue, so appended the {_sent_count(data, len(fresh))}"
         f" new track(s) to the end instead (command #{data.get('id')})."
-    )
+    ) + _missing_note(data)  # #3249
 
 def _describe_age(seconds: float | None) -> str:
     if seconds is None:
@@ -1300,8 +1482,12 @@ async def dj_now_playing() -> str:
             if device.get("connected")
             else "No player has reported state."
         )
-        return f"Nothing is playing. {why}\n{device_line}".rstrip()
+        errs = "\n".join(await _player_error_lines())  # #3249
+        return f"Nothing is playing. {why}\n{device_line}\n{errs}".rstrip()
     age = device.get("last_state_age_seconds")
+    if age is None and s.get("updated_at"):  # #3249: age from the snapshot itself
+        import time
+        age = time.time() - float(s["updated_at"])
     if age is not None and age > 60:
         # Stale state is worse than no state: it reads as live and isn't.
         device_line += (
@@ -1329,6 +1515,7 @@ async def dj_now_playing() -> str:
             )
     if device_line:
         lines.append(device_line)
+    lines += await _player_error_lines()  # #3249
     active = device.get("active_device_id")
     effective = device.get("effective_target_device_id")
     if active is not None:

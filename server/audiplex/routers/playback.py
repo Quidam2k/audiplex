@@ -557,3 +557,47 @@ def plan_owner_mix(
         trimmed_duplicates=plan.trimmed_duplicates,
         summary=plan_summary(plan),
     )
+
+
+# ----- #3249: which track ids can actually stream -----
+#
+# 2026-09-28: a drive letter moved (E: -> H:) under 277 tracks. The stream route
+# 404'd them, the phone ACKED play_now anyway, and Todd heard nothing. The DJ
+# MCP asks here before it sends a track list, so a dead path is never queued.
+
+from pydantic import BaseModel as _BaseModel  # noqa: E402  #3249
+
+
+class PlayableRequest(_BaseModel):  # #3249
+    track_ids: list[int] = []
+
+
+class PlayableResult(_BaseModel):  # #3249
+    playable: list[int]
+    missing: list[int]
+
+
+@router.post("/tracks/playable", response_model=PlayableResult)
+def playable_tracks(
+    body: PlayableRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Split track ids into ones whose file is on disk and ones that aren't (#3249).
+
+    Order is preserved. An id with no track row counts as missing. Negative ids
+    (DJ voice breaks) pass through untouched; they are not library files.
+    """
+    import os  # #3249
+    from audiplex.models import Track  # #3249
+
+    wanted = [i for i in body.track_ids if i > 0]
+    paths = dict(db.query(Track.id, Track.file_path).filter(Track.id.in_(wanted)).all()) if wanted else {}
+    playable: list[int] = []
+    missing: list[int] = []
+    for i in body.track_ids:
+        if i <= 0 or (paths.get(i) and os.path.exists(paths[i])):
+            playable.append(i)
+        else:
+            missing.append(i)
+    return PlayableResult(playable=playable, missing=missing)
