@@ -13,6 +13,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,6 +25,8 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.dropWhile
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -130,6 +136,73 @@ internal fun replayResult(original: DispatchResult?, deliveryCount: Int): Dispat
 internal fun shouldReport(playing: Boolean, key: String, lastKey: String, sinceLastMs: Long): Boolean =
     playing || key != lastKey || sinceLastMs >= IDLE_REPORT_INTERVAL_MS
 
+/** Catalog lookups in flight at once while resolving a DJ track list (#3249). */
+internal const val RESOLVE_PARALLELISM = 8
+
+/**
+ * Resolve [ids] with at most [parallelism] fetches in flight, keeping order and
+ * dropping ids that fail or come back null (#3249).
+ *
+ * One lookup at a time is what kept a ~990-track queue busy for ~3 minutes
+ * on 2026-09-28.
+ */
+internal suspend fun <T : Any> resolveConcurrently(
+    ids: List<Int>,
+    parallelism: Int = RESOLVE_PARALLELISM,
+    fetch: suspend (Int) -> T?,
+): List<T> = coroutineScope {
+    val gate = Semaphore(parallelism)
+    ids.map { id ->
+        async {
+            gate.withPermit {
+                try {
+                    fetch(id)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    null
+                }
+            }
+        }
+    }.awaitAll().filterNotNull()
+}
+
+/**
+ * Keeps polling while commands run (#3249).
+ *
+ * [poll] feeds an unbounded inbox; one executor drains it in arrival order, so
+ * commands still run one at a time. Before this the long-poll stopped for as
+ * long as a command took, and the server logged a slow queue as a link gap. A
+ * redelivery of a still-running command now waits behind it and replays the
+ * real outcome instead of racing it.
+ */
+internal class CommandPump<T : Any>(
+    private val poll: suspend () -> T?,
+    private val handle: suspend (T) -> Unit,
+) {
+    suspend fun run(): Unit = coroutineScope {
+        val inbox = Channel<T>(Channel.UNLIMITED)
+        launch {
+            for (cmd in inbox) {
+                try {
+                    handle(cmd)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // handle() reports its own failures; never let one stop the drain.
+                }
+            }
+        }
+        try {
+            while (isActive) {
+                poll()?.let { inbox.send(it) }
+            }
+        } finally {
+            inbox.close()
+        }
+    }
+}
+
 @Singleton
 class DjCommandClient @Inject constructor(
     private val apiHolder: ApiServiceHolder,
@@ -181,27 +254,29 @@ class DjCommandClient @Inject constructor(
         reportJob?.cancel(); reportJob = null
     }
 
-    private suspend fun commandLoop() {
-        while (coroutineContext[Job]?.isActive == true) {
-            val api = apiHolder.api
-            val token = runCatching { settingsStore.authToken.first() }.getOrDefault("")
-            if (api == null || token.isBlank()) {
-                _linkState.value = LinkState.UNCONFIGURED
-                delay(3000) // not logged in / no server yet — wait and retry
-                continue
-            }
-            try {
-                val resp = api.getNextPlaybackCommand()
-                _linkState.value = LinkState.CONNECTED
-                if (resp.code() == 204) continue // long-poll timeout — re-issue
-                val cmd = resp.body() ?: continue
-                handle(cmd)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _linkState.value = LinkState.OFFLINE
-                delay(2000) // network blip / Tailscale down — back off and retry
-            }
+    /** Poll and execute separately, so a slow command never silences the link (#3249). */
+    private suspend fun commandLoop() = CommandPump(::pollOnce, ::handle).run()
+
+    /** One long-poll. Null means nothing to run (timeout, no login, or a failure after its back-off). */
+    private suspend fun pollOnce(): DjCommandDto? {
+        val api = apiHolder.api
+        val token = runCatching { settingsStore.authToken.first() }.getOrDefault("")
+        if (api == null || token.isBlank()) {
+            _linkState.value = LinkState.UNCONFIGURED
+            delay(3000) // not logged in / no server yet — wait and retry
+            return null
+        }
+        return try {
+            val resp = api.getNextPlaybackCommand()
+            _linkState.value = LinkState.CONNECTED
+            if (resp.code() == 204) null // long-poll timeout — re-issue
+            else resp.body()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            _linkState.value = LinkState.OFFLINE
+            delay(2000) // network blip / Tailscale down — back off and retry
+            null
         }
     }
 
@@ -456,7 +531,7 @@ class DjCommandClient @Inject constructor(
     private suspend fun resolveTracks(ids: List<Int>): List<TrackSchema> {
         if (ids.isEmpty()) return emptyList()
         val api = apiHolder.api ?: return emptyList()
-        return ids.mapNotNull { id -> runCatching { api.getTrack(id) }.getOrNull() }
+        return resolveConcurrently(ids) { id -> api.getTrack(id) }
     }
 
     /**
