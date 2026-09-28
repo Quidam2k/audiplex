@@ -640,7 +640,8 @@ def _spec_cues(db: Session, spec_id) -> list[dict]:
     ).first()
     notes = json.loads(row[0]) if row and row[0] else []
     return [
-        {**n, "done": False, "held_boundaries": n.get("held_boundaries", 0)}
+        # planned: a spec's cues never go stale on Todd speaking (#5544)
+        {**n, "done": False, "held_boundaries": n.get("held_boundaries", 0), "planned": True}
         for n in notes
         if n.get("status", "pending") == "pending"
     ]

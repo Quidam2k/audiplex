@@ -728,3 +728,79 @@ def test_clock_slot():
     assert dj_triggers.clock_slot({"minutes": [0, 15, 30, 45]}, t) == datetime(2026, 9, 28, 10, 30)
     assert dj_triggers.clock_slot({"at": "11:00"}, t) == datetime(2026, 9, 27, 11, 0)
     assert dj_triggers.clock_slot({"at": "10:00"}, t) == datetime(2026, 9, 28, 10, 0)
+
+
+# ----- #5544: staleness only for REACTIVE cues -----
+
+
+def test_planned_cue_ignores_staleness_and_fires(engine):
+    rendered = time.time() - 60
+    _speech(engine, spoke=_iso(rendered + 30))  # he spoke after it was rendered
+    pool = _pool()
+    pool.state["pending_cues"] = [_cue(40, "track_end", 10, rendered_at=rendered, planned=True)]
+    bus.set_state(_state(10))
+    assert len(_cmds("announce")) == 1
+    assert pool.state["pending_cues"][0]["status"] == "fired"
+
+
+def test_old_render_is_planned_and_not_stale(engine):
+    rendered = time.time() - dj_triggers.REACTIVE_WINDOW_S - 120
+    _speech(engine, spoke=_iso(rendered + 60))
+    pool = _pool()
+    pool.state["pending_cues"] = [_cue(41, "track_end", 10, rendered_at=rendered)]
+    bus.set_state(_state(10))
+    assert len(_cmds("announce")) == 1
+    assert pool.state["pending_cues"][0]["reactive"] is False
+
+
+def test_planned_cue_still_held_then_dropped_after_two_boundaries(engine):
+    _speech(engine, talking=True)
+    pool = _pool()
+    pool.state["pending_cues"] = [_cue(42, "track_end", 10, planned=True)]
+    bus.set_state(_state(10, after=[11, 12]))
+    assert pool.state["pending_cues"][0]["status"] == "held"
+    bus.set_state(_state(11, after=[12]))
+    cue = pool.state["pending_cues"][0]
+    assert cue["status"] == "dropped" and cue["drop_reason"] == "held_too_long"
+    assert _cmds("announce") == []
+
+
+def test_reactive_classification_is_frozen_at_first_check(engine):
+    rendered = time.time() - 300  # reactive at its first check
+    _speech(engine, talking=True)
+    pool = _pool()
+    cue = _cue(43, "track_end", 10, rendered_at=rendered)
+    assert dj_triggers.hold_guard(cue) == "held" and cue["reactive"] is True
+    # Much later he has spoken since the render: aging past the window must not rescue it.
+    later = {"talking": False, "last_spoke_at": rendered + 30, "readable": True}
+    cue["rendered_at"] = rendered
+    assert dj_triggers.is_reactive(cue, now=rendered + 10_000) is True
+    assert dj_triggers.hold_guard(cue, later) == "dropped" and cue["drop_reason"] == "stale"
+
+
+def test_spec_cues_load_as_planned(client, specs):
+    assert client.post("/api/playback/mix-specs", json={"name": "ride2"}).status_code == 200
+    client.post("/api/playback/mix-specs/ride2/notes", json={
+        "after_track_id": 5, "say": "hi", "clip_id": "4243", "clip_title": "DJ break",
+        "clip_duration": 2.5, "rendered_at": "2026-09-28T22:00:00Z",
+    })
+    spec = client.get("/api/playback/mix-specs/ride2").json()
+    r = client.post("/api/playback/pool", json={"spec_id": spec["id"], "lanes": {"a": [1, 2]}})
+    assert r.status_code == 200, r.text
+    cues = dj_pool.get_pool().state["pending_cues"]
+    assert cues and all(c.get("planned") is True for c in cues)
+
+
+def test_planned_cue_waits_for_the_floor_while_todd_is_speaking(engine):
+    # #5546: planned is exempt from STALENESS only, never from the floor.
+    rendered = time.time() - 3600  # planned, and he spoke long after the render
+    _speech(engine, talking=True, spoke=_iso(time.time()))  # STT shows him mid-sentence
+    pool = _pool()
+    pool.state["pending_cues"] = [_cue(44, "track_end", 10, rendered_at=rendered, planned=True)]
+    bus.set_state(_state(10, after=[11]))
+    cue = pool.state["pending_cues"][0]
+    assert cue["status"] == "held" and not cue.get("done")  # deferred, not dropped
+    assert _cmds("announce") == []  # not played over him
+    _speech(engine, talking=False, spoke=_iso(time.time()))  # he finished
+    bus.set_state(_state(11))
+    assert len(_cmds("announce")) == 1 and cue["status"] == "fired"

@@ -21,8 +21,11 @@ interrupts a song or uses play_now; a "pause" action means pause AFTER the clip.
 Hold guard (hold_guard(), the one place this is decided). Before any cue fires it
 reads the speech-state file: while Todd is talking/typing the cue is held and
 retried at the next boundary, and dropped after MAX_HELD_BOUNDARIES missed ones.
-A clip rendered before Todd last spoke is stale and dropped. Only a missing or
-unreadable file is fail-open.
+A REACTIVE clip (rendered within REACTIVE_WINDOW_S of its first check, i.e. about
+the conversation) rendered before Todd last spoke is stale and dropped. PLANNED cues
+(a spec's notes, or anything rendered long ahead) skip that check: hold +
+drop-after-MAX_HELD_BOUNDARIES only (#5544). Only a missing or unreadable file is
+fail-open.
 
 State lives in the DJ pool's state dict (persisted with it): pending_cues (shared
 with DJPool), outro, trigger_last_track, chime_settings, chime_runtime.
@@ -47,6 +50,8 @@ logger = logging.getLogger("audiplex.dj_triggers")
 TRIGGER_KINDS = ("track_end", "track_start", "clock", "geofence")
 ACTION_TYPES = ("insert_clip", "queue_track", "bed_chime", "pause")
 MAX_HELD_BOUNDARIES = 2
+# A cue rendered within this many seconds of its first check is REACTIVE (#5544).
+REACTIVE_WINDOW_S = 600
 CHIME_LATE_LIMIT_S = 20.0
 CHIME_MINUTES = (0, 15, 30, 45)
 DEFAULT_CHIME_SETTINGS = {"enabled": True, "volume": 0.12, "hour_strikes": False}
@@ -321,17 +326,33 @@ def _drop(cue: dict, reason: str) -> str:
     return "dropped"
 
 
+def is_reactive(cue: dict, now: Optional[float] = None) -> bool:
+    """Reactive = about the conversation, so it can go stale. Decided once, on the
+    cue's first check, and stored as cue["reactive"] so aging never flips it (#5544).
+    planned=True (spec cues) is never reactive; otherwise rendered within
+    REACTIVE_WINDOW_S of that first check."""
+    if cue.get("planned"):
+        return False
+    if isinstance(cue.get("reactive"), bool):
+        return cue["reactive"]
+    now = time.time() if now is None else now
+    rendered = _parse_ts(cue.get("rendered_at"))
+    cue["reactive"] = rendered is not None and now - rendered <= REACTIVE_WINDOW_S
+    return cue["reactive"]
+
+
 def hold_guard(cue: dict, speech: Optional[dict] = None) -> str:
     """'fire' | 'held' | 'dropped' for a cue about to fire. The only hold guard."""
     global _FAILOPEN_WARNED
     speech = speech if speech is not None else read_speech_state()
     last = speech.get("last_spoke_at")
     rendered = _parse_ts(cue.get("rendered_at"))
+    reactive = is_reactive(cue)  # #5544: only reactive cues can go stale
     if last is None:
         if not _FAILOPEN_WARNED:
             _FAILOPEN_WARNED = True
             logger.info("staleness check fail-open: no todd_last_spoke_at in the speech state")
-    elif rendered is not None and last > rendered:
+    elif reactive and rendered is not None and last > rendered:
         return _drop(cue, "stale")
     if speech.get("talking"):
         cue["held_boundaries"] = int(cue.get("held_boundaries") or 0) + 1
