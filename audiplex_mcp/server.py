@@ -768,6 +768,37 @@ def _someone_talking() -> bool:  # #2858
     return any(state.get(k) for k in ("stt_active", "talk_active", "composing"))
 
 
+async def _render_clip(text: str, title: str) -> dict | str:
+    """Synthesize `text` in the DJ voice and upload it to /api/dj/clips.
+    The one render path for dj_announce and pre-rendered cue patter (#5480).
+    Returns the upload's JSON ({clip_id, url, duration_seconds}) or an error string."""
+    try:
+        clip_path = await tts_backend.synthesize(text)
+    except tts_backend.TtsNotConfigured as e:
+        return f"TTS is not configured: {e}"
+    except tts_backend.TtsFailed as e:
+        return f"Speech synthesis failed: {e}"
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            with open(clip_path, "rb") as fh:
+                resp = await client.post(
+                    f"{AUDIPLEX_URL}/api/dj/clips",
+                    headers=_headers(),
+                    files={"file": (clip_path.name, fh, "application/octet-stream")},
+                    data={"title": title},
+                )
+        if resp.status_code == 401:
+            return "Auth failed (401) uploading the clip. Check AUDIPLEX_TOKEN."
+        if resp.status_code >= 400:
+            return f"Clip upload failed ({resp.status_code}): {resp.text[:300]}"
+        return resp.json()
+    except httpx.HTTPError as e:
+        return f"Clip upload failed: {e}"
+    finally:
+        clip_path.unlink(missing_ok=True)
+
+
 @mcp.tool()
 async def dj_announce(text: str, mode: str = "next", title: str = "DJ break") -> str:
     """Speak a DJ voice break on the device: synthesizes YOUR copy to audio,
@@ -796,31 +827,9 @@ async def dj_announce(text: str, mode: str = "next", title: str = "DJ break") ->
     else:
         return "Todd is talking, so no break was queued. Try again in a moment."
 
-    try:
-        clip_path = await tts_backend.synthesize(text)
-    except tts_backend.TtsNotConfigured as e:
-        return f"TTS is not configured: {e}"
-    except tts_backend.TtsFailed as e:
-        return f"Speech synthesis failed: {e}"
-
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            with open(clip_path, "rb") as fh:
-                resp = await client.post(
-                    f"{AUDIPLEX_URL}/api/dj/clips",
-                    headers=_headers(),
-                    files={"file": (clip_path.name, fh, "application/octet-stream")},
-                    data={"title": title},
-                )
-        if resp.status_code == 401:
-            return "Auth failed (401) uploading the clip. Check AUDIPLEX_TOKEN."
-        if resp.status_code >= 400:
-            return f"Clip upload failed ({resp.status_code}): {resp.text[:300]}"
-        clip = resp.json()
-    except httpx.HTTPError as e:
-        return f"Clip upload failed: {e}"
-    finally:
-        clip_path.unlink(missing_ok=True)
+    clip = await _render_clip(text, title)
+    if isinstance(clip, str):
+        return clip
 
     data = await _enqueue(
         "announce",
@@ -3180,12 +3189,51 @@ async def dj_pool_status() -> str:
             f"  {lane['label']:20} {lane['remaining']:3} remaining, "
             f"{lane['played_count']:3} played{exhausted_mark}{last_played}"
         )
-    pending = status.get("pending_cues") or []
-    if pending:
-        lines.append(f"Pending cues: {len(pending)}")
-        for cue in pending[:3]:
-            lines.append(f"  Cue #{cue.get('id')}: {cue.get('say') or 'n/a'}")
+    cues = status.get("cues") or status.get("pending_cues") or []
+    if cues:
+        lines.append(f"Pending cues: {len(cues)}")
+        for cue in cues[:6]:
+            trig = cue.get("trigger") or {}
+            held = f", held {cue.get('held_boundaries')}x" if cue.get("held_boundaries") else ""
+            lines.append(
+                f"  Cue #{cue.get('id')} [{cue.get('status', 'pending')}{held}] "
+                f"{trig.get('kind')} {trig.get('track_id') or ''}: {cue.get('say') or 'n/a'}"
+            )
+    chimes = status.get("chimes") or {}
+    if chimes:
+        if status.get("chimes_unsupported"):
+            state = "UNSUPPORTED by the phone app (disabled this session)"
+        else:
+            state = "on" if chimes.get("enabled") else "off"
+        strikes = "on" if chimes.get("hour_strikes") else "off"
+        last = f", last: {chimes.get('last_result')}" if chimes.get("last_result") else ""
+        lines.append(f"Chimes: {state}, volume {chimes.get('volume')}, hour strikes {strikes}{last}")
+    outro = status.get("outro")
+    if outro:
+        pause = f", pause {outro.get('pause_state')}" if outro.get("pause_state") else ""
+        said = f": {outro.get('say')}" if outro.get("say") else ""
+        lines.append(f"Outro armed: after track {outro.get('track_id')}, {outro.get('status')}{pause}{said}")
     return "\n".join(lines)
+
+
+@mcp.tool()
+async def dj_chimes(
+    enabled: bool | None = None, volume: float | None = None, hour_strikes: bool | None = None
+) -> str:
+    """Westminster quarter chimes during a DJ pool (#5499): on/off, volume 0-1
+    (default 0.12, under the music), and whether :00 also strikes the hour.
+    Chimes ring at :15 :30 :45 :00 on the phone's bed layer only while a pool
+    is running and music is playing; never while Todd is talking."""
+    body = {k: v for k, v in
+            {"enabled": enabled, "volume": volume, "hour_strikes": hour_strikes}.items()
+            if v is not None}
+    try:
+        s = await _patch("/api/playback/pool/chimes", body)
+    except PermissionError as e:
+        return str(e)
+    state = "on" if s.get("enabled") else "off"
+    strikes = "on" if s.get("hour_strikes") else "off"
+    return f"Chimes {state}, volume {s.get('volume')}, hour strikes {strikes}."
 
 
 @mcp.tool()
@@ -3268,26 +3316,50 @@ async def dj_spec_note(
     say: str | None = None,
     trigger_kind: str = "track_end",
     clip_id: str | None = None,
+    agent: str | None = None,
 ) -> str:
     """Add a cue/note to a mix spec.
 
-    Cues fire when a trigger matches (e.g. at the end of a specific track)
-    and can play a track, announce patter, or both. If the running pool is
-    this spec's, the cue is armed on it immediately.
+    Cues fire when a trigger matches and can play a track, speak patter, or
+    both. trigger_kind 'track_end' + after_track_id: the patter plays right
+    after that song ends; 'track_start': right before that song starts.
+    say= is rendered to audio NOW in the DJ voice (the same synthesis
+    dj_announce uses) and stored as a clip on the cue, so nothing is spoken
+    live when it fires. A cue is held while Todd is talking and dropped if he
+    spoke after it was rendered. agent: who wrote the patter (shown on the
+    clip title, e.g. "DJ break · Jarvis"); defaults to DJ_PERSONA_NAME.
+    If the running pool is this spec's, the cue is armed on it immediately.
     """
+    body: dict = {
+        "after_track_id": after_track_id,
+        "play_track_id": play_track_id,
+        "say": say,
+        "trigger_kind": trigger_kind,
+        "clip_id": clip_id,
+    }
+    say_text = (say or "").strip()
+    if say_text and not clip_id:  # #5480: render ahead of time, never live at fire time
+        who = agent or dj_persona.persona_name()
+        title = f"DJ break · {who}"
+        clip = await _render_clip(say_text, title)
+        if isinstance(clip, str):
+            return f"ERROR: cue not added, the patter could not be rendered: {clip}"
+        body.update(
+            clip_id=clip["clip_id"],
+            clip_title=title,
+            clip_duration=clip.get("duration_seconds"),
+            rendered_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            voice=tts_backend.voice(),
+            agent=who,
+        )
     try:
-        cue = await _post(f"/api/playback/mix-specs/{quote(spec, safe='')}/notes", {
-            "after_track_id": after_track_id,
-            "play_track_id": play_track_id,
-            "say": say,
-            "trigger_kind": trigger_kind,
-            "clip_id": clip_id,
-        })
+        cue = await _post(f"/api/playback/mix-specs/{quote(spec, safe='')}/notes", body)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             return f"ERROR: Spec '{spec}' not found"
         raise
-    return f"Added cue to spec '{spec}': {cue.get('id')}"
+    rendered = f" (patter pre-rendered as clip #{body['clip_id']})" if body.get("clip_title") else ""
+    return f"Added cue to spec '{spec}': {cue.get('id')}{rendered}"
 
 
 @mcp.tool()

@@ -42,7 +42,7 @@ client simply re-issues.
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, selectinload
 
@@ -53,7 +53,7 @@ from audiplex.auth import get_current_user
 from audiplex.config import get_settings
 from audiplex.database import get_db
 from audiplex.models import Favorite, Playlist, TrackRating, User
-from audiplex.playback_bus import bus, read_link_history, read_persisted_exits
+from audiplex.playback_bus import LEGACY_DEVICE_ID, bus, read_link_history, read_persisted_exits
 from audiplex.routers.music import (
     FAVORITE_TYPES,
     _get_playlist_detail,
@@ -113,6 +113,7 @@ async def post_command(cmd: PlaybackCommand, user: User = Depends(get_current_us
 
 @router.get("/command/next")
 async def next_command(
+    request: Request,
     device_id: str | None = Query(None),
     device_name: str | None = Query(None),
     device_type: str | None = Query(None),
@@ -125,6 +126,12 @@ async def next_command(
     only receives commands while it is the active device (Spotify-Connect-style
     targeting); see playback_bus for the fallback rules.
     """
+    if device_id in (None, LEGACY_DEVICE_ID):
+        # The phone reaches us at ITS configured base URL; the chime bed player
+        # needs that absolute URL (#5499). Relative clip URLs don't need it.
+        from audiplex import dj_triggers
+
+        dj_triggers.note_client_base_url(str(request.base_url))
     rec = await bus.next(
         LONGPOLL_TIMEOUT_SECONDS,
         device_id=device_id,
@@ -710,6 +717,67 @@ def stop_pool(user: User = Depends(get_current_user)):
     return {"stopped": get_pool().stop()}
 
 
+@router.post("/pool/outro", tags=["dj_pool"])
+async def arm_pool_outro(body: dict, user: User = Depends(get_current_user)):
+    """Arm a one-shot ride-end outro (#5515): a track_end cue on the CURRENT track
+    that inserts the outro clip after it, then pauses once the clip has played.
+    Never cuts a song. body: {clip_id} or {say} (rendered here with the DJ TTS),
+    optional title, agent, duration_seconds.
+    409 when nothing is playing; 503 when {say} cannot be rendered."""
+    from audiplex import dj_triggers
+
+    agent = body.get("agent")
+    title = body.get("title") or (f"Ride outro · {agent}" if agent else "Ride outro")
+    say = body.get("say")
+    clip_id = body.get("clip_id")
+    duration = body.get("duration_seconds")
+    rendered_at = None
+    st = bus.get_state() or {}
+    track = st.get("track") or {}
+    if not st.get("playing") or not isinstance(track.get("id"), int) or track["id"] <= 0:
+        return JSONResponse({"armed": False, "reason": "nothing playing"}, status_code=409)
+    if clip_id is None:
+        if not isinstance(say, str) or not say.strip():
+            raise HTTPException(status_code=400, detail="clip_id or say required")
+        try:
+            clip = await dj_triggers.render_say(say.strip(), title)
+        except Exception as e:
+            return JSONResponse({"armed": False, "reason": f"render failed: {e}"}, status_code=503)
+        clip_id, duration, rendered_at = clip["clip_id"], clip["duration_seconds"], clip["rendered_at"]
+    try:
+        clip_id = int(clip_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="clip_id must be an integer")
+    result = dj_triggers.arm_outro(
+        bus, clip_id, title, duration_seconds=duration, rendered_at=rendered_at,
+        agent=agent, say=say,
+    )
+    if not result.get("armed"):
+        return JSONResponse(result, status_code=409)
+    return result
+
+
+@router.delete("/pool/outro", tags=["dj_pool"])
+def disarm_pool_outro(user: User = Depends(get_current_user)):
+    """Cancel an armed outro that has not paused yet (rider back on the bike)."""
+    from audiplex import dj_triggers
+
+    return {"disarmed": dj_triggers.disarm_outro()}
+
+
+@router.patch("/pool/chimes", tags=["dj_pool"])
+def set_pool_chimes(body: dict, user: User = Depends(get_current_user)):
+    """Chime settings (#5499): {enabled?, volume? 0-1, hour_strikes?}."""
+    from audiplex import dj_triggers
+
+    vol = body.get("volume")
+    if vol is not None and not isinstance(vol, (int, float)):
+        raise HTTPException(status_code=400, detail="volume must be a number 0-1")
+    return dj_triggers.set_chime_settings(
+        enabled=body.get("enabled"), volume=vol, hour_strikes=body.get("hour_strikes"),
+    )
+
+
 # ----- DJ Specs: persistent mix specs with cues (#5477) -----
 
 
@@ -730,6 +798,14 @@ def create_mix_spec(
     if not name:
         raise HTTPException(status_code=400, detail="name required")
 
+    # request_text is a TEXT column; a structured value (the seed keeps Todd's
+    # verbatim messages as a list) 500'd the insert (#5530), so encode it.
+    request_text = body.get("request_text", "")
+    if request_text is None:
+        request_text = ""
+    elif not isinstance(request_text, str):
+        request_text = json.dumps(request_text)
+
     db.execute(text("DELETE FROM dj_mix_specs WHERE name = :name"), {"name": name})
     db.execute(
         text("""
@@ -742,7 +818,7 @@ def create_mix_spec(
         """),
         {
             "name": name,
-            "request_text": body.get("request_text", ""),
+            "request_text": request_text,
             "sources_json": json.dumps(body.get("sources", [])),
             "balance": body.get("balance", "even"),
             "ahead": body.get("ahead", 4),
@@ -873,6 +949,15 @@ def add_spec_note(
         "clip_id": body.get("clip_id"),
         "status": "pending",
     }
+    # A pre-rendered patter clip (#5480): the cue fires the clip, never live speech.
+    for key in ("clip_title", "clip_duration", "rendered_at", "voice", "agent"):
+        if body.get(key) is not None:
+            note[key] = body[key]
+    if note["clip_id"] is not None:
+        try:
+            note["clip_id"] = int(note["clip_id"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="clip_id must be an integer")
     notes.append(note)
 
     db.execute(

@@ -1,0 +1,7 @@
+Audiplex chime clips (q00.wav, q15.wav, q30.wav, q45.wav, and any hour_NN.wav)
+
+These clips are self-synthesized by server/audiplex/chime_synth.py using
+additive synthesis with numpy. They contain no third-party audio, recordings
+or samples. The Westminster Quarters melody (1793) is in the public domain.
+
+The clips may be used, copied and modified freely.

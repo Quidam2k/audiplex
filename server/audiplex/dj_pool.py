@@ -120,6 +120,7 @@ class DJPool:
             },
             "round_robin_index": 0,  # Current lane in round-robin
             "pending_cues": [],  # {id, trigger, play_track, say, status, held_boundaries}
+            "outro": None,  # armed ride-end outro cue (#5515, dj_triggers)
         }
 
     def _persist(self) -> None:
@@ -189,7 +190,11 @@ class DJPool:
     def stop(self) -> bool:
         """Clear pool state. Returns True only if a pool was running (#5495)."""
         was_active = self.is_active()
+        # Chime settings are Todd's preference, not session state (#5499).
+        chime_settings = self.state.get("chime_settings")
         self.state = self._empty_state()
+        if chime_settings:
+            self.state["chime_settings"] = chime_settings
         self._persist()
         return was_active
 
@@ -227,7 +232,23 @@ class DJPool:
             "source_counts": self._count_sources(),  # Backward compat
             "starvation_config": self.state.get("starvation_config", {}),
             "pending_cues": self.get_pending_cues(),
+            **self._trigger_status(),
         }
+
+    def _trigger_status(self) -> dict[str, Any]:
+        """Cue detail, chimes and the armed outro from the trigger engine (#5480 #5499 #5515)."""
+        try:
+            from audiplex import dj_triggers
+
+            t = dj_triggers.status(self)
+            return {
+                "cues": t["cues"],
+                "chimes": t["chimes"],
+                "chimes_unsupported": t["chimes_unsupported"],
+                "outro": t["outro"],
+            }
+        except Exception as e:
+            return {"trigger_status_error": str(e)}
 
     def _count_sources(self) -> dict[str, int]:
         """Count tracks per source in eligible set (legacy method)."""
@@ -350,9 +371,13 @@ class DJPool:
         ahead = self.state.get("ahead", 4)
 
         # Matching cues first (#5495): their play_track leads the picks.
+        from audiplex.dj_triggers import is_engine_cue
         from audiplex.trigger_matcher import match_triggers
         if cues is None:
             cues = self.state.setdefault("pending_cues", [])
+        # Clip / action cues belong to dj_triggers (held/stale guard, exact
+        # boundary placement); only play_track/say-only cues are matched here.
+        cues = [c for c in cues if not is_engine_cue(c)]
         events = [{"kind": "track_start", "track_id": current_track_id}]
         if previous_track_id is not None:
             events.append({"kind": "track_end", "track_id": previous_track_id})

@@ -16,6 +16,7 @@ PlaybackCommand.type is free-form.
 """
 
 import os
+import re
 import time
 from pathlib import Path
 
@@ -41,13 +42,27 @@ def _clip_dir() -> Path:
     return d
 
 
-def _prune(directory: Path) -> int:
-    """Delete clips older than CLIP_TTL_DAYS. Best-effort: a locked or
-    already-deleted file must never fail the upload that triggered the prune."""
+def _pinned_clip_ids() -> set[int]:
+    """Clips a pending DJ cue still needs (#5480): never pruned until it fires."""
+    try:
+        from audiplex.dj_triggers import pinned_clip_ids
+
+        return pinned_clip_ids()
+    except Exception:
+        return set()
+
+
+def _prune(directory: Path, pinned: set[int] | None = None) -> int:
+    """Delete clips older than CLIP_TTL_DAYS, except those a pending cue pins.
+    Best-effort: a locked or already-deleted file must never fail the upload
+    that triggered the prune."""
     cutoff = time.time() - CLIP_TTL_DAYS * 86400
+    pinned = _pinned_clip_ids() if pinned is None else pinned
     removed = 0
     for f in directory.iterdir():
         if not f.is_file() or f.suffix.lower() not in ALLOWED_EXTS:
+            continue
+        if f.stem.isdigit() and int(f.stem) in pinned:
             continue
         try:
             if f.stat().st_mtime < cutoff:
@@ -90,6 +105,17 @@ async def upload_clip(
             detail=f"Clip too large ({len(data)} bytes, max {MAX_CLIP_BYTES})",
         )
 
+    clip_id, duration = store_clip_bytes(data, ext)
+    return DjClipCreated(
+        clip_id=clip_id,
+        url=f"/api/dj/clips/{clip_id}",
+        duration_seconds=duration,
+    )
+
+
+def store_clip_bytes(data: bytes, ext: str) -> tuple[int, float | None]:
+    """Write a clip into the clip dir; (clip_id, duration). Shared by the upload
+    route and the server-side outro render (#5515)."""
     directory = _clip_dir()
     _prune(directory)
 
@@ -109,12 +135,7 @@ async def upload_clip(
             duration = float(probed.info.length)
     except Exception:
         duration = None  # a clip that won't probe still plays; don't fail the upload
-
-    return DjClipCreated(
-        clip_id=clip_id,
-        url=f"/api/dj/clips/{clip_id}",
-        duration_seconds=duration,
-    )
+    return clip_id, duration
 
 
 @router.get("/clips/{clip_id}")
@@ -124,3 +145,24 @@ def get_clip(clip_id: int, request: Request, user: User = Depends(get_current_us
         raise HTTPException(status_code=404, detail=f"Clip {clip_id} not found")
     ext = os.path.splitext(path)[1].lower()
     return serve_file(str(path), EXT_MIME.get(ext, "application/octet-stream"), request)
+
+
+_CHIME_NAME = re.compile(r"^(q(00|15|30|45)|hour_(0[1-9]|1[0-2]))$")
+
+
+@router.get("/chimes/{name}")
+def get_chime(name: str, request: Request, user: User = Depends(get_current_user)):
+    """A Westminster chime clip for the bed layer (#5499). Quarter clips are
+    committed assets; hour-strike variants are rendered on first use."""
+    from audiplex import dj_triggers
+
+    if not _CHIME_NAME.match(name):
+        raise HTTPException(status_code=404, detail=f"No chime '{name}'")
+    path = dj_triggers.chime_dir() / f"{name}.wav"
+    if name.startswith("hour_"):
+        from audiplex import chime_synth
+
+        path, _ = chime_synth.ensure_hour_clip(int(name[5:]), dj_triggers.generated_chime_dir())
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"Chime '{name}' not found")
+    return serve_file(str(path), EXT_MIME.get(".wav", "audio/wav"), request)

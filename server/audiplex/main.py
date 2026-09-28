@@ -1,5 +1,6 @@
 """Audiplex — self-hosted audiobook server."""
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -48,7 +49,16 @@ async def lifespan(app: FastAPI):
             except StopIteration:
                 pass
 
-    yield
+    # DJ trigger clock feed: quarter chimes + clock cues (#5499).
+    from audiplex import dj_triggers
+    from audiplex.playback_bus import bus
+
+    ticker = asyncio.create_task(dj_triggers.run_ticker(bus))
+    try:
+        yield
+    finally:
+        ticker.cancel()
+        dj_triggers.set_loop(None)
 
 
 app = FastAPI(title="Audiplex", version="0.1.0", lifespan=lifespan)

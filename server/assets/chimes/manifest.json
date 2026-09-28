@@ -1,0 +1,22 @@
+{
+  "q00": {
+    "file": "q00.wav",
+    "sound_seconds": 15.6,
+    "total_seconds": 18.6
+  },
+  "q15": {
+    "file": "q15.wav",
+    "sound_seconds": 5.1,
+    "total_seconds": 8.1
+  },
+  "q30": {
+    "file": "q30.wav",
+    "sound_seconds": 8.6,
+    "total_seconds": 11.6
+  },
+  "q45": {
+    "file": "q45.wav",
+    "sound_seconds": 12.1,
+    "total_seconds": 15.1
+  }
+}

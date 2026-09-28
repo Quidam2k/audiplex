@@ -540,6 +540,8 @@ class PlaybackBus:
 
         # Hook: top_up the DJ pool if it's running (#5495, item 1)
         self._maybe_top_up_pool(state, device_key)
+        # Same place: DJ trigger cues at track boundaries (#5480 #5515)
+        self._maybe_run_triggers(state, device_key)
 
     def _renderer_id(self) -> str:
         """The device whose now-playing counts: the live active one, else the phone."""
@@ -632,6 +634,18 @@ class PlaybackBus:
                 self._enqueue("queue", {"track_ids": list(result["picks"])})
         except Exception as e:  # never let the pool break a state report
             print(f"[dj_pool] top-up skipped: {e}", flush=True)
+
+    def _maybe_run_triggers(self, state: dict[str, Any], device_key: str) -> None:
+        """Feed the renderer's report to the DJ trigger engine (#5480 #5515).
+        Runs whether or not a pool is active: an armed ride outro needs no pool."""
+        try:
+            if device_key != self._renderer_id():
+                return
+            from audiplex import dj_triggers
+
+            dj_triggers.on_state(state, self)
+        except Exception as e:  # never let a cue break a state report
+            print(f"[dj_triggers] boundary skipped: {e}", flush=True)
 
     def add_client_log(self, entry: dict[str, Any]) -> dict[str, Any]:
         """Append a client-shipped log entry. Server clock is authoritative for
