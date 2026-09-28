@@ -171,7 +171,7 @@ def test_big_lists_go_out_in_small_commands(wire):
     assert [c for c, _ in sent] == ["play_now", "queue"]
 
 
-def test_mix_skips_replace_upcoming_once_phone_said_unknown(monkeypatch):
+def test_mix_skips_replace_upcoming_once_phone_said_unknown(monkeypatch, tmp_path):
     sent = []
     state = {"playing": True, "track": {"id": 5}, "queue_index": 0,
              "queue": [{"index": 0, "id": 5}, {"index": 1, "id": 6}]}
@@ -192,6 +192,10 @@ def test_mix_skips_replace_upcoming_once_phone_said_unknown(monkeypatch):
     monkeypatch.setattr(mcp_server, "_get", fake_get)
     monkeypatch.setattr(mcp_server, "_post", fake_post)
     monkeypatch.setattr(mcp_server, "_enqueue_raw", fake_raw)
-    out = asyncio.run(mcp_server.dj_mix(track_ids=[7, 8], shuffle=False))
-    assert sent == ["queue"], sent
-    assert "appended the 2" in out
+    monkeypatch.setenv("DJ_MIX_SOURCES_FILE", str(tmp_path / "sources.json"))  # #5463
+    monkeypatch.setitem(mcp_server._SWAP, "task", None)
+    out = asyncio.run(mcp_server.dj_mix(track_ids=[7, 8], shuffle=False, exclude_recent_hours=0))
+    # #5463: no re-sent replace_upcoming AND no append (appending segregated the
+    # sources); the whole mix is swapped in at the song boundary instead.
+    assert sent == [], sent
+    assert "when the current song ends" in out

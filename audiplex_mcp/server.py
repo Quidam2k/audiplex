@@ -76,6 +76,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from audiplex_mcp import dj_bridge_watcher, dj_persona, tts_backend  # #2858 dj_patter
+from audiplex_mcp.mix_balance import balance_order, describe_head  # #5463
 
 AUDIPLEX_URL = os.environ.get("AUDIPLEX_URL", "http://localhost:8000").rstrip("/")
 
@@ -1036,6 +1037,150 @@ async def _await_ack(command_id: int, timeout: float = 12.0) -> dict | None:
     return None
 
 
+# ----- #5463: balanced mixes, recent-play exclusion, old-APK boundary swap -----
+#
+# 2026-09-28: Jarvis called dj_mix once per source. The phone build lacked
+# replace_upcoming, so each call APPENDED that source after the old tail: 992
+# Ren Faire tracks, then 277 YouTube, i.e. hours of one folder. Now every add
+# re-plans the WHOLE upcoming list, interleaves sources, drops recent plays,
+# and on an old build swaps the queue in at a song boundary instead.
+
+SWAP_NEAR_END_MS = 1500  # #5463: fire when the current song has this little left
+SWAP_START_GRACE_MS = 3000  # #5463: or within this far into the next song
+SWAP_MIN_WAIT_S = 20 * 60  # #5463
+SWAP_POLL_S = 1.0  # #5463
+_SWAP: dict = {"task": None, "status": "none", "detail": "", "ids": []}  # #5463
+
+
+def _mix_sources_path() -> Path:  # #5463
+    default = Path(__file__).resolve().parent.parent / "data" / "dj_mix_sources.json"
+    return Path(os.environ.get("DJ_MIX_SOURCES_FILE") or default)
+
+
+def _load_source_map() -> dict[int, str]:  # #5463
+    """Which source each queued track came from, shared by every persona's MCP."""
+    try:
+        raw = json.loads(_mix_sources_path().read_text(encoding="utf-8"))
+        return {int(k): str(v) for k, v in raw.items()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+
+
+def _save_source_map(source_of: dict[int, str], keep: list[int]) -> None:  # #5463
+    path = _mix_sources_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({str(i): source_of[i] for i in keep if i in source_of}),
+                        encoding="utf-8")
+    except OSError:
+        pass  # labels are a nicety; a mix must not fail over them
+
+
+def _source_label(src: dict) -> str:  # #5463: short, sayable
+    q = str(src.get("query", "")).rstrip("/\\")
+    return str(src.get("label") or q.replace("\\", "/").split("/")[-1] or src.get("kind", "source"))
+
+
+async def _recent_split(ids: list[int], hours: float) -> tuple[list[int], int]:  # #5463
+    """(ids not played in the last `hours`, how many were dropped). Fail-open."""
+    if hours <= 0 or not ids:
+        return list(ids), 0
+    minutes = hours * 60
+    try:
+        verdict = await _post("/api/playback/candidates/filter", {
+            "track_ids": ids,
+            "recording_cooldown_minutes": minutes,
+            "work_cooldown_minutes": minutes,
+        })
+    except Exception:
+        return list(ids), 0
+    gone = {int(s["track_id"]) for s in verdict.get("suppressed") or []}
+    return [i for i in ids if i not in gone], len(gone)
+
+
+def _speech_busy() -> bool:  # #5463: never swap audio over Todd or a persona clip (#2845)
+    """Todd talking/typing, or a persona holds the speaking claim."""
+    path = os.environ.get("DJ_SPEECH_STATE_FILE") or "Q:/Pantheon/data/runtime/speech_state.json"
+    try:
+        state = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return any(state.get(k) for k in ("stt_active", "talk_active", "composing", "current_claim_holder"))
+
+
+def _remaining_ms(state: dict) -> int | None:  # #5463
+    dur = int(state.get("duration_ms") or 0)
+    if dur <= 0:
+        return None
+    pos = int(state.get("position_ms") or 0)
+    if state.get("playing") and state.get("updated_at"):
+        import time
+        pos += max(0, int((time.time() - float(state["updated_at"])) * 1000))
+    return dur - pos
+
+
+def _swap_set(status: str, detail: str) -> None:  # #5463
+    _SWAP["status"], _SWAP["detail"] = status, detail
+    print(f"[dj_mix swap] {status}: {detail}", file=sys.stderr, flush=True)
+
+
+async def _boundary_swap(ids: list[int], start_id: int, max_wait_s: float) -> None:  # #5463
+    """Replace the queue with `ids` at the next song boundary, never mid-song.
+
+    Fires when the current song is about to end, or just after it changed (a
+    skip is a boundary too). Defers past any boundary where Todd is talking or
+    a persona clip / DJ break is playing: that boundary is let go and it waits
+    for the next one.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max_wait_s
+    failures = 0
+    while loop.time() < deadline:
+        await asyncio.sleep(SWAP_POLL_S)
+        try:
+            state = await _get("/api/playback/state")
+            failures = 0
+        except Exception as e:
+            failures += 1
+            if failures >= 30:
+                return _swap_set("aborted", f"lost the player state ({e})")
+            continue
+        track = state.get("track") or {}
+        cur = track.get("id")
+        if cur is None:
+            return _swap_set("aborted", "the player stopped; nothing sent")
+        if cur == -1:
+            return _swap_set("aborted", "a live stream started; nothing sent")
+        rem = _remaining_ms(state)
+        near_end = bool(state.get("playing")) and rem is not None and rem <= SWAP_NEAR_END_MS
+        just_changed = cur != start_id and int(state.get("position_ms") or 0) <= SWAP_START_GRACE_MS
+        if cur != start_id and not just_changed:
+            start_id = cur  # missed that boundary (poll gap); wait for the next
+            continue
+        if not (near_end or just_changed):
+            continue
+        if cur < 0 or _speech_busy():
+            start_id = cur  # #2845: never over talk or a persona clip; next boundary
+            _swap_set("pending", "deferred a boundary: Todd talking or a persona clip playing")
+            continue
+        send = [i for i in ids if i != cur]
+        data = await _enqueue("play_now", {"track_ids": send})
+        if isinstance(data, str):
+            return _swap_set("failed", data)
+        return _swap_set("fired", f"play_now command #{data.get('id')}, "
+                                  f"{_sent_count(data, len(send))} track(s) in {data.get('chunks', 1)} chunk(s)")
+    _swap_set("aborted", "no song boundary within the wait window; nothing sent")
+
+
+@mcp.tool()
+async def dj_mix_status() -> str:
+    """Did dj_mix's pending queue swap (old phone builds) fire yet? (#5463)"""
+    task = _SWAP.get("task")
+    live = task is not None and not task.done()
+    return (f"Swap {_SWAP['status']}{' (waiting for the song to end)' if live else ''}: "
+            f"{_SWAP['detail'] or 'nothing scheduled'}. {len(_SWAP['ids'])} track(s) in the planned mix.")
+
+
 @mcp.tool()
 async def dj_mix(
     sources: list[dict] | None = None,
@@ -1043,32 +1188,59 @@ async def dj_mix(
     track_ids_file: str = "",
     shuffle: bool = True,
     seed: int | None = None,
+    balance: str = "even",
+    exclude_recent_hours: float = 12,
 ) -> str:
     """Build or extend a shuffled mix from several sources — Todd's standing order.
 
     On every add: trim what already played, dedupe across folders (same
     recording = one entry), reshuffle everything still to come, and NEVER
-    interrupt the current song — the new mix is queued after it.
+    interrupt the current song — the new mix goes in after it.
+
+    Pass all sources in one call when you can. Either way the whole upcoming
+    list is re-planned each call, so a second call re-mixes rather than
+    appending a block (#5463).
 
     sources:        [{"kind": "folder", "query": "<path>"}, {"kind": "artist",
-                    "query": "Heart"}, ...] — same kinds as dj_queue_by.
+                    "query": "Heart"}, ...] — same kinds as dj_queue_by. An
+                    optional "label" names the source in the reply.
     track_ids:      explicit Audiplex track ids to add as well.
     track_ids_file: path to a JSON list of track ids (e.g. a saved shuffle).
     shuffle:        reshuffle the whole upcoming tail (default True).
     seed:           make the shuffle repeatable.
+    balance:        how sources share the queue (#5463). "even" (DEFAULT) =
+                    round-robin, one track per source in turn, so a 1006-track
+                    folder and a 277-track folder alternate 1:1 until the small
+                    one runs out — Todd asked for a broad mix. "proportional" =
+                    spread evenly by pool size (~80/20 for those two).
+                    "none" = one-pot shuffle. Tracks already queued keep their
+                    source; unknown ones count as one "already queued" source.
+    exclude_recent_hours: drop tracks Todd heard in the last N hours
+                    (default 12; 0 = off). Explicit dj_play_now/dj_queue never
+                    filter — a song asked for by name plays.
 
     Nothing loaded on the phone → starts the mix with play_now. A live stream
-    playing → refuses (a stream has no queue to add after).
+    playing → refuses (a stream has no queue to add after). An old phone build
+    without replace_upcoming → the full mix replaces the queue via play_now at
+    the NEXT SONG BOUNDARY (never mid-song, never over Todd talking or a
+    persona clip); dj_mix_status() says when it fired. Paused on an old build
+    → nothing is sent (play_now would start music).
     """
+    if balance not in ("even", "proportional", "none"):  # #5463
+        return f"Unknown balance '{balance}'. Use 'even', 'proportional', or 'none'."
     new_ids: list[int] = list(track_ids or [])
     labels: list[str] = []
+    source_of = _load_source_map()  # #5463
     try:
         for src in sources or []:
             label, tracks = await _resolve_source(
                 str(src.get("kind", "folder")), str(src.get("query", ""))
             )
             labels.append(f"{label} ({len(tracks)})")
-            new_ids.extend(int(t["id"]) for t in tracks)
+            short = _source_label(src)  # #5463
+            for t in tracks:
+                new_ids.append(int(t["id"]))
+                source_of[int(t["id"])] = short
     except (PermissionError, LookupError) as e:
         return str(e)
     if track_ids_file:
@@ -1076,10 +1248,14 @@ async def dj_mix(
             loaded = json.loads(Path(track_ids_file).read_text(encoding="utf-8"))
             new_ids.extend(int(i) for i in loaded)
             labels.append(f"{Path(track_ids_file).name} ({len(loaded)})")
+            for i in loaded:  # #5463
+                source_of.setdefault(int(i), Path(track_ids_file).stem)
         except (OSError, ValueError, TypeError) as e:
             return f"Couldn't read track_ids_file: {e}"
     if track_ids:
         labels.append(f"{len(track_ids)} explicit id(s)")
+        for i in track_ids:  # #5463
+            source_of.setdefault(int(i), "requested")
     if not new_ids:
         return "Nothing to mix: no sources, track_ids or track_ids_file resolved to tracks."
 
@@ -1096,19 +1272,37 @@ async def dj_mix(
     loaded_now = track.get("id") is not None and bool(raw_queue)
     queue = [q for q in raw_queue if (q.get("id") or 0) > 0]
     idx = state.get("queue_index") or 0
+    upcoming_ids = [q["id"] for q in queue if q.get("index", 0) > idx] if loaded_now else []  # #5463
+    pending = _SWAP.get("task")
+    if loaded_now and pending is not None and not pending.done():
+        upcoming_ids = list(_SWAP["ids"])  # #5463: a not-yet-fired swap IS the queue to come
+    recent_note = ""  # #5463
+    kept_new, dropped_new = await _recent_split(new_ids, exclude_recent_hours)
+    kept_tail, dropped_tail = await _recent_split(upcoming_ids, exclude_recent_hours)
+    if kept_new or kept_tail:
+        new_ids, upcoming_ids = kept_new, kept_tail
+        if dropped_new + dropped_tail:
+            recent_note = f" Left out {dropped_new + dropped_tail} track(s) heard in the last {exclude_recent_hours:g}h."
+    elif dropped_new:
+        recent_note = f" Everything was heard in the last {exclude_recent_hours:g}h, so the recent filter was skipped."
     body = {"new_ids": new_ids, "shuffle": shuffle, "seed": seed}
     if loaded_now:
         body |= {
             "current_id": track["id"],
             "played_ids": [q["id"] for q in queue if q.get("index", 0) < idx],
-            "upcoming_ids": [q["id"] for q in queue if q.get("index", 0) > idx],
+            "upcoming_ids": upcoming_ids,  # #5463
         }
     try:
         plan = await _post("/api/playback/mix/plan", body)
     except PermissionError as e:
         return str(e)
     upcoming = plan.get("upcoming") or []
-    head = f"Mix from {', '.join(labels)}: {plan.get('summary')}."
+    if shuffle and balance != "none":  # #5463
+        upcoming = balance_order(upcoming, source_of, balance, seed)
+    _save_source_map(source_of, upcoming)  # #5463
+    _SWAP["ids"] = list(upcoming)
+    mixed = f" {balance.capitalize()} balance, {describe_head(upcoming, source_of)}." if upcoming else ""  # #5463
+    head = f"Mix from {', '.join(labels)}: {plan.get('summary')}.{recent_note}{mixed}"  # #5463
     if loaded_now and not state.get("playing"):  # #3249: 13:17 mixed into a stopped player
         head += (" NOTE: the player is loaded but NOT playing, so this mix will sit"
                  " there silently until you dj_resume (announce first).")
@@ -1142,19 +1336,29 @@ async def dj_mix(
         if ack.get("ack_status") != "unknown_type":
             return head + f" The phone refused it: {ack.get('ack_status')} {ack.get('ack_detail') or ''}".rstrip()
 
-    # Older phone build without replace_upcoming: it can only append, so send
-    # just the new tracks that survived trimming. The old tail stays as it was.
-    old_tail = set(body.get("upcoming_ids") or [])
-    fresh = [i for i in upcoming if i not in old_tail]
-    if not fresh:
-        return head + " (Old phone build: can't reshuffle the tail, and nothing new survived.)"
-    data = await _enqueue("queue", {"track_ids": fresh})
-    if isinstance(data, str):
-        return data
+    # #5463: older phone build without replace_upcoming. Appending only the new
+    # tracks is what segregated the sources, so the WHOLE planned list replaces
+    # the queue via play_now — at the next song boundary, never mid-song.
+    old = _SWAP.get("task")
+    if old is not None and not old.done():
+        old.cancel()  # a newer mix supersedes a pending swap
+    if not upcoming:
+        return head + " (Old phone build: nothing left to swap in; queue left as it is.)"
+    if not state.get("playing"):
+        return head + (" Old phone build can't reshuffle in place and the player is paused;"
+                       " swapping the queue would start music, so NOTHING was sent. Announce,"
+                       " dj_resume, then call dj_mix again.")
+    rem = _remaining_ms(state)
+    wait = max(SWAP_MIN_WAIT_S, (rem or 0) / 1000 + 60)
+    _SWAP["task"] = asyncio.create_task(_boundary_swap(list(upcoming), int(track["id"]), wait))
+    _swap_set("pending", f"{len(upcoming)} track(s) replace the queue when the current song ends")
+    when = f" (~{max(0, rem) // 1000}s)" if rem is not None else ""
     return head + (
-        f" Old phone build can't reshuffle the queue, so appended the {_sent_count(data, len(fresh))}"
-        f" new track(s) to the end instead (command #{data.get('id')})."
-    ) + _missing_note(data)  # #3249
+        f" Old phone build can't reshuffle in place, so the full mix of {len(upcoming)} track(s)"
+        f" replaces the queue when the current song ends{when}, never over Todd talking or a"
+        " persona clip. Check dj_mix_status()."
+    )
+
 
 def _describe_age(seconds: float | None) -> str:
     if seconds is None:
