@@ -40,6 +40,8 @@ client's 30s read timeout) and returns 204 on timeout, at which point the
 client simply re-issues.
 """
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, selectinload
@@ -642,3 +644,200 @@ def stop_pool(user: User = Depends(get_current_user)):
     pool = DJPool()
     pool.stop()
     return {"status": "stopped"}
+
+
+# ----- DJ Specs: persistent mix specs with cues (#5477) -----
+
+
+@router.post("/mix-specs", tags=["dj_specs"])
+def create_mix_spec(
+    body: dict,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Create or replace a DJ mix spec.
+
+    body: {name, request_text, sources, balance, ahead, exclude_recent_hours, notes_json}
+    """
+    from sqlalchemy import insert, text
+
+    name = body.get("name", "")
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+
+    # Delete existing spec with this name
+    with db.engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM dj_mix_specs WHERE name = :name"),
+            {"name": name}
+        )
+
+        # Insert new spec
+        conn.execute(
+            text("""
+                INSERT INTO dj_mix_specs
+                (name, request_text, sources_json, balance, ahead, exclude_recent_hours, notes_json, created_at, updated_at)
+                VALUES (:name, :request_text, :sources_json, :balance, :ahead, :exclude_recent_hours, :notes_json, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """),
+            {
+                "name": name,
+                "request_text": body.get("request_text", ""),
+                "sources_json": json.dumps(body.get("sources", [])),
+                "balance": body.get("balance", "even"),
+                "ahead": body.get("ahead", 4),
+                "exclude_recent_hours": body.get("exclude_recent_hours", 12),
+                "notes_json": json.dumps(body.get("notes_json", [])),
+            }
+        )
+
+    return {"name": name, "status": "saved"}
+
+
+@router.get("/mix-specs", tags=["dj_specs"])
+def list_mix_specs(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """List all saved mix specs."""
+    from sqlalchemy import text
+
+    result = db.execute(text("SELECT name, request_text, balance, ahead FROM dj_mix_specs ORDER BY name"))
+    specs = [{"name": row[0], "request_text": row[1], "balance": row[2], "ahead": row[3]} for row in result]
+    return specs
+
+
+@router.get("/mix-specs/{name}", tags=["dj_specs"])
+def get_mix_spec(
+    name: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Get a specific mix spec by name."""
+    from sqlalchemy import text
+
+    result = db.execute(
+        text("SELECT name, request_text, sources_json, balance, ahead, exclude_recent_hours, notes_json FROM dj_mix_specs WHERE name = :name"),
+        {"name": name}
+    ).first()
+
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Spec '{name}' not found")
+
+    return {
+        "name": result[0],
+        "request_text": result[1],
+        "sources": json.loads(result[2]) if result[2] else [],
+        "balance": result[3],
+        "ahead": result[4],
+        "exclude_recent_hours": result[5],
+        "notes": json.loads(result[6]) if result[6] else [],
+    }
+
+
+@router.patch("/mix-specs/{name}", tags=["dj_specs"])
+def update_mix_spec(
+    name: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Update a mix spec by adding/removing sources or tracks."""
+    from sqlalchemy import text
+
+    # Get current spec
+    result = db.execute(
+        text("SELECT sources_json FROM dj_mix_specs WHERE name = :name"),
+        {"name": name}
+    ).first()
+
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Spec '{name}' not found")
+
+    sources = json.loads(result[0]) if result[0] else []
+
+    # Apply changes
+    if "add_sources" in body:
+        sources.extend(body["add_sources"])
+    if "remove_sources" in body:
+        for src_query in body["remove_sources"]:
+            sources = [s for s in sources if s.get("query") != src_query]
+
+    # Update in DB
+    with db.engine.begin() as conn:
+        conn.execute(
+            text("UPDATE dj_mix_specs SET sources_json = :sources_json, updated_at = CURRENT_TIMESTAMP WHERE name = :name"),
+            {"sources_json": json.dumps(sources), "name": name}
+        )
+
+    return {"name": name, "sources": sources, "status": "updated"}
+
+
+@router.post("/mix-specs/{name}/notes", tags=["dj_specs"])
+def add_spec_note(
+    name: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Add a cue/note to a mix spec.
+
+    body: {after_track_id?, play_track_id?, say?, trigger_kind?, clip_id?}
+    """
+    from sqlalchemy import text
+    import time
+
+    # Get current notes
+    result = db.execute(
+        text("SELECT notes_json FROM dj_mix_specs WHERE name = :name"),
+        {"name": name}
+    ).first()
+
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Spec '{name}' not found")
+
+    notes = json.loads(result[0]) if result[0] else []
+
+    # Add new note
+    cue_id = int(time.time() * 1000) % 1000000
+    note = {
+        "id": cue_id,
+        "trigger": {
+            "kind": body.get("trigger_kind", "track_end"),
+            "track_id": body.get("after_track_id"),
+        },
+        "play_track": body.get("play_track_id"),
+        "say": body.get("say"),
+        "clip_id": body.get("clip_id"),
+        "status": "pending",
+    }
+    notes.append(note)
+
+    # Update in DB
+    with db.engine.begin() as conn:
+        conn.execute(
+            text("UPDATE dj_mix_specs SET notes_json = :notes_json, updated_at = CURRENT_TIMESTAMP WHERE name = :name"),
+            {"notes_json": json.dumps(notes), "name": name}
+        )
+
+    return note
+
+
+@router.get("/mix-specs/{name}/notes", tags=["dj_specs"])
+def get_spec_notes(
+    name: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Get all cues/notes for a mix spec."""
+    from sqlalchemy import text
+
+    result = db.execute(
+        text("SELECT notes_json FROM dj_mix_specs WHERE name = :name"),
+        {"name": name}
+    ).first()
+
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Spec '{name}' not found")
+
+    notes = json.loads(result[0]) if result[0] else []
+    return {"name": name, "notes": notes}

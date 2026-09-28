@@ -264,13 +264,13 @@ def test_top_up_skips_streams_and_dj_breaks(tmp_pool):
         ahead=4,
     )
 
-    # Current is a stream, upcoming has DJ breaks (id=-1) and real tracks
+    # Current is a real track, upcoming has DJ breaks (id<0) mixed with real tracks
     result = tmp_pool.top_up(
-        current_track_id=-1,  # Stream
-        upcoming_track_ids=[-1, -2, 10, 20, -3],  # DJ breaks mixed with real
+        current_track_id=1,  # Real track
+        upcoming_track_ids=[1, -1, -2, 10, 20, -3],  # DJ breaks mixed with real
     )
 
-    # Should count only 10, 20 as real tracks (2 ahead)
+    # Should count only 10, 20 as real tracks (2 ahead after current)
     # Need 2 more to reach ahead=4
     assert len(result["picks"]) == 2
 

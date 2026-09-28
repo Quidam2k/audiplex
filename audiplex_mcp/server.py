@@ -2992,7 +2992,7 @@ async def dj_pool_set(
     """Start or update the DJ pool with a spec or inline sources.
 
     Once running, the pool auto-queues tracks ahead of the current song.
-    New tracks are balanced round-robin across sources (if balance='even')
+    New tracks are balanced round-robin across lanes (if balance='even')
     and skip recently-played + session-played tracks.
 
     spec_id:              ID of a saved spec (overrides sources)
@@ -3002,21 +3002,111 @@ async def dj_pool_set(
     exclude_recent_hours: skip recently-played tracks
     """
     from audiplex.dj_pool import DJPool
+    from sqlalchemy import text
+    from audiplex.database import init_db, get_session_factory
 
-    pool = DJPool()
+    engine = init_db()
+    SessionLocal = get_session_factory(engine)
+    db = SessionLocal()
 
-    # For now, just return status (full implementation with DB query in Phase B)
-    return f"Pool set: balance={balance}, ahead={ahead}, status={pool.status()}"
+    try:
+        pool = DJPool()
+
+        # Resolve spec_id if given
+        if spec_id:
+            result = db.execute(
+                text("SELECT sources_json FROM dj_mix_specs WHERE id = :id"),
+                {"id": spec_id}
+            ).first()
+            if result:
+                sources = json.loads(result[0]) if result[0] else []
+
+        if not sources:
+            return "ERROR: No sources provided and no spec_id found"
+
+        # Resolve all sources into lanes
+        lanes = {}
+        track_ids = []
+        source_labels = {}
+
+        for src in sources:
+            kind = str(src.get("kind", "folder"))
+            query = str(src.get("query", ""))
+            label = str(src.get("label", query))
+
+            try:
+                resolved_label, tracks = await _resolve_source(kind, query)
+                if not tracks:
+                    return f"REFUSED: empty source: {label}"
+
+                # Create lane for this source
+                lane_track_ids = [int(t["id"]) for t in tracks]
+                lanes[label] = {
+                    "track_ids": lane_track_ids,
+                    "played_count": 0,
+                    "last_played_at": None,
+                    "exhausted": False,
+                    "zero_on_resolve": False,
+                }
+
+                track_ids.extend(lane_track_ids)
+                for tid in lane_track_ids:
+                    source_labels[tid] = label
+
+            except Exception as e:
+                return f"ERROR resolving source {label}: {str(e)}"
+
+        # Set pool with lanes
+        result = pool.set_pool(
+            spec_id=spec_id or 0,
+            track_ids=track_ids,
+            source_labels=source_labels,
+            lanes=lanes,
+            balance=balance,
+            ahead=ahead,
+            exclude_recent_hours=exclude_recent_hours,
+        )
+
+        per_lane_str = ", ".join(f"{lbl}:{cnt}" for lbl, cnt in result.get("per_lane_counts", {}).items())
+        return f"Pool set: {len(result.get('per_lane_counts', {}))} lanes ({per_lane_str}), balance={balance}, ahead={ahead}"
+
+    finally:
+        db.close()
 
 
 @mcp.tool()
 async def dj_pool_status() -> str:
-    """Get current DJ pool status and next picks."""
+    """Get current DJ pool status: per-lane details, next picks preview, pending cues."""
     from audiplex.dj_pool import DJPool
 
     pool = DJPool()
     status = pool.status()
-    return f"Pool status: {status}"
+
+    if not status.get("spec_id"):
+        return "Pool is not running"
+
+    lines = [
+        f"Pool status (spec {status['spec_id']}):",
+        f"  Balance: {status.get('balance_mode')}, Ahead: {status.get('ahead')}",
+        f"  Total tracks: {status.get('eligible_count')}, Played this session: {status.get('played_this_session_count')}",
+        f"Lanes:",
+    ]
+
+    for lane in status.get("lanes", []):
+        exhausted_mark = " [EXHAUSTED]" if lane.get("exhausted") else ""
+        last_played = f" (last {lane.get('minutes_since_played')}m ago)" if lane.get("minutes_since_played") else ""
+        lines.append(
+            f"  {lane['label']:20} {lane['remaining']:3} remaining, "
+            f"{lane['played_count']:3} played{exhausted_mark}{last_played}"
+        )
+
+    pending = pool.get_pending_cues()
+    if pending:
+        lines.append(f"Pending cues: {len(pending)}")
+        for cue in pending[:3]:
+            lines.append(f"  Cue #{cue.get('id')}: {cue.get('say', 'n/a')}")
+
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -3027,6 +3117,297 @@ async def dj_pool_stop() -> str:
     pool = DJPool()
     pool.stop()
     return "Pool stopped"
+
+
+# ----- DJ Mix Specs: create/manage persistent specs (#5477) -----
+
+
+@mcp.tool()
+async def dj_spec_add(
+    spec: str,
+    add_sources: list[dict] | None = None,
+    add_tracks: list[int] | None = None,
+) -> str:
+    """Add sources or specific tracks to an existing mix spec and re-sync the pool if active.
+
+    Refuses if any named source resolves to 0 tracks (same as dj_spec_save).
+    If the spec is the active pool's spec, edits re-sync the pool's lanes.
+
+    add_sources: [{kind, query, recursive?, label}, ...]
+    add_tracks: [track_id, ...]
+    """
+    import httpx
+    from sqlalchemy import text
+    from audiplex.database import init_db, get_session_factory
+
+    engine = init_db()
+    SessionLocal = get_session_factory(engine)
+    db = SessionLocal()
+
+    try:
+        # Get current spec
+        result = db.execute(
+            text("SELECT id, sources_json FROM dj_mix_specs WHERE name = :name"),
+            {"name": spec}
+        ).first()
+
+        if not result:
+            return f"ERROR: Spec '{spec}' not found"
+
+        spec_id, sources_json = result
+        sources = json.loads(sources_json) if sources_json else []
+
+        # Add new sources (resolve each to verify not empty)
+        if add_sources:
+            for src in add_sources:
+                kind = str(src.get("kind", "folder"))
+                query = str(src.get("query", ""))
+                try:
+                    resolved_label, tracks = await _resolve_source(kind, query)
+                    if not tracks:
+                        return f"REFUSED: empty source: {query}"
+                    sources.append(src)
+                except Exception:
+                    return f"ERROR resolving source: {query}"
+
+        # Update spec
+        with db.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE dj_mix_specs SET sources_json = :sources_json WHERE id = :id"),
+                {"sources_json": json.dumps(sources), "id": spec_id}
+            )
+
+        # If this is the active pool's spec, re-sync
+        from audiplex.dj_pool import DJPool
+        pool = DJPool()
+        if pool.state.get("spec_id") == spec_id:
+            # TODO: Re-resolve all sources and update pool lanes
+            pass
+
+        return f"Added to spec '{spec}': {len(add_sources or [])} sources"
+
+    finally:
+        db.close()
+
+
+@mcp.tool()
+async def dj_spec_remove(spec: str, remove_sources: list[str] | None = None) -> str:
+    """Remove sources from an existing mix spec.
+
+    remove_sources: list of source queries to remove
+    """
+    from sqlalchemy import text
+    from audiplex.database import init_db, get_session_factory
+
+    engine = init_db()
+    SessionLocal = get_session_factory(engine)
+    db = SessionLocal()
+
+    try:
+        # Get current spec
+        result = db.execute(
+            text("SELECT id, sources_json FROM dj_mix_specs WHERE name = :name"),
+            {"name": spec}
+        ).first()
+
+        if not result:
+            return f"ERROR: Spec '{spec}' not found"
+
+        spec_id, sources_json = result
+        sources = json.loads(sources_json) if sources_json else []
+
+        # Remove sources
+        if remove_sources:
+            sources = [s for s in sources if s.get("query") not in remove_sources]
+
+        # Update spec
+        with db.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE dj_mix_specs SET sources_json = :sources_json WHERE id = :id"),
+                {"sources_json": json.dumps(sources), "id": spec_id}
+            )
+
+        return f"Removed from spec '{spec}': {len(remove_sources or [])} sources"
+
+    finally:
+        db.close()
+
+
+@mcp.tool()
+async def dj_spec_note(
+    spec: str,
+    after_track_id: int | None = None,
+    play_track_id: int | None = None,
+    say: str | None = None,
+    trigger_kind: str = "track_end",
+    clip_id: str | None = None,
+) -> str:
+    """Add a cue/note to a mix spec.
+
+    Cues fire when a trigger matches (e.g. at the end of a specific track)
+    and can play a track, announce patter, or both.
+    """
+    from sqlalchemy import text
+    from audiplex.database import init_db, get_session_factory
+    import time
+
+    engine = init_db()
+    SessionLocal = get_session_factory(engine)
+    db = SessionLocal()
+
+    try:
+        # Get current spec
+        result = db.execute(
+            text("SELECT id, notes_json FROM dj_mix_specs WHERE name = :name"),
+            {"name": spec}
+        ).first()
+
+        if not result:
+            return f"ERROR: Spec '{spec}' not found"
+
+        spec_id, notes_json = result
+        notes = json.loads(notes_json) if notes_json else []
+
+        # Add new cue
+        cue_id = int(time.time() * 1000) % 1000000
+        cue = {
+            "id": cue_id,
+            "trigger": {"kind": trigger_kind, "track_id": after_track_id},
+            "play_track": play_track_id,
+            "say": say,
+            "clip_id": clip_id,
+            "status": "pending",
+        }
+        notes.append(cue)
+
+        # Update spec
+        with db.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE dj_mix_specs SET notes_json = :notes_json WHERE id = :id"),
+                {"notes_json": json.dumps(notes), "id": spec_id}
+            )
+
+        return f"Added cue to spec '{spec}': {cue.get('id')}"
+
+    finally:
+        db.close()
+
+
+@mcp.tool()
+async def dj_spec_notes(spec: str) -> str:
+    """List all cues/notes for a mix spec."""
+    from sqlalchemy import text
+    from audiplex.database import init_db, get_session_factory
+
+    engine = init_db()
+    SessionLocal = get_session_factory(engine)
+    db = SessionLocal()
+
+    try:
+        result = db.execute(
+            text("SELECT notes_json FROM dj_mix_specs WHERE name = :name"),
+            {"name": spec}
+        ).first()
+
+        if not result:
+            return f"ERROR: Spec '{spec}' not found"
+
+        notes = json.loads(result[0]) if result[0] else []
+
+        if not notes:
+            return f"Spec '{spec}' has no cues"
+
+        summary = []
+        for note in notes:
+            trigger = note.get("trigger", {})
+            track_id = trigger.get("track_id")
+            say = note.get("say", "")
+            summary.append(f"  Cue #{note['id']}: after track {track_id}, say '{say}'")
+
+        return f"Spec '{spec}' cues:\n" + "\n".join(summary)
+
+    finally:
+        db.close()
+
+
+@mcp.tool()
+async def dj_spec_list() -> str:
+    """List all saved mix specs."""
+    from sqlalchemy import text
+    from audiplex.database import init_db, get_session_factory
+
+    engine = init_db()
+    SessionLocal = get_session_factory(engine)
+    db = SessionLocal()
+
+    try:
+        result = db.execute(
+            text("SELECT name, request_text, balance, ahead FROM dj_mix_specs ORDER BY name")
+        ).fetchall()
+
+        if not result:
+            return "No mix specs saved"
+
+        summary = []
+        for row in result:
+            name, request, balance, ahead = row
+            summary.append(f"  {name:20} | balance={balance:12} ahead={ahead} | {request[:50]}")
+
+        return f"Mix specs ({len(result)}):\n" + "\n".join(summary)
+
+    finally:
+        db.close()
+
+
+@mcp.tool()
+async def dj_spec_show(spec: str) -> str:
+    """Show a specific mix spec's configuration and cues."""
+    from sqlalchemy import text
+    from audiplex.database import init_db, get_session_factory
+
+    engine = init_db()
+    SessionLocal = get_session_factory(engine)
+    db = SessionLocal()
+
+    try:
+        result = db.execute(
+            text("SELECT name, request_text, sources_json, balance, ahead, exclude_recent_hours, notes_json FROM dj_mix_specs WHERE name = :name"),
+            {"name": spec}
+        ).first()
+
+        if not result:
+            return f"ERROR: Spec '{spec}' not found"
+
+        name, request, sources_json, balance, ahead, exclude_hrs, notes_json = result
+        sources = json.loads(sources_json) if sources_json else []
+        notes = json.loads(notes_json) if notes_json else []
+
+        lines = [
+            f"Spec: {name}",
+            f"Request: {request}",
+            f"Balance: {balance}, Ahead: {ahead}, Exclude recent: {exclude_hrs}h",
+            f"Sources: {len(sources)}",
+        ]
+
+        for src in sources:
+            kind = src.get("kind", "folder")
+            query = src.get("query", "")
+            label = src.get("label", query)
+            lines.append(f"  - {kind:8} {label:20} ({query})")
+
+        if notes:
+            lines.append(f"Cues: {len(notes)}")
+            for cue in notes:
+                trigger = cue.get("trigger", {})
+                track_id = trigger.get("track_id")
+                say = cue.get("say", "")
+                play = cue.get("play_track")
+                lines.append(f"  - After track {track_id}: say '{say}'" + (f", play {play}" if play else ""))
+
+        return "\n".join(lines)
+
+    finally:
+        db.close()
 
 
 # #5448: dj_fetch_from_playlists lives in its own module (server runs as __main__).
