@@ -3019,7 +3019,10 @@ async def dj_spec_save(
         return f"REFUSED: empty source(s): {', '.join(empty)}. Nothing saved."
     saved = await _post("/api/playback/mix-specs", {
         "name": name,
-        "request_text": request_text,
+        # #5530: the seed spec keeps Todd's verbatim messages as a list; the
+        # TEXT column needs a string, so structured request text goes as JSON.
+        "request_text": request_text if isinstance(request_text, str)
+        else json.dumps(request_text, ensure_ascii=False),
         "sources": sources,
         "balance": balance,
         "ahead": ahead,

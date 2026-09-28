@@ -18,7 +18,7 @@
   "sources": [
     {
       "kind": "folder",
-      "query": "H:/Stacked Deck/Music",
+      "query": "Q:/Stacked Deck Music",
       "recursive": false,
       "label": "individual tracks"
     },
@@ -41,11 +41,14 @@
       "kind": "folder_match",
       "query": "cirque",
       "label": "Cirque du Soleil"
-    },
+    }
+  ],
+  "pending_sources": [
     {
       "kind": "folder_match",
       "query": "youtube",
-      "label": "Todd YouTube Music playlist"
+      "label": "Todd YouTube Music playlist",
+      "note": "add YouTube playlist once fetched (#5448)"
     }
   ]
 }
