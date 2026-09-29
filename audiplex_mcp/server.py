@@ -831,7 +831,9 @@ async def dj_sleep_start(
     starting = bool(fade_track_ids or fade_stream_url)
     if not starting:
         state = await _get("/api/playback/state") or {}
-        fading = bool(state.get("track"))
+        # An audiobook reports track=None (it isn't a music track), so a loaded
+        # player shows up as playing or as having a duration (#3367).
+        fading = bool(state.get("track") or state.get("playing") or state.get("duration_ms"))
     else:
         fading = True
     crossfade = fading and bed_mode == "crossfade"

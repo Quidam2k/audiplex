@@ -91,9 +91,18 @@ def test_under_mode_keeps_bed_at_volume_from_the_start(wire):
     assert "bed_fade_to" not in timer
 
 
+def test_playing_audiobook_reports_no_track_but_still_gets_the_timer(wire):
+    # Verified on the emulator: a book plays with track=None, queue=[].
+    calls, st = wire
+    st["state"] = {"playing": True, "track": None, "position_ms": 8009,
+                   "duration_ms": 602442, "queue_length": 0, "queue": []}
+    run()
+    assert [c for c, _ in cmds(calls)] == ["bed_play", "sleep_timer"]
+
+
 def test_nothing_playing_starts_just_the_bed_audibly(wire):
     calls, st = wire
-    st["state"] = {"playing": False, "track": None}
+    st["state"] = {"playing": False, "track": None, "duration_ms": 0}
     out = run()
     sent = cmds(calls)
     assert [c for c, _ in sent] == ["bed_play"]
