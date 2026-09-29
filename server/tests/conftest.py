@@ -438,3 +438,12 @@ def isolated_dj_pool(tmp_path, monkeypatch):
     monkeypatch.setenv("DJ_SPEECH_STATE_FILE", str(tmp_path / "no-speech-state.json"))
     yield
     dj_pool.reset_pool_singleton()
+
+
+@pytest.fixture(autouse=True)
+def isolated_book_handoff(monkeypatch):
+    """The phone-book handoff lookup (#2680) must never open the real DB.
+    Tests that exercise it patch _book_session to a test-engine session."""
+    from audiplex import playback_bus
+
+    monkeypatch.setattr(playback_bus, "_book_session", lambda: None)

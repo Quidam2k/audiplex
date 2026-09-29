@@ -7,7 +7,7 @@ missing from this file, so adding a tool means adding its line.
 
 **Talk guard (#ride0928):** every tool that can start audio on an idle player
 (`dj_play_now`, `dj_queue`, `dj_play_next`, `dj_queue_by`, `dj_resume`,
-`dj_play_stream`, `dj_mix`, `dj_folder`, `dj_pool_set`, `dj_transfer`) is HELD
+`dj_play_stream`, `dj_mix`, `dj_folder`, `dj_pool_set`, `dj_transfer`, `dj_play_book`) is HELD
 while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 `RESULT sent= held= skipped_missing=[titles] phone_ack=`.
 
@@ -46,7 +46,8 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_now_playing` — current track, queue with indices, liveness, `missing_on_phone`.
 - `dj_command_status` — did the phone ack a command, and what did it say.
 - `dj_device_status` — is a player connected and polling right now.
-- `dj_devices` / `dj_transfer` — list renderers; hand playback to another device (talk-guarded).
+- `dj_devices` / `dj_transfer` — list renderers; hand playback to another device (talk-guarded); a playing audiobook follows too (#2680).
+- `dj_play_book` — play an audiobook on the PC renderer from the saved position (shared with the phone; talk-guarded).
 - `dj_link_history` — when the phone's link dropped and came back (survives restarts).
 - `dj_client_log` / `dj_client_exits` — phone diagnostics: player errors, process exits.
 

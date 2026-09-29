@@ -462,7 +462,7 @@ QUEUE_CHUNK = 40  # #3249
 _CHUNKABLE = {"play_now", "queue"}  # #3249
 
 
-TALK_GUARDED = START_CMDS | {"activate"}  # #ride0928: anything that can start audio on an idle player
+TALK_GUARDED = START_CMDS | {"activate", "play_book"}  # #ride0928 (+ #2680): anything that can start audio on an idle player
 TALK_HELD = (  # #ride0928
     "HELD (todd_talking): Todd is talking or typing right now, so nothing was sent. "
     "Music never starts over him. Wait until he's done, then call this again."
@@ -674,6 +674,47 @@ async def dj_play_stream(url: str, title: str = "Live stream") -> str:
     return await _result(data, 1) + (
         f"Playing stream '{title}' from {url} "
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
+    )
+
+
+@mcp.tool()
+async def dj_play_book(book: str, position_seconds: float = -1) -> str:
+    """Play an audiobook on the active PC renderer (#2680), resuming where Todd
+    left off on ANY device (the server's saved position, which the phone also
+    reads and writes). `book` is a book id or part of its title.
+    position_seconds >= 0 starts there instead. The PC saves its position back
+    as it plays, so opening the book on the phone later picks up at the PC's
+    spot. The phone app plays books from its own UI, not by this command; use
+    dj_transfer to move a playing book between phone and PC. Talk-guarded.
+    """
+    key = book.strip()
+    try:
+        books = await _get("/api/library/books")
+    except Exception as exc:
+        return f"Couldn't list books: {exc!r}"[:300]
+    if key.isdigit():
+        matches = [b for b in books if b.get("id") == int(key)]
+    else:
+        low = key.lower()
+        matches = [b for b in books if low in str(b.get("title", "")).lower()]
+        exact = [b for b in matches if str(b.get("title", "")).lower() == low]
+        matches = exact or matches
+    if not matches:
+        return f"No book matches '{book}'."
+    if len(matches) > 1:
+        names = "; ".join(f"{b['id']}: {b.get('title')}" for b in matches[:8])
+        return f"'{book}' matches {len(matches)} books, pick one by id: {names}"
+    target = matches[0]
+    payload: dict = {"book_id": target["id"], "playing": True}
+    if position_seconds >= 0:
+        payload["position_ms"] = int(position_seconds * 1000)
+    data = await _enqueue("play_book", payload)
+    if isinstance(data, str):
+        return _held_result(data)
+    return await _result(data, 1) + (
+        f"Playing '{target.get('title')}' (book {target['id']}) "
+        + ("from the saved position" if position_seconds < 0 else f"from {position_seconds:.0f} s")
+        + f" (command #{data.get('id')}). A phone renderer answers unknown_type: books only follow to the PC."
     )
 
 

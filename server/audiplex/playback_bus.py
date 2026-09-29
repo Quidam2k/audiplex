@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 from collections import OrderedDict, deque
@@ -521,16 +522,18 @@ class PlaybackBus:
         track_ids = [q["id"] for q in upcoming if isinstance(q.get("id"), int) and q["id"] > 0]
         current = (state.get("track") or {}).get("id")
         resumes_current = bool(track_ids) and track_ids[0] == current
-        self._enqueue(
-            "activate",
-            {
-                "from_device": from_id,
-                "track_ids": track_ids,
-                "position_ms": int(state.get("position_ms") or 0) if resumes_current else 0,
-                "playing": was_playing and bool(track_ids),
-            },
-            target_device_id=to_id,
-        )
+        payload = {
+            "from_device": from_id,
+            "track_ids": track_ids,
+            "position_ms": int(state.get("position_ms") or 0) if resumes_current else 0,
+            "playing": was_playing and bool(track_ids),
+        }
+        book = None if track_ids else _handoff_book(state)
+        if book is not None:
+            # #2680: an audiobook follows too. A phone that predates this sees
+            # empty track_ids and just becomes the target, as before.
+            payload.update(book_id=book["book_id"], position_ms=book["position_ms"], playing=was_playing)
+        self._enqueue("activate", payload, target_device_id=to_id)
 
     @property
     def active_device_id(self) -> Optional[str]:
@@ -823,6 +826,67 @@ def read_persisted_exits(limit: int = 50) -> list[dict[str, Any]]:
         except ValueError:
             continue
     return out
+
+
+# #2680: how fresh the phone's saved book position must be for a handoff to
+# treat it as "the book that is playing". The phone saves every 30 s while a
+# book plays; anything older means the phone was on music or idle.
+BOOK_HANDOFF_FRESH_SECONDS = 120
+
+
+def _handoff_book(state: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """The audiobook a handoff should carry, or None (#2680).
+
+    The PC reports its book in state["book"] with a book-global position. The
+    phone reports no book id, only track=None, so its book is the most recently
+    saved unfinished position, and only if that save is fresh. A phone playing
+    music reports a track, so it can never be mistaken for a book.
+    """
+    book = state.get("book")
+    if isinstance(book, dict) and isinstance(book.get("id"), int):
+        return {"book_id": book["id"], "position_ms": int(state.get("position_ms") or 0)}
+    if state.get("track") is not None or not state:
+        return None
+    try:
+        db = _book_session()
+    except Exception:
+        logging.getLogger(__name__).exception("book handoff: no DB session")
+        return None
+    if db is None:
+        return None
+    try:
+        from datetime import datetime, timedelta, timezone
+
+        from audiplex.models import PlaybackPosition
+
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            seconds=BOOK_HANDOFF_FRESH_SECONDS
+        )
+        row = (
+            db.query(PlaybackPosition)
+            .filter(
+                PlaybackPosition.is_finished == False,  # noqa: E712
+                PlaybackPosition.updated_at >= cutoff,
+            )
+            .order_by(PlaybackPosition.updated_at.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        # The phone's own report (book-global, a few seconds old) beats its
+        # progress save (up to 30 s old) when it has one.
+        reported = int(state.get("position_ms") or 0)
+        return {
+            "book_id": row.book_id,
+            "position_ms": reported if reported > 0 else int(row.position_seconds * 1000),
+        }
+    finally:
+        db.close()
+
+
+def _book_session():
+    """DB session for the phone-book handoff lookup (#2680; tests patch this)."""
+    return _pool_session()
 
 
 # Module-level singleton (single-device v1).

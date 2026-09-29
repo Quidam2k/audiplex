@@ -13,6 +13,13 @@ from audiplex.schemas import ProgressSchema, ProgressUpdate
 router = APIRouter(prefix="/api/progress", tags=["progress"])
 
 
+def _naive_utc(ts: datetime | None) -> datetime | None:
+    """SQLite hands back naive UTC; clients send aware times. Compare as naive UTC."""
+    if ts is None or ts.tzinfo is None:
+        return ts
+    return ts.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 @router.get("", response_model=list[ProgressSchema])
 def list_progress(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Get all in-progress books (for 'continue listening')."""
@@ -54,6 +61,21 @@ def update_progress(
         PlaybackPosition.book_id == book_id,
         PlaybackPosition.user_id == user.id,
     ).first()
+
+    if position and update.client_updated_at is not None:
+        # #2680: a position sampled before the stored one was written is stale
+        # (e.g. the PC's last push arriving after the phone moved on). Keep the
+        # newer one and tell the client which it is.
+        stored = _naive_utc(position.updated_at)
+        if stored is not None and _naive_utc(update.client_updated_at) < stored:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "reason": "stale",
+                    "position_seconds": position.position_seconds,
+                    "updated_at": stored.isoformat() + "Z",
+                },
+            )
 
     if position:
         position.position_seconds = update.position_seconds

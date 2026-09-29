@@ -47,6 +47,10 @@ class ProgressUpdate(BaseModel):
     position_seconds: float
     chapter_index: int = 0
     is_finished: bool = False
+    # #2680: when the client sampled this position. A write older than the
+    # stored row is refused (409) so a late PC push can't clobber a newer phone
+    # position. The phone doesn't send it and keeps last-write-wins.
+    client_updated_at: datetime | None = None
 
 
 class ScanResultSchema(BaseModel):
@@ -382,6 +386,14 @@ class NowPlayingTrack(BaseModel):
     artist: str | None = None
 
 
+class NowPlayingBook(BaseModel):
+    """An audiobook on the PC renderer (#2680); position_ms is book-global."""
+
+    id: int
+    title: str | None = None
+    chapter_index: int = 0
+
+
 class NowPlayingQueueItem(BaseModel):
     """One entry in the client's current queue, so the agent can DJ with
     full visibility (and issue index-based reorders that mean something)."""
@@ -410,6 +422,7 @@ class PlaybackState(BaseModel):
 
     playing: bool = False
     track: NowPlayingTrack | None = None
+    book: NowPlayingBook | None = None  # #2680
     position_ms: int = 0
     duration_ms: int = 0
     queue_length: int = 0
