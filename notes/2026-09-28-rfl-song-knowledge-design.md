@@ -20,7 +20,7 @@ call time so it toggles without restart. Optional `RFL_DB_PATH`, defaulting to
 
 ## Slice
 When on, `dj_break_brief` looks up the current track and the next queue entry (both already
-in `/api/playback/state`) and appends a 2-line block after "Coming up":
+in `/api/playback/state`) and appends a 2-line block after the Previous / Now playing / Next lines:
 ```
 Notes: Waiting On An Angel (Ben Harper, 1994, Rock).
        Opens: "Well I was born an original sinner." (Missionary Man, Eurythmics)
