@@ -67,6 +67,7 @@ import re
 import shutil
 import sqlite3
 import sys
+import time  # #2843
 from pathlib import Path
 from urllib.parse import quote
 
@@ -139,6 +140,8 @@ async def dj_play_now(track_ids: list[int]) -> str:
     # Never claim "it's playing" — say whether anything is listening, so a dead
     # player reads as a failure instead of a success (#2961).
     note = await _repeat_note(track_ids)
+    if not _is_yes(result):  # #2843: no "should pick this up" over a NO/UNCONFIRMED
+        return head + pool_msg + (" " + _describe_device(device) if device else "") + note
     if not device:
         return head + pool_msg + " The device plays when it next polls (immediately if awake)." + note
     if device.get("connected"):
@@ -436,11 +439,111 @@ def _held_result(text: str) -> str:  # #ride0928: same shape as _result, for a r
     return f"RESULT sent=0 held={_held_kind(text)} skipped_missing=[] phone_ack=none\n{text}"
 
 
+# #2843: "the DJ says your phone took the play command, but no music plays."
+# An ack is not a sound: an old phone build acks on receipt, and the new one's
+# honest "failed: not playing 8s after load" lands AFTER the old 8 s MCP wait.
+# So a start is only YES when the device acked ok AND then reported playing the
+# thing we asked for; a failed ack is NO; anything else is UNCONFIRMED.
+START_VERIFY_S = 15.0  # #2843: total cap; phone START_TIMEOUT 8 s + poll latency
+VERIFY_POLL_S = 1.0  # #2843
+ALREADY_PLAYING_FRESH_S = 90.0  # #2843: queue/play_next on a live player
+VERIFY_CMDS = {"play_now", "resume", "play_stream", "play_book", "queue", "play_next"}  # #2843
+NOT_YES_TEXT = {  # #2843: what the persona must (not) say
+    "NO": "DID NOT START. Do NOT tell Todd it's playing; tell him it didn't start and why.",
+    "UNCONFIRMED": ("NOT CONFIRMED. Do NOT tell Todd it's playing; say you sent it but "
+                    "can't confirm it started (check dj_now_playing)."),
+}
+
+
+def _state_says(state, cmd: str, payload: dict) -> str | None:  # #2843
+    """'match' if `state` shows the asked-for thing playing, 'idle' if it shows
+    nothing playing, 'other: <title>' if something else plays, None if unreadable."""
+    if not isinstance(state, dict):
+        return None
+    track, book = state.get("track"), state.get("book")
+    if not state.get("playing"):
+        return "idle"
+    title = (track or {}).get("title") or (book or {}).get("title") or "?"
+    if cmd == "play_now":
+        ok = isinstance(track, dict) and track.get("id") in (payload.get("track_ids") or [])
+    elif cmd == "play_stream":  # a stream item is id -1 on both renderers
+        ok = isinstance(track, dict) and (track.get("id") or 0) < 0 and (
+            not payload.get("title") or track.get("title") in (None, payload.get("title")))
+    elif cmd == "play_book":
+        ok = isinstance(book, dict) and book.get("id") == payload.get("book_id")
+    else:  # resume / queue / play_next / activate: anything audible counts
+        ok = bool(track or book)
+    return "match" if ok else f"other: {title}"
+
+
+async def _verify_start(command_id: int | None, cmd: str, payload: dict,
+                        state_path: str = "/api/playback/state",
+                        since: float | None = None) -> tuple[str, str, dict | None]:  # #2843
+    """(YES|NO|UNCONFIRMED, why, ack row). Returns the moment the verdict is
+    known; never waits longer than START_VERIFY_S in total."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + START_VERIFY_S
+    ack: dict | None = None
+    says, fresh = None, False
+    while True:
+        if command_id is not None and ack is None:
+            try:
+                for row in await _get("/api/playback/commands?limit=50") or []:
+                    if isinstance(row, dict) and row.get("id") == command_id:
+                        since = row.get("created_at") or since
+                        if row.get("ack_status"):
+                            ack = row
+            except Exception:
+                pass
+        if ack is not None and ack.get("ack_status") != "ok":
+            detail = f": {ack['ack_detail']}" if ack.get("ack_detail") else ""
+            return "NO", f"the device answered {ack.get('ack_status')}{detail}", ack
+        try:
+            state = await _get(state_path)
+        except Exception:
+            state = None
+        says = _state_says(state, cmd, payload)
+        at = state.get("updated_at") if isinstance(state, dict) else None
+        age = (time.time() - float(at)) if at else None
+        fresh = bool(at) and since is not None and float(at) >= float(since)
+        acked_ok = ack is not None or command_id is None
+        if acked_ok and says == "match" and (
+                fresh or (cmd in ("queue", "play_next") and age is not None
+                          and age < ALREADY_PLAYING_FRESH_S)):
+            return "YES", "the device reports it playing", ack
+        if loop.time() >= deadline:
+            break
+        await asyncio.sleep(VERIFY_POLL_S)
+    if command_id is not None and ack is None:
+        return "UNCONFIRMED", f"no answer from the device in {START_VERIFY_S:g}s", None
+    if fresh and says == "idle":
+        return "NO", f"the device reports it is NOT playing {START_VERIFY_S:g}s later", ack
+    if fresh and says and says.startswith("other"):
+        return "NO", f"the device is playing something else ({says[7:]})", ack
+    return ("UNCONFIRMED", "the device accepted it but never reported playing it "
+            "(an older phone build acks on receipt, not on sound)", ack)
+
+
+def _is_yes(result: str) -> bool:  # #2843: may a tool's prose say it's playing?
+    return " playing=YES" in result.split("\n", 1)[0]
+
+
 async def _result(data: dict, asked: int, wait_ack: bool = True) -> str:  # #ride0928
     """One machine-readable line every start-type tool leads with:
-    sent / held / skipped_missing (titles) / phone_ack (status: detail)."""
+    sent / held / skipped_missing (titles) / phone_ack (status: detail) /
+    playing (#2843: YES only when the device reported it playing)."""
     sent = _sent_count(data, asked)
     titles = await _titles(list(data.get("dropped_missing") or []))
+    cmd = data.get("_cmd") or data.get("type")  # #2843
+    if wait_ack and cmd in VERIFY_CMDS and data.get("id") is not None:
+        verdict, why, ack = await _verify_start(int(data["id"]), cmd, data.get("_payload") or {})
+        phone = "none" if ack is None else str(ack.get("ack_status")) + (
+            f": {ack['ack_detail']}" if ack.get("ack_detail") else "")
+        line = (f"RESULT sent={sent} held=no skipped_missing={json.dumps(titles, ensure_ascii=False)} "
+                f"phone_ack={phone} playing={verdict}\n")
+        if verdict != "YES":
+            line += f"PLAYING={verdict}: {why}. {NOT_YES_TEXT[verdict]}\n"
+        return line
     phone = "not_waited"
     if wait_ack and data.get("id") is not None:
         ack = await _await_ack(int(data["id"]), timeout=ACK_WAIT_S)
@@ -519,6 +622,8 @@ async def _enqueue(cmd_type: str, payload: dict) -> str:
         chunks, sent = chunks + 1, sent + len(piece)
     if kept:
         data["sent_count"], data["chunks"] = sent, chunks
+    data["_cmd"] = cmd_type  # #2843: _result verifies against what was asked
+    data["_payload"] = {**payload, "track_ids": kept} if kept else payload
     if dropped:
         data["dropped_missing"] = dropped
     return data
@@ -672,7 +777,7 @@ async def dj_play_stream(url: str, title: str = "Live stream") -> str:
     if isinstance(data, str):
         return _held_result(data)  # #ride0928
     return await _result(data, 1) + (
-        f"Playing stream '{title}' from {url} "
+        f"Sent stream '{title}' from {url} "  # #2843
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
     )
 
@@ -712,7 +817,7 @@ async def dj_play_book(book: str, position_seconds: float = -1) -> str:
     if isinstance(data, str):
         return _held_result(data)
     return await _result(data, 1) + (
-        f"Playing '{target.get('title')}' (book {target['id']}) "
+        f"Sent '{target.get('title')}' (book {target['id']}) "
         + ("from the saved position" if position_seconds < 0 else f"from {position_seconds:.0f} s")
         + f" (command #{data.get('id')}). A phone renderer answers unknown_type: books only follow to the PC."
     )
@@ -1538,7 +1643,7 @@ async def dj_queue_by(
     data = await _enqueue(cmd_type, {"track_ids": track_ids})
     if isinstance(data, str):
         return _held_result(data)  # #ride0928
-    verb = {"now": "Playing", "queue": "Queued", "next": "Playing next"}[mode]
+    verb = {"now": "Sent to play now", "queue": "Queued", "next": "Sent to play next"}[mode]  # #2843
     return await _result(data, len(track_ids)) + (  # #ride0928
         f"{verb} {_sent_count(data, len(track_ids))} track(s) from {label} "
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
@@ -1862,7 +1967,7 @@ async def dj_mix(
         if isinstance(data, str):
             return _held_result(data)  # #ride0928
         return (await _result(data, len(upcoming))  # #ride0928
-                + head + f" Nothing was loaded, so it starts now (command #{data.get('id')})." + _missing_note(data))  # #3249
+                + head + f" Nothing was loaded, so it was sent to start now (command #{data.get('id')})." + _missing_note(data))  # #3249 #2843
 
     if not await _device_lacks_replace_upcoming():  # #3249: don't re-send a known failure
         # Only the first chunk rides replace_upcoming; the rest is appended once
@@ -2020,8 +2125,20 @@ async def dj_transfer(device: str) -> str:
     held = _talk_hold("activate")  # #ride0928: the target resumes the queue = music starts
     if held:
         return held
+    try:  # #2843: only a transfer of something PLAYING should end up playing
+        was_playing = bool((await _get("/api/playback/state") or {}).get("playing"))
+    except Exception:
+        was_playing = False
+    since = time.time()
     result = await _post(f"/api/playback/devices/{target_id}/activate", {})
     lines = [f"Transferred playback to '{target_id}'."]
+    if was_playing:  # #2843
+        verdict, why, _ = await _verify_start(
+            None, "activate", {}, state_path=f"/api/playback/state?device_id={quote(target_id)}",
+            since=since)
+        head = f"RESULT playing={verdict} on '{target_id}'"
+        lines.insert(0, head if verdict == "YES"
+                     else f"{head}\nPLAYING={verdict}: {why}. {NOT_YES_TEXT[verdict]}")
     lines.extend(_describe_devices(result))
     return "\n".join(lines)
 
@@ -3486,7 +3603,9 @@ async def _trim_to_pool(picks: list[int], state: dict) -> str:
         data = await _enqueue("play_now", {"track_ids": picks})
         if isinstance(data, str):
             return " " + data
-        return f" Nothing was loaded, so the pool starts now (command #{data.get('id')})."
+        result = await _result(data, len(picks))  # #2843 (Jarvis rider 2): a verdict, not "starts now"
+        return (f"\n{result}Nothing was loaded, so the pool's first picks were sent to start "
+                f"now (command #{data.get('id')}).")
     if not await _device_lacks_replace_upcoming():
         data = await _enqueue("replace_upcoming", {"track_ids": picks})
         if isinstance(data, str):
