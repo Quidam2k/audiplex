@@ -270,6 +270,8 @@ def scan_library(db: Session, library_roots, cover_cache_dir: str) -> ScanResult
             partial, partial_paths = scan_music(
                 db, root.path, cover_cache_dir, exclude=root.exclude  # #5448
             )
+            from audiplex.scanners.music import apply_content_kinds  # #ride0928
+            apply_content_kinds(db, root.path, root.content_kind)
             album_found_paths |= partial_paths
             readable_album_roots.append(root.path)
         else:

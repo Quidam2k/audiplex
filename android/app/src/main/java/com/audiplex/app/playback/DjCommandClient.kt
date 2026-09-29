@@ -67,20 +67,32 @@ enum class LinkState { UNCONFIGURED, CONNECTED, OFFLINE }
 /** The outcome of one command, as reported back to the server (#900). */
 internal data class DispatchResult(val status: String, val detail: String = "")
 
-/** Nothing in the command resolved — the device did not play, and says so. */
-internal fun noTracks(requested: List<Int>) =
-    DispatchResult("no_tracks", "resolved 0 of ${requested.size} track ids")
+/** Requested ids that did not come back from the catalog, order kept (#ride0928). */
+internal fun droppedIds(requested: List<Int>, resolvedIds: Collection<Int>): List<Int> =
+    requested.filter { it !in resolvedIds.toSet() }
+
+private fun droppedDetail(dropped: List<Int>) =
+    "dropped ${dropped.size} unresolvable id(s): $dropped"
 
 /**
- * OK, but say so when only some ids resolved.
+ * Nothing in the command resolved — the device did not play, and says so.
+ * #ride0928: status is "failed" and the detail names the ids, not just a count.
+ */
+internal fun noTracks(requested: List<Int>) =
+    DispatchResult("failed", droppedDetail(requested))
+
+/**
+ * OK, but name the ids that were dropped when only some resolved.
  *
  * A half-loaded queue reported as a clean success is how a library gap stays
  * invisible — the DJ would think it played five tracks when it played two.
+ * #ride0928: the detail lists the dropped ids so the DJ can fix its pool.
  */
-internal fun partialOrOk(requested: List<Int>, resolved: Int) =
-    if (resolved < requested.size)
-        DispatchResult("ok", "resolved $resolved of ${requested.size} track ids")
+internal fun partialOrOk(requested: List<Int>, resolvedIds: Collection<Int>): DispatchResult {
+    val dropped = droppedIds(requested, resolvedIds)
+    return if (dropped.isNotEmpty()) DispatchResult("ok", droppedDetail(dropped))
     else DispatchResult("ok")
+}
 
 /** The command arrived without a field it needs — a server/app mismatch. */
 internal fun badPayload(field: String) =
@@ -381,7 +393,7 @@ class DjCommandClient @Inject constructor(
                         albumLookup = emptyMap(),
                     )
                 }
-                return awaitStart(errorSeq, wasPlaying, partialOrOk(requested, tracks.size))
+                return awaitStart(errorSeq, wasPlaying, partialOrOk(requested, tracks.map { it.id }))
             }
             // DJ mix (#2842): keep the current song, replace everything after
             // it. An empty list is legitimate: it trims the tail.
@@ -398,7 +410,7 @@ class DjCommandClient @Inject constructor(
                 withContext(Dispatchers.Main) {
                     playbackManager.replaceUpcoming(tracks, baseUrl)
                 }
-                return partialOrOk(requested, tracks.size)
+                return partialOrOk(requested, tracks.map { it.id })
             }
             "queue" -> {
                 val requested = cmd.payload?.trackIds.orEmpty()
@@ -407,7 +419,7 @@ class DjCommandClient @Inject constructor(
                 withContext(Dispatchers.Main) {
                     playbackManager.enqueueTracks(tracks, baseUrl)
                 }
-                return partialOrOk(requested, tracks.size)
+                return partialOrOk(requested, tracks.map { it.id })
             }
             "play_next" -> {
                 val requested = cmd.payload?.trackIds.orEmpty()
@@ -416,7 +428,7 @@ class DjCommandClient @Inject constructor(
                 withContext(Dispatchers.Main) {
                     playbackManager.playNextTracks(tracks, baseUrl)
                 }
-                return partialOrOk(requested, tracks.size)
+                return partialOrOk(requested, tracks.map { it.id })
             }
             "reorder" -> {
                 val from = cmd.payload?.fromIndex ?: return badPayload("from_index")
@@ -454,8 +466,8 @@ class DjCommandClient @Inject constructor(
                     if (cmd.payload?.playing == false) playbackManager.pause()
                 }
                 // A handoff that arrives paused is meant to stay silent.
-                if (cmd.payload?.playing == false) return partialOrOk(requested, tracks.size)
-                return awaitStart(errorSeq, wasPlaying, partialOrOk(requested, tracks.size))
+                if (cmd.payload?.playing == false) return partialOrOk(requested, tracks.map { it.id })
+                return awaitStart(errorSeq, wasPlaying, partialOrOk(requested, tracks.map { it.id }))
             }
             "skip" -> {
                 // Advance to the next track in the queue. For music this maps to

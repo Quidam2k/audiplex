@@ -22,7 +22,7 @@ class DjAckHonestyTest {
 
     @Test
     fun `partial resolution detail survives a real start`() {
-        val partial = partialOrOk(listOf(1, 2, 3), 2)
+        val partial = partialOrOk(listOf(1, 2, 3), listOf(1, 2))
         assertEquals(partial, startResult(started = true, error = null, base = partial))
     }
 

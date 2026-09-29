@@ -277,6 +277,22 @@ def _migrate_create_dj_mix_specs(engine):
         ))
 
 
+def _migrate_track_content_kind(engine):  # #ride0928
+    inspector = inspect(engine)
+    if "tracks" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("tracks")}
+    if "content_kind" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE tracks ADD COLUMN content_kind VARCHAR(20) NOT NULL DEFAULT 'music'"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_tracks_content_kind ON tracks (content_kind)"
+        ))
+
+
 def init_db(database_url: str | None = None):
     """Initialize the database engine and session factory.
 
@@ -298,6 +314,7 @@ def init_db(database_url: str | None = None):
     _migrate_favorites_constraint(_engine)
     _migrate_create_track_tag_repairs(_engine)
     _migrate_create_dj_mix_specs(_engine)
+    _migrate_track_content_kind(_engine)  # #ride0928 (dj_pair_notes comes from create_all)
     Base.metadata.create_all(bind=_engine)
     return _engine
 

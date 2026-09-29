@@ -549,11 +549,12 @@ def plan_owner_mix(
     recording_minutes, _ = _cooldown_settings(None, None)
     owner = _resolve_owner(db)
     recent = taste.recent_plays_for(db, owner.id, recording_minutes, identities)
+    skip = non_music(db, body.new_ids)  # #ride0928: no podcast/clip/ambient in a mix
     plan = plan_mix(
         body.current_id,
         list(body.played_ids) + [p.track_id for p in recent],
         body.upcoming_ids,
-        body.new_ids,
+        [i for i in body.new_ids if i not in skip],
         {track_id: ident.recording_id for track_id, ident in identities.items()},
         shuffle=body.shuffle,
         seed=body.seed,
@@ -682,6 +683,8 @@ def set_pool(
     raw_lanes = body.get("lanes")
     if raw_lanes:
         lanes = {str(label): [int(t) for t in ids] for label, ids in raw_lanes.items()}
+        skip = non_music(db, [t for ids in lanes.values() for t in ids])  # #ride0928
+        lanes = {label: [t for t in ids if t not in skip] for label, ids in lanes.items()}
         track_ids = [t for ids in lanes.values() for t in ids]
         source_labels = {t: label for label, ids in lanes.items() for t in ids}
         result = pool.set_pool(
@@ -986,3 +989,170 @@ def get_spec_notes(
     if not row:
         raise HTTPException(status_code=404, detail=f"Spec '{name}' not found")
     return {"name": name, "notes": json.loads(row[7]) if row[7] else []}
+
+
+# ----- #ride0928: content kinds, play history, DJ pair notes, owner playlists -----
+
+CONTENT_KINDS = ("music", "podcast", "clip", "ambient")  # #ride0928
+
+
+def non_music(db: Session, track_ids) -> set[int]:  # #ride0928
+    """The ids whose content_kind is NOT music. DJ mixes and pools drop them, so
+    a podcast or an ambient bed never lands in a ride. Unknown ids aren't here."""
+    from audiplex.models import Track
+
+    ids = {int(i) for i in track_ids if int(i) > 0}
+    if not ids:
+        return set()
+    rows = db.query(Track.id).filter(Track.id.in_(ids), Track.content_kind != "music").all()
+    return {r[0] for r in rows}
+
+
+@router.put("/content-kind", tags=["dj_library"])
+def set_content_kind(body: dict, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Set content_kind on track_ids and/or every track under folder (#ride0928).
+
+    body: {kind, track_ids?: [int], folder?: path}. Returns {kind, updated}.
+    """
+    import os
+    from audiplex.models import Track
+
+    kind = str(body.get("kind") or "")
+    if kind not in CONTENT_KINDS:
+        raise HTTPException(status_code=400, detail=f"kind must be one of {', '.join(CONTENT_KINDS)}")
+    ids = [int(i) for i in body.get("track_ids") or []]
+    folder = body.get("folder")
+    if not ids and not folder:
+        raise HTTPException(status_code=400, detail="give track_ids or folder")
+    matched = db.query(Track).filter(Track.id.in_(ids)).all() if ids else []
+    if folder:
+        prefix = os.path.normcase(os.path.normpath(str(folder))).rstrip("\\/") + os.sep
+        matched += [t for t in db.query(Track).all()
+                    if os.path.normcase(os.path.normpath(t.file_path)).startswith(prefix)]
+    seen = set()
+    for t in matched:
+        if t.id not in seen:
+            seen.add(t.id)
+            t.content_kind = kind
+    db.commit()
+    return {"kind": kind, "updated": len(seen)}
+
+
+@router.get("/history", tags=["dj_library"])
+def owner_history(
+    limit: int = Query(20, ge=1, le=500),
+    since: float | None = Query(None, description="epoch seconds"),
+    events: str = Query("start", description="'start' (one row per play) or 'all'"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """What the OWNER played, newest first (#ride0928). Built on PlayStat.
+
+    Owner-scoped like /most-played: the DJ asks as dj-agent, who never plays.
+    """
+    from datetime import datetime, timezone
+    from audiplex.models import PlayStat, Track
+
+    owner = _resolve_owner(db)
+    q = db.query(PlayStat, Track).join(Track, Track.id == PlayStat.track_id).filter(
+        PlayStat.user_id == owner.id
+    )
+    if events != "all":
+        q = q.filter(PlayStat.event == "start")
+    if since is not None:
+        q = q.filter(PlayStat.timestamp >= datetime.fromtimestamp(since, timezone.utc).replace(tzinfo=None))
+    rows = q.order_by(PlayStat.timestamp.desc(), PlayStat.id.desc()).limit(limit).all()
+    out = []
+    for ps, t in rows:
+        ts = ps.timestamp
+        if ts is not None and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        out.append({
+            "track_id": t.id,
+            "title": t.title,
+            "artist_name": t.artist.name if t.artist else None,
+            "event": ps.event,
+            "played_seconds": ps.played_seconds,
+            "at": ts.timestamp() if ts else None,
+        })
+    return out
+
+
+@router.get("/pair-notes", tags=["dj_library"])
+def get_pair_notes(
+    track_a: int | None = Query(None),
+    track_b: int | None = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """DJ notes, newest first (#ride0928). track_a + track_b = notes on that
+    pair plus each track's own notes (track_b NULL); track_a alone = every
+    note touching track_a; neither = the latest notes."""
+    from sqlalchemy import and_, or_
+    from audiplex.models import DjPairNote
+
+    q = db.query(DjPairNote)
+    if track_a is not None and track_b is not None:
+        q = q.filter(or_(
+            and_(DjPairNote.track_a == track_a, DjPairNote.track_b == track_b),
+            and_(DjPairNote.track_a.in_([track_a, track_b]), DjPairNote.track_b.is_(None)),
+        ))
+    elif track_a is not None:
+        q = q.filter(or_(DjPairNote.track_a == track_a, DjPairNote.track_b == track_a))
+    rows = q.order_by(DjPairNote.id.desc()).limit(limit).all()
+    return [
+        {"id": r.id, "track_a": r.track_a, "track_b": r.track_b, "note": r.note,
+         "persona": r.persona, "created_at": r.created_at.isoformat() if r.created_at else None}
+        for r in rows
+    ]
+
+
+@router.post("/pair-notes", tags=["dj_library"])
+def add_pair_note(body: dict, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """body: {track_a, track_b?, note, persona?} (#ride0928)."""
+    from audiplex.models import DjPairNote, Track
+
+    try:
+        a = int(body["track_a"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="track_a (int) is required")
+    b = body.get("track_b")
+    b = int(b) if b not in (None, "", 0) else None
+    note = str(body.get("note") or "").strip()
+    if not note:
+        raise HTTPException(status_code=400, detail="note is required")
+    for tid in [a] + ([b] if b is not None else []):
+        if db.get(Track, tid) is None:
+            raise HTTPException(status_code=404, detail=f"no track {tid}")
+    row = DjPairNote(track_a=a, track_b=b, note=note[:2000], persona=(body.get("persona") or None))
+    db.add(row)
+    db.commit()
+    return {"id": row.id, "track_a": a, "track_b": b, "note": row.note, "persona": row.persona}
+
+
+@router.post("/playlists", response_model=PlaylistSummary, tags=["dj_library"])
+def create_owner_playlist(body: dict, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Create a playlist in the OWNER's library from track ids (#ride0928, dj_folder).
+
+    /api/music/playlists writes to the caller, and dj-agent's playlists are
+    invisible on Todd's phone. body: {name, track_ids}.
+    """
+    from audiplex.models import PlaylistTrack, Track
+
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    owner = _resolve_owner(db)
+    wanted = [int(i) for i in body.get("track_ids") or []]
+    known = {r[0] for r in db.query(Track.id).filter(Track.id.in_(wanted)).all()} if wanted else set()
+    pl = Playlist(name=name[:200], user_id=owner.id)
+    db.add(pl)
+    db.flush()
+    pos = 0
+    for tid in wanted:
+        if tid in known:
+            db.add(PlaylistTrack(playlist_id=pl.id, track_id=tid, position=pos))
+            pos += 1
+    db.commit()
+    return PlaylistSummary(id=pl.id, name=pl.name, track_count=pos)

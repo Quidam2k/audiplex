@@ -142,6 +142,10 @@ class Track(Base):
     file_path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     file_size: Mapped[int] = mapped_column(Integer, default=0)
     file_hash: Mapped[str | None] = mapped_column(String(64))
+    # #ride0928: music | podcast | clip | ambient. Only 'music' goes into DJ mixes/pools.
+    content_kind: Mapped[str] = mapped_column(
+        String(20), default="music", server_default="music", nullable=False, index=True
+    )
     added_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 
@@ -286,3 +290,21 @@ class TrackTagRepair(Base):
     )
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+
+
+class DjPairNote(Base):
+    """A DJ's note about a track, or about playing track_a into track_b (#ride0928).
+
+    Lives in audiplex.db so what a persona learned on one ride ("this into that
+    is a great lift", "never after the ballad") is there on the next. track_b
+    NULL = a note about track_a alone.
+    """
+
+    __tablename__ = "dj_pair_notes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    track_a: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    track_b: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    persona: Mapped[str | None] = mapped_column(String(50))
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)

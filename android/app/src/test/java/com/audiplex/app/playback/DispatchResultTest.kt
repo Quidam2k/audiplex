@@ -18,22 +18,22 @@ class DispatchResultTest {
     @Test
     fun `nothing resolved is a failure, not a quiet success`() {
         val result = noTracks(listOf(65, 55))
-        assertEquals("no_tracks", result.status)
-        assertEquals("resolved 0 of 2 track ids", result.detail)
+        assertEquals("failed", result.status)
+        assertEquals("dropped 2 unresolvable id(s): [65, 55]", result.detail)
     }
 
     @Test
     fun `a fully resolved command is a clean ok`() {
-        val result = partialOrOk(listOf(65, 55), resolved = 2)
+        val result = partialOrOk(listOf(65, 55), listOf(65, 55))
         assertEquals("ok", result.status)
         assertEquals("", result.detail)
     }
 
     @Test
     fun `a partly resolved command is ok but says what was lost`() {
-        val result = partialOrOk(listOf(65, 55, 12), resolved = 2)
+        val result = partialOrOk(listOf(65, 55, 12), listOf(65, 55))
         assertEquals("ok", result.status)
-        assertEquals("resolved 2 of 3 track ids", result.detail)
+        assertEquals("dropped 1 unresolvable id(s): [12]", result.detail)
     }
 
     @Test
@@ -53,6 +53,25 @@ class DispatchResultTest {
             DispatchResult("error", "boom").status,
         )
         failures.forEach { assertEquals(false, it == "ok") }
-        assertEquals("ok", partialOrOk(listOf(1), 1).status)
+        assertEquals("ok", partialOrOk(listOf(1), listOf(1)).status)
+    }
+
+    @Test
+    fun `#ride0928 dropped ids are named in order and never reordered`() {
+        val result = partialOrOk(listOf(12, 5, 34, 6), listOf(5, 6))
+        assertEquals("ok", result.status)
+        assertEquals("dropped 2 unresolvable id(s): [12, 34]", result.detail)
+        assertEquals(listOf(12, 34), droppedIds(listOf(12, 5, 34, 6), listOf(6, 5)))
+    }
+
+    @Test
+    fun `#ride0928 resolveConcurrently with a throwing fake api feeds the ack detail`() = kotlinx.coroutines.runBlocking {
+        val requested = listOf(1, 12, 3, 34)
+        val resolved = resolveConcurrently(requested) { id ->
+            if (id == 12) throw RuntimeException("404") else if (id == 34) null else id
+        }
+        val result = partialOrOk(requested, resolved)
+        assertEquals("ok", result.status)
+        assertEquals("dropped 2 unresolvable id(s): [12, 34]", result.detail)
     }
 }

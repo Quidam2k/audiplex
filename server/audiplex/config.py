@@ -17,6 +17,9 @@ class LibraryRoot(BaseModel):
     # removable drive holds the full tree and part of it has been copied to a
     # permanent root, so the copy isn't catalogued twice.
     exclude: list[str] = Field(default_factory=list)
+    # Music only (#ride0928): music | podcast | clip | ambient for every track
+    # under this root. Unset = folder-name rules (scanners/music.py), else music.
+    content_kind: str | None = None
 
 
 class Settings(BaseSettings):

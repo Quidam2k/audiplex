@@ -48,6 +48,38 @@ import javax.inject.Singleton
 
 enum class PlayerKind { Audiobook, Music, Stream }
 
+/** #ride0928: more than this many failures inside the window stops auto-skipping. */
+internal const val SKIP_LOOP_MAX_FAILURES = 5
+internal const val SKIP_LOOP_WINDOW_MS = 30_000L
+
+/** #ride0928: only a file that is not there. A network error (tunnel blip) must NOT skip songs. */
+internal val SKIPPABLE_ERROR_CODES = setOf(
+    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+    PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND,
+)
+
+/**
+ * #ride0928: should a player error auto-skip to the next queue item?
+ *
+ * Only for source/IO errors (2000..2999: bad HTTP status, file not found, ...)
+ * on a real catalog MUSIC track (positive id, so not a DJ voice clip) that has
+ * a next item. [recentFailures] counts errors already seen inside the window;
+ * once that reaches the limit we stop skipping so a dead server cannot make
+ * the queue race to its end.
+ */
+internal fun shouldSkipFailedTrack(
+    errorCode: Int,
+    kind: PlayerKind?,
+    trackId: Int?,
+    hasNext: Boolean,
+    recentFailures: Int,
+): Boolean =
+    kind == PlayerKind.Music &&
+        trackId != null && trackId > 0 &&
+        hasNext &&
+        errorCode in SKIPPABLE_ERROR_CODES &&
+        recentFailures < SKIP_LOOP_MAX_FAILURES
+
 data class MusicQueueItem(
     val track: TrackSchema,
     val albumId: Int,
@@ -190,6 +222,9 @@ class PlaybackManager @Inject constructor(
     private var lastDiscontinuityReason: Int = -1
 
     private fun isMisc(): Boolean = _currentBook.value?.category == "audiobook_misc"
+    /** #ride0928: timestamps of recent player errors, for the skip-loop guard. */
+    private val recentPlayerErrorsMs = ArrayDeque<Long>()
+
     private fun isMusic(): Boolean = _currentMusic.value != null
 
     private fun currentTrackId(): Int? =
@@ -279,6 +314,24 @@ class PlaybackManager @Inject constructor(
             val item = _currentMusic.value
                 ?.let { it.items.getOrNull(it.currentIndex) }
                 ?.track
+            // #ride0928: a music file that cannot be read should not strand the
+            // queue in silence: skip to the next item, unless failures pile up.
+            val now = System.currentTimeMillis()
+            recentPlayerErrorsMs.removeAll { now - it > SKIP_LOOP_WINDOW_MS }
+            val ctrl = controller
+            val skipped = shouldSkipFailedTrack(
+                errorCode = error.errorCode,
+                kind = _playerKind.value,
+                trackId = item?.id,
+                hasNext = ctrl?.hasNextMediaItem() == true,
+                recentFailures = recentPlayerErrorsMs.size,
+            )
+            recentPlayerErrorsMs.add(now)
+            if (skipped && ctrl != null) {
+                ctrl.seekToNextMediaItem()
+                ctrl.prepare()
+                ctrl.play()
+            }
             clientLog.report(
                 level = "error",
                 event = "player_error",
@@ -292,6 +345,7 @@ class PlaybackManager @Inject constructor(
                         put("trackTitle", it.title)
                     }
                     _currentBook.value?.let { put("bookId", it.id.toString()) }
+                    put("skipped", skipped.toString()) // #ride0928
                 },
             )
         }

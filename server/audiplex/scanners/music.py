@@ -661,3 +661,43 @@ def scan_music(
         ScanResultSchema(added=added, updated=updated, removed=0, errors=errors),
         found_paths,
     )
+
+
+# #ride0928: which tracks are not music. A path segment decides when the root
+# doesn't say. Only the unmistakable names: an "Ambient" GENRE folder is music,
+# so ambient is set per root in config (content_kind) or by dj_set_kind, never
+# guessed from a folder name.
+_KIND_BY_SEGMENT = {
+    "podcast": "podcast", "podcasts": "podcast",
+    "clips": "clip", "sound effects": "clip", "sfx": "clip",
+}
+
+
+def kind_for_path(file_path: str, root_kind: str | None = None) -> str:
+    if root_kind:
+        return root_kind
+    for seg in Path(file_path).parts[:-1]:
+        kind = _KIND_BY_SEGMENT.get(seg.strip().lower())
+        if kind:
+            return kind
+    return "music"
+
+
+def apply_content_kinds(db: Session, music_root: str, root_kind: str | None = None) -> int:
+    """Mark non-music tracks under `music_root` after a scan (#ride0928).
+
+    Only ever moves a track OFF the default 'music'; a kind set by hand
+    (dj_set_kind) to something else is left alone. Returns how many changed.
+    """
+    prefix = os.path.normcase(os.path.normpath(music_root)).rstrip("\\/") + os.sep
+    changed = 0
+    for t in db.query(Track).filter(Track.content_kind == "music").all():
+        if not os.path.normcase(os.path.normpath(t.file_path)).startswith(prefix):
+            continue
+        kind = kind_for_path(os.path.relpath(t.file_path, music_root), root_kind)
+        if kind != "music":
+            t.content_kind = kind
+            changed += 1
+    if changed:
+        db.commit()
+    return changed
