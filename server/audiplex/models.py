@@ -146,6 +146,8 @@ class Track(Base):
     content_kind: Mapped[str] = mapped_column(
         String(20), default="music", server_default="music", nullable=False, index=True
     )
+    # #3255: EBU R128 integrated loudness (LUFS), filled by scripts/measure_loudness.py.
+    loudness_lufs: Mapped[float | None] = mapped_column(Float, nullable=True)
     added_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 

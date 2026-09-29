@@ -293,6 +293,17 @@ def _migrate_track_content_kind(engine):  # #ride0928
         ))
 
 
+def _migrate_track_loudness(engine):  # #3255
+    inspector = inspect(engine)
+    if "tracks" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("tracks")}
+    if "loudness_lufs" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE tracks ADD COLUMN loudness_lufs FLOAT"))
+
+
 def init_db(database_url: str | None = None):
     """Initialize the database engine and session factory.
 
@@ -315,6 +326,7 @@ def init_db(database_url: str | None = None):
     _migrate_create_track_tag_repairs(_engine)
     _migrate_create_dj_mix_specs(_engine)
     _migrate_track_content_kind(_engine)  # #ride0928 (dj_pair_notes comes from create_all)
+    _migrate_track_loudness(_engine)  # #3255
     Base.metadata.create_all(bind=_engine)
     return _engine
 

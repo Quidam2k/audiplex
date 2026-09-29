@@ -1118,18 +1118,67 @@ def owner_history(
     if since is not None:
         q = q.filter(PlayStat.timestamp >= datetime.fromtimestamp(since, timezone.utc).replace(tzinfo=None))
     rows = q.order_by(PlayStat.timestamp.desc(), PlayStat.id.desc()).limit(limit).all()
+
+    def epoch(ts):
+        if ts is None:
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.timestamp()
+
+    # #3255: pair each start with the first stop/complete/skip of the same
+    # track after it (and before that track starts again), so a caller can
+    # join on "what was playing between start and end".
+    ends_by_track: dict[int, list] = {}
+    starts_by_track: dict[int, list] = {}
+    start_rows = [ps for ps, _ in rows if ps.event == "start"]
+    if start_rows:
+        track_ids = {ps.track_id for ps in start_rows}
+        earliest = min(ps.timestamp for ps in start_rows)
+        for ps in (
+            db.query(PlayStat)
+            .filter(
+                PlayStat.user_id == owner.id,
+                PlayStat.track_id.in_(track_ids),
+                PlayStat.timestamp >= earliest,
+            )
+            .order_by(PlayStat.timestamp, PlayStat.id)
+        ):
+            bucket = starts_by_track if ps.event == "start" else ends_by_track
+            bucket.setdefault(ps.track_id, []).append(ps)
+
+    def end_of(start):
+        if start.event != "start":
+            return None
+        next_start = next(
+            (s for s in starts_by_track.get(start.track_id, [])
+             if (s.timestamp, s.id) > (start.timestamp, start.id)),
+            None,
+        )
+        for e in ends_by_track.get(start.track_id, []):
+            if (e.timestamp, e.id) < (start.timestamp, start.id):
+                continue
+            if next_start is not None and (e.timestamp, e.id) > (next_start.timestamp, next_start.id):
+                break
+            return e
+        return None
+
     out = []
     for ps, t in rows:
-        ts = ps.timestamp
-        if ts is not None and ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+        at = epoch(ps.timestamp)
+        end = end_of(ps)
         out.append({
             "track_id": t.id,
+            "id": t.id,
             "title": t.title,
             "artist_name": t.artist.name if t.artist else None,
             "event": ps.event,
             "played_seconds": ps.played_seconds,
-            "at": ts.timestamp() if ts else None,
+            "at": at,
+            "start": at,
+            "end": epoch(end.timestamp) if end is not None else None,
+            "end_event": end.event if end is not None else None,
+            "loudness_lufs": t.loudness_lufs,
         })
     return out
 
