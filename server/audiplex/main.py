@@ -18,6 +18,7 @@ from audiplex.routers import (
     playback,
     progress,
     streaming,
+    web,
 )
 from audiplex.scanner import scan_library
 
@@ -79,6 +80,7 @@ app.include_router(music.router)
 app.include_router(playback.router)
 app.include_router(dj_voice.router)
 app.include_router(app_router.router)
+app.include_router(web.router)  # #2806 browser UI at /web
 
 
 @app.get("/api/health")

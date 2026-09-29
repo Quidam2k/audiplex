@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Audiplex</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="bar">
+  <h1>Audiplex</h1>
+  <div id="device-box" class="device-box" hidden>
+    <label for="device">Play on</label>
+    <select id="device"></select>
+  </div>
+  <button id="signout" class="link" hidden>Sign out</button>
+</header>
+
+<main>
+  <section id="login-view" hidden>
+    <form id="login-form" class="card">
+      <h2>Sign in</h2>
+      <label>Username <input id="username" name="username" autocomplete="username" required></label>
+      <label>Password <input id="password" name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">Sign in</button>
+      <p id="login-error" class="error" role="alert"></p>
+    </form>
+  </section>
+
+  <section id="app-view" hidden>
+    <nav class="tabs" role="tablist">
+      <button data-tab="library" class="tab">Library</button>
+      <button data-tab="folders" class="tab">Folders</button>
+      <button data-tab="playlists" class="tab">Playlists</button>
+      <button data-tab="favorites" class="tab">Favorites</button>
+    </nav>
+    <div id="crumbs" class="crumbs"></div>
+    <input id="filter" class="filter" type="search" placeholder="Filter" aria-label="Filter">
+    <div id="content"></div>
+  </section>
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<dialog id="pick-playlist">
+  <form method="dialog" class="card">
+    <h2>Add to playlist</h2>
+    <div id="pick-list" class="pick-list"></div>
+    <label>New playlist <input id="pick-new" placeholder="Name"></label>
+    <menu><button value="cancel" class="link">Cancel</button><button id="pick-create" value="create">Create and add</button></menu>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,94 @@
+/* Audiplex browser UI (#2806). Mobile first: Todd's phone is the main browser. */
+:root {
+  --bg: #f6f5f2; --surface: #ffffff; --text: #1d1d1b; --muted: #6b6a66;
+  --line: #e2e0da; --accent: #1f6f78; --accent-text: #ffffff; --danger: #a33a2c; --star: #c98a00;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141414; --surface: #1e1e1e; --text: #ecebe8; --muted: #9a9892;
+    --line: #2e2e2c; --accent: #4fb3bd; --accent-text: #0d1f21; --danger: #e0786a; --star: #f2c14e;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+[hidden] { display: none !important; }
+button, select, input { font: inherit; color: inherit; }
+button {
+  min-height: 40px; padding: 0 14px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--surface);
+}
+button:disabled { opacity: .35; cursor: default; }
+button[type="submit"], .actions button:first-child { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button.danger { color: var(--danger); }
+button.link { background: none; border: none; color: var(--accent); padding: 0 6px; }
+input, select { min-height: 40px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); }
+
+.bar {
+  position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 10px;
+  padding: 8px 16px; background: var(--surface); border-bottom: 1px solid var(--line);
+}
+.bar h1 { font-size: 18px; margin: 0; margin-right: auto; }
+.device-box { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.device-box label { font-size: 13px; color: var(--muted); white-space: nowrap; }
+#signout { white-space: nowrap; }
+.device-box select { max-width: 42vw; }
+
+main { max-width: 820px; margin: 0 auto; padding: 12px 16px 80px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+#login-form { max-width: 360px; margin: 10vh auto 0; display: grid; gap: 12px; }
+#login-form h2 { margin: 0; }
+#login-form label { display: grid; gap: 4px; font-size: 14px; color: var(--muted); }
+.error { color: var(--danger); min-height: 1.4em; margin: 0; }
+
+.tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 10px; }
+.tab { padding: 0 4px; }
+.tab[aria-selected="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.crumbs { display: flex; flex-wrap: wrap; gap: 2px 6px; align-items: center; margin: 6px 0; font-size: 14px; }
+.crumb.current { font-weight: 600; }
+.crumb + .crumb::before { content: "\203A"; color: var(--muted); margin-right: 6px; }
+.filter { width: 100%; margin: 4px 0 10px; }
+h2 { font-size: 16px; margin: 18px 0 6px; }
+.muted, .sub { color: var(--muted); }
+.sub { font-size: 13px; }
+
+.actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 12px; }
+.actions input { flex: 1 1 180px; }
+.list, .tracks { list-style: none; margin: 0; padding: 0; }
+.link-row, .track {
+  display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line);
+}
+.row-link {
+  flex: 1; min-width: 0; text-align: left; display: grid; border: none; background: none; padding: 4px 0;
+}
+.meta { flex: 1; min-width: 0; display: grid; }
+.title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.track { flex-wrap: wrap; }
+.row-actions { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+button.icon { min-width: 40px; padding: 0 8px; }
+button.fav { color: var(--star); font-size: 18px; }
+select.rating { min-width: 56px; padding: 0 4px; }
+@media (max-width: 520px) {
+  .track .meta { flex-basis: 100%; }
+  .row-actions { width: 100%; justify-content: flex-end; }
+}
+
+dialog { border: none; padding: 0; background: transparent; width: min(92vw, 420px); color: var(--text); }
+dialog::backdrop { background: rgba(0, 0, 0, .45); }
+dialog form { display: grid; gap: 10px; }
+dialog h2 { margin: 0; }
+dialog label { display: grid; gap: 4px; font-size: 14px; color: var(--muted); }
+dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; padding: 0; }
+.pick-list { display: grid; gap: 6px; max-height: 45vh; overflow: auto; }
+.pick { text-align: left; }
+
+.toast {
+  position: fixed; left: 50%; bottom: 20px; transform: translate(-50%, 40px); opacity: 0;
+  background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 8px;
+  transition: opacity .2s, transform .2s; pointer-events: none; max-width: 90vw;
+}
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
