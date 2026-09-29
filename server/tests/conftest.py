@@ -426,5 +426,10 @@ def isolated_dj_pool(tmp_path, monkeypatch):
         monkeypatch.setattr(mcp, "_delete", no_delete)
         if hasattr(mcp, "_patch"):
             monkeypatch.setattr(mcp, "_patch", no_patch)
+        if hasattr(mcp, "ACK_WAIT_S"):  # #ride0928: stubs never ack; don't sit out the wait
+            monkeypatch.setattr(mcp, "ACK_WAIT_S", 0.05)
+    # #ride0928: the talk guard defaults to Pantheon's REAL speech state; a test
+    # run must not flake because Todd happened to be talking. Missing = unguarded.
+    monkeypatch.setenv("DJ_SPEECH_STATE_FILE", str(tmp_path / "no-speech-state.json"))
     yield
     dj_pool.reset_pool_singleton()

@@ -125,18 +125,19 @@ async def dj_play_now(track_ids: list[int]) -> str:
 
     data = await _enqueue("play_now", {"track_ids": track_ids})  # #3249: gated
     if isinstance(data, str):
-        return data
-    async with httpx.AsyncClient(timeout=15) as client:
-        device_resp = await client.get(
-            f"{AUDIPLEX_URL}/api/playback/device", headers=_headers()
-        )
-    device = device_resp.json() if device_resp.status_code == 200 else {}
+        return _held_result(data)  # #ride0928
+    result = await _result(data, len(track_ids))  # #ride0928
+    try:
+        device = await _get("/api/playback/device")  # #ride0928: one HTTP path (stubbable)
+    except Exception:
+        device = {}
     head = (_missing_note(data) + (  # #3249
         f" Queued play_now for {_sent_count(data, len(track_ids))} track(s) "
         f"(command #{data.get('id')}, {data.get('pending')} pending). "
         f"Confirm with dj_command_status({data.get('id')}) — it reports whether "
         f"the device acked, which is the difference between 'sent' and 'played'. "
     )).lstrip()  # #3249
+    head = result + head  # #ride0928
     # Never claim "it's playing" — say whether anything is listening, so a dead
     # player reads as a failure instead of a success (#2961).
     note = await _repeat_note(track_ids)
@@ -237,6 +238,29 @@ async def _player_error_lines(window_s: float = PLAYER_ERROR_WINDOW_S) -> list[s
     return out
 
 
+async def _missing_on_phone(window_s: float = PLAYER_ERROR_WINDOW_S) -> str:  # #ride0928
+    """'missing_on_phone: ...' from the newest recent player_error, else ''.
+
+    A phone with the #ride0928 build skips past a file it can't play and says
+    skipped=true; an older build just stops on it.
+    """
+    import time
+    try:
+        entries = await _get("/api/playback/client-log?limit=50")
+    except Exception:
+        return ""
+    cutoff = time.time() - window_s
+    errs = [e for e in entries or []
+            if e.get("event") == "player_error" and (e.get("received_at") or e.get("at") or 0) >= cutoff]
+    if not errs:
+        return ""
+    d = errs[-1].get("detail") or {}
+    skipped = str(d.get("skipped")).lower() == "true"
+    return (f"missing_on_phone: track {d.get('trackId', '?')} ({d.get('trackTitle', '?')}) "
+            f"skipped={'yes' if skipped else 'no'}"
+            + ("" if skipped else " - the player may be stuck on it; dj_skip moves on."))
+
+
 @mcp.tool()
 async def dj_link_history(limit: int = 25) -> str:
     """When the DJ link to the phone dropped, and when it came back.
@@ -285,16 +309,9 @@ async def dj_skip() -> str:
     No-op if nothing is queued after the current track. Use dj_now_playing
     afterward to confirm what's playing.
     """
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            f"{AUDIPLEX_URL}/api/playback/command",
-            headers=_headers(),
-            json={"type": "skip", "payload": {}},
-        )
-    if resp.status_code == 401:
-        return "Auth failed (401). Check AUDIPLEX_TOKEN."
-    resp.raise_for_status()
-    data = resp.json()
+    data = await _enqueue("skip", {})  # #ride0928: one send path for every command
+    if isinstance(data, str):
+        return data
     return (
         f"Queued skip (command #{data.get('id')}, {data.get('pending')} pending). "
         "The device skips to the next track when it next polls."
@@ -392,6 +409,53 @@ def _sent_count(data, asked: int) -> int:  # #3249: count what was SENT, not ask
     return int(data.get("sent_count", asked)) if isinstance(data, dict) else asked
 
 
+async def _titles(ids: list[int], cap: int = 10) -> list[str]:  # #ride0928
+    """'Title - Artist' for up to `cap` ids (a dead file still has its DB row)."""
+    out = []
+    for i in ids[:cap]:
+        try:
+            t = await _get(f"/api/music/tracks/{i}")
+            out.append(f"{t.get('title') or '?'} - {t.get('artist_name') or '?'}".strip(" -"))
+        except Exception:
+            out.append(f"track {i}")
+    if len(ids) > cap:
+        out.append(f"+{len(ids) - cap} more")
+    return out
+
+
+ACK_WAIT_S = 8.0  # #ride0928
+
+
+def _held_kind(text: str) -> str:  # #ride0928
+    if text.startswith("HELD (todd_talking)"):
+        return "todd_talking"
+    if text.startswith("REFUSED (announce first)"):
+        return "announce_first"
+    return "not_sent"
+
+
+def _held_result(text: str) -> str:  # #ride0928: same shape as _result, for a refusal
+    return f"RESULT sent=0 held={_held_kind(text)} skipped_missing=[] phone_ack=none\n{text}"
+
+
+async def _result(data: dict, asked: int, wait_ack: bool = True) -> str:  # #ride0928
+    """One machine-readable line every start-type tool leads with:
+    sent / held / skipped_missing (titles) / phone_ack (status: detail)."""
+    sent = _sent_count(data, asked)
+    titles = await _titles(list(data.get("dropped_missing") or []))
+    phone = "not_waited"
+    if wait_ack and data.get("id") is not None:
+        ack = await _await_ack(int(data["id"]), timeout=ACK_WAIT_S)
+        if ack is None:
+            phone = f"none_yet (no answer in {ACK_WAIT_S:g}s; see dj_command_status({data['id']}))"
+        else:
+            phone = str(ack.get("ack_status"))
+            if ack.get("ack_detail"):
+                phone += f": {ack['ack_detail']}"
+    return (f"RESULT sent={sent} held=no skipped_missing={json.dumps(titles, ensure_ascii=False)} "
+            f"phone_ack={phone}\n")
+
+
 # The phone resolves a queued list with one GET per track, in sequence, and its
 # command loop stops polling meanwhile: a 990-track queue went dark ~3 min on
 # 2026-09-28 (13:17 and 13:37) and read as "no player connected". Big lists go
@@ -400,7 +464,36 @@ QUEUE_CHUNK = 40  # #3249
 _CHUNKABLE = {"play_now", "queue"}  # #3249
 
 
+TALK_GUARDED = START_CMDS | {"activate"}  # #ride0928: anything that can start audio on an idle player
+TALK_HELD = (  # #ride0928
+    "HELD (todd_talking): Todd is talking or typing right now, so nothing was sent. "
+    "Music never starts over him. Wait until he's done, then call this again."
+)
+TALK_UNREADABLE = (  # #ride0928
+    "HELD (todd_talking): Pantheon's speech state exists but can't be read, so it "
+    "isn't safe to assume Todd is quiet. Nothing was sent. Try again in a moment."
+)
+
+
+def _talk_hold(cmd_type: str) -> str | None:  # #ride0928
+    """The hold text if `cmd_type` would put audio on while Todd talks, else None."""
+    if cmd_type not in TALK_GUARDED:
+        return None
+    verdict = _todd_talking()
+    if verdict == "talking":
+        return TALK_HELD
+    if verdict == "unreadable":
+        return TALK_UNREADABLE
+    if verdict == "missing":
+        print(f"[talk guard] no speech state at {_speech_state_path()}; {cmd_type} sent unguarded",
+              file=sys.stderr, flush=True)
+    return None
+
+
 async def _enqueue(cmd_type: str, payload: dict) -> str:
+    held = _talk_hold(cmd_type)  # #ride0928: before anything else, incl. the announce gate
+    if held:
+        return held
     refusal = await _announce_gate(cmd_type)  # #3249
     if refusal:
         return refusal
@@ -472,8 +565,8 @@ async def dj_queue(track_ids: list[int]) -> str:
         return "No track_ids given; nothing to queue."
     data = await _enqueue("queue", {"track_ids": track_ids})
     if isinstance(data, str):
-        return data
-    return (
+        return _held_result(data)  # #ride0928
+    return await _result(data, len(track_ids)) + (  # #ride0928
         f"Queued {_sent_count(data, len(track_ids))} track(s) to the end "
         f"(command #{data.get('id')}, {data.get('pending')} pending). "
         "Appended when the device next polls."
@@ -491,8 +584,8 @@ async def dj_play_next(track_ids: list[int]) -> str:
         return "No track_ids given; nothing to insert."
     data = await _enqueue("play_next", {"track_ids": track_ids})
     if isinstance(data, str):
-        return data
-    return (
+        return _held_result(data)  # #ride0928
+    return await _result(data, len(track_ids)) + (  # #ride0928
         f"Inserted {_sent_count(data, len(track_ids))} track(s) to play next "
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
     ) + _missing_note(data) + await _repeat_note(track_ids)  # #3249
@@ -527,8 +620,8 @@ async def dj_resume() -> str:
     """Resume playback on the Audiplex device."""
     data = await _enqueue("resume", {})
     if isinstance(data, str):
-        return data
-    return f"Queued resume (command #{data.get('id')}, {data.get('pending')} pending)."
+        return _held_result(data)  # #ride0928
+    return await _result(data, 0) + f"Queued resume (command #{data.get('id')}, {data.get('pending')} pending)."
 
 
 @mcp.tool()
@@ -579,8 +672,8 @@ async def dj_play_stream(url: str, title: str = "Live stream") -> str:
     """
     data = await _enqueue("play_stream", {"url": url, "title": title})
     if isinstance(data, str):
-        return data
-    return (
+        return _held_result(data)  # #ride0928
+    return await _result(data, 1) + (
         f"Playing stream '{title}' from {url} "
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
     )
@@ -749,23 +842,43 @@ async def dj_break_brief() -> str:
 
 
 SPEECH_GATE_WAIT_SECONDS = 20  # #2858
+DEFAULT_SPEECH_STATE_FILE = "Q:/Pantheon/data/runtime/speech_state.json"  # #ride0928
+
+
+def _speech_state_path() -> Path:  # #ride0928
+    return Path(os.environ.get("DJ_SPEECH_STATE_FILE") or DEFAULT_SPEECH_STATE_FILE)
+
+
+def _todd_talking(claim: bool = False) -> str:  # #ride0928: one guard for every audio start
+    """'talking', 'clear', 'missing' or 'unreadable', from Pantheon's speech state.
+
+    Merges #2858's _someone_talking and #5463's _speech_busy. Any truthy
+    stt_active / talk_active / composing is Todd talking or typing; claim=True
+    also counts a persona holding the speaking claim (a clip playing).
+    'missing' = no Pantheon on this box, so no talk signal exists; 'unreadable'
+    = the file is there but broken, which callers treat as talking (fail closed).
+    """
+    path = _speech_state_path()
+    if not path.exists():
+        return "missing"
+    for attempt in range(2):  # a read can land mid-write; one retry
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            break
+        except (OSError, ValueError):
+            if attempt:
+                return "unreadable"
+            import time
+            time.sleep(0.05)
+    if not isinstance(state, dict):
+        return "unreadable"
+    keys = ("stt_active", "talk_active", "composing") + (("current_claim_holder",) if claim else ())
+    return "talking" if any(state.get(k) for k in keys) else "clear"
 
 
 def _someone_talking() -> bool:  # #2858
-    """True while DJ_SPEECH_STATE_FILE says the listener is talking or typing.
-
-    The file is a JSON object; any truthy stt_active / talk_active / composing
-    means "busy" (Pantheon's data/runtime/speech_state.json has this shape).
-    Unset or unreadable means not busy, because the gate is advisory.
-    """
-    path = os.environ.get("DJ_SPEECH_STATE_FILE")
-    if not path:
-        return False
-    try:
-        state = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    return any(state.get(k) for k in ("stt_active", "talk_active", "composing"))
+    """True while Todd is talking or typing (or the state can't be read)."""
+    return _todd_talking() in ("talking", "unreadable")
 
 
 async def _render_clip(text: str, title: str) -> dict | str:
@@ -1110,9 +1223,9 @@ async def dj_queue_by(
         return f"Matched {label} but it has no tracks."
     data = await _enqueue(cmd_type, {"track_ids": track_ids})
     if isinstance(data, str):
-        return data
+        return _held_result(data)  # #ride0928
     verb = {"now": "Playing", "queue": "Queued", "next": "Playing next"}[mode]
-    return (
+    return await _result(data, len(track_ids)) + (  # #ride0928
         f"{verb} {_sent_count(data, len(track_ids))} track(s) from {label} "
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
     ) + _missing_note(data)  # #3249
@@ -1196,12 +1309,7 @@ async def _recent_split(ids: list[int], hours: float) -> tuple[list[int], int]: 
 
 def _speech_busy() -> bool:  # #5463: never swap audio over Todd or a persona clip (#2845)
     """Todd talking/typing, or a persona holds the speaking claim."""
-    path = os.environ.get("DJ_SPEECH_STATE_FILE") or "Q:/Pantheon/data/runtime/speech_state.json"
-    try:
-        state = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    return any(state.get(k) for k in ("stt_active", "talk_active", "composing", "current_claim_holder"))
+    return _todd_talking(claim=True) in ("talking", "unreadable")  # #ride0928
 
 
 def _remaining_ms(state: dict) -> int | None:  # #5463
@@ -1435,8 +1543,9 @@ async def dj_mix(
             return head + " Nothing left to play."
         data = await _enqueue("play_now", {"track_ids": upcoming})
         if isinstance(data, str):
-            return data
-        return head + f" Nothing was loaded, so it starts now (command #{data.get('id')})." + _missing_note(data)  # #3249
+            return _held_result(data)  # #ride0928
+        return (await _result(data, len(upcoming))  # #ride0928
+                + head + f" Nothing was loaded, so it starts now (command #{data.get('id')})." + _missing_note(data))  # #3249
 
     if not await _device_lacks_replace_upcoming():  # #3249: don't re-send a known failure
         # Only the first chunk rides replace_upcoming; the rest is appended once
@@ -1444,8 +1553,11 @@ async def dj_mix(
         first, tail = upcoming[:QUEUE_CHUNK], upcoming[QUEUE_CHUNK:]  # #3249
         data = await _enqueue("replace_upcoming", {"track_ids": first})
         if isinstance(data, str):
-            return data
+            return _held_result(data)  # #ride0928
         ack = await _await_ack(int(data["id"]))
+        titles = json.dumps(await _titles(list(data.get("dropped_missing") or [])), ensure_ascii=False)  # #ride0928
+        ack_txt = "none_yet" if ack is None else f"{ack.get('ack_status')}" + (f": {ack['ack_detail']}" if ack.get("ack_detail") else "")
+        head = f"RESULT sent={_sent_count(data, len(first))} held=no skipped_missing={titles} phone_ack={ack_txt}\n" + head + _missing_note(data)  # #ride0928
         if ack is None:
             return head + (
                 f" Sent replace_upcoming (command #{data['id']}) after the current song;"
@@ -1588,6 +1700,9 @@ async def dj_transfer(device: str) -> str:
     if target_id is None:
         known = ", ".join(f"{d.get('id')} ({d.get('name')})" for d in devices) or "none"
         return f"No device matches '{device}'. Registered: {known}."
+    held = _talk_hold("activate")  # #ride0928: the target resumes the queue = music starts
+    if held:
+        return held
     result = await _post(f"/api/playback/devices/{target_id}/activate", {})
     lines = [f"Transferred playback to '{target_id}'."]
     lines.extend(_describe_devices(result))
@@ -1843,6 +1958,9 @@ async def dj_now_playing() -> str:
     if device_line:
         lines.append(device_line)
     lines += await _player_error_lines()  # #3249
+    miss = await _missing_on_phone()  # #ride0928
+    if miss:
+        lines.append(miss)
     active = device.get("active_device_id")
     effective = device.get("effective_target_device_id")
     if active is not None:
