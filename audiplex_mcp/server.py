@@ -821,14 +821,16 @@ async def dj_break_brief() -> str:
         state = None
     if state and state.get("track"):
         t = state["track"]
-        lines += ["", f"Now playing: {t.get('title')} - {t.get('artist')}"]
-        upcoming = [
-            f"{i.get('title')} - {i.get('artist')}"
-            for i in (state.get("queue") or [])
-            if i.get("index", -1) > state.get("queue_index", 0)
-        ][:3]
-        if upcoming:
-            lines.append("Coming up: " + "; ".join(upcoming))
+        prev, nxt, later = await _prev_next(state)  # #ride0928: same prev/now/next as the bridge watcher
+        lines.append("")
+        if prev:
+            lines.append(f"Previous: {prev.get('title')} - {prev.get('artist')}")
+        lines.append(f"Now playing: {t.get('title')} - {t.get('artist')}")
+        if nxt:
+            lines.append(f"Next: {nxt.get('title')} - {nxt.get('artist')}")
+        if later:
+            lines.append("After that: " + "; ".join(f"{i.get('title')} - {i.get('artist')}" for i in later))
+        lines += await _pair_note_lines(prev, t, nxt)  # #ride0928
     else:
         lines += ["", "Nothing is playing right now."]
 
@@ -839,6 +841,164 @@ async def dj_break_brief() -> str:
             "Set DJ_TTS_URL to an OpenAI-compatible speech endpoint.",
         ]
     return "\n".join(lines)
+
+
+async def _prev_next(state: dict) -> tuple[dict | None, dict | None, list[dict]]:  # #ride0928
+    """(previous, next, the two after next) around the current track.
+
+    Previous = the music item before the current one in the phone's queue,
+    else the owner's last play of a different track (/history). DJ voice
+    breaks (negative ids) are skipped on both sides.
+    """
+    queue = [q for q in state.get("queue") or [] if (q.get("id") or 0) > 0]
+    idx = state.get("queue_index") or 0
+    cur_id = (state.get("track") or {}).get("id")
+    before = [q for q in queue if q.get("index", 0) < idx]
+    after = [q for q in queue if q.get("index", 0) > idx]
+    prev = before[-1] if before else None
+    if prev is None:
+        try:
+            for h in await _get("/api/playback/history?limit=5"):
+                if h.get("track_id") != cur_id:
+                    prev = {"id": h["track_id"], "title": h.get("title"), "artist": h.get("artist_name")}
+                    break
+        except Exception:
+            pass
+    return prev, (after[0] if after else None), after[1:3]
+
+
+async def _pair_note_lines(prev: dict | None, now: dict | None, nxt: dict | None) -> list[str]:  # #ride0928
+    """DJ pair notes for prev->now and now->next (and each track's own notes)."""
+    out: list[str] = []
+    seen: set[int] = set()
+    for a, b in ((prev, now), (now, nxt)):
+        if not a or not b or (a.get("id") or 0) <= 0 or (b.get("id") or 0) <= 0:
+            continue
+        try:
+            notes = await _get(f"/api/playback/pair-notes?track_a={a['id']}&track_b={b['id']}&limit=5")
+        except Exception:
+            continue
+        for n in notes:
+            if n["id"] in seen:
+                continue
+            seen.add(n["id"])
+            who = f" ({n['persona']})" if n.get("persona") else ""
+            about = "this pairing" if n.get("track_b") else f"track {n['track_a']}"
+            out.append(f"DJ note on {about}{who}: {n['note']}")
+    return ([""] + out) if out else []
+
+
+@mcp.tool()
+async def dj_history(limit: int = 15, since_minutes: float = 0) -> str:
+    """What Todd actually PLAYED, newest first (#ride0928): one line per track
+    start, from the owner's listening history (not the queue). since_minutes
+    limits it to the last N minutes (0 = no limit)."""
+    import time
+    path = f"/api/playback/history?limit={max(1, min(limit, 200))}"
+    if since_minutes > 0:
+        path += f"&since={time.time() - since_minutes * 60:.0f}"
+    rows = await _get(path)
+    if not rows:
+        return "No plays on record for that window."
+    return "\n".join(
+        f"{_fmt_time(r.get('at'))}  {r['track_id']} | {r.get('artist_name') or '?'} - {r.get('title')}"
+        for r in rows
+    )
+
+
+@mcp.tool()
+async def dj_pair_note(track_a: int, note: str, track_b: int = 0, persona: str = "") -> str:
+    """Remember something about a track, or about playing track_a INTO track_b
+    (#ride0928). Kept in audiplex.db, so it's there on the next ride, and
+    dj_break_brief shows it when that pairing comes up. track_b=0 = a note
+    about track_a alone. Examples: "great lift into the climb", "never after
+    a ballad", "Todd skips this one past minute 3"."""
+    body = {"track_a": track_a, "note": note, "persona": persona or None}
+    if track_b:
+        body["track_b"] = track_b
+    try:
+        r = await _post("/api/playback/pair-notes", body)
+    except httpx.HTTPStatusError as e:
+        return f"Not saved: {e.response.status_code} {e.response.text[:200]}"
+    what = f"{track_a} -> {track_b}" if track_b else f"track {track_a}"
+    return f"Saved note #{r['id']} on {what}."
+
+
+@mcp.tool()
+async def dj_pair_notes(track_a: int = 0, track_b: int = 0, limit: int = 20) -> str:
+    """Read DJ notes (#ride0928). Both ids = that pairing plus each track's own
+    notes; track_a alone = every note touching it; neither = the latest."""
+    q = [f"limit={max(1, min(limit, 200))}"]
+    if track_a:
+        q.append(f"track_a={track_a}")
+    if track_b:
+        q.append(f"track_b={track_b}")
+    rows = await _get("/api/playback/pair-notes?" + "&".join(q))
+    if not rows:
+        return "No DJ notes match."
+    return "\n".join(
+        f"#{r['id']} {r['track_a']}" + (f" -> {r['track_b']}" if r.get("track_b") else "")
+        + f": {r['note']}" + (f" ({r['persona']})" if r.get("persona") else "")
+        for r in rows
+    )
+
+
+@mcp.tool()
+async def dj_set_kind(kind: str, track_ids: list[int] | None = None, folder: str = "") -> str:
+    """Mark tracks as music | podcast | clip | ambient (#ride0928). Only 'music'
+    goes into dj_mix and the rolling pool, so a podcast or a rain-sounds bed
+    never lands mid-ride. folder = every track under that path."""
+    body: dict = {"kind": kind}
+    if track_ids:
+        body["track_ids"] = track_ids
+    if folder:
+        body["folder"] = folder
+    try:
+        r = await _put("/api/playback/content-kind", body)
+    except httpx.HTTPStatusError as e:
+        return f"Not changed: {e.response.status_code} {e.response.text[:200]}"
+    return f"Set {r['updated']} track(s) to {r['kind']}."
+
+
+@mcp.tool()
+async def dj_folder(path: str, action: str = "shuffle", recursive: bool = True, name: str = "") -> str:
+    """Do something with a whole folder in one call (#ride0928).
+
+    path:      a folder path as dj_library shows it.
+    action:    'shuffle' = a balanced dj_mix of the folder (re-plans what's to
+               come, never interrupts the current song); 'queue' = append in
+               folder order; 'playlist' = save it as a playlist in Todd's
+               library (name defaults to the folder name).
+    recursive: include subfolders (default) or only the folder's own files.
+    """
+    if action == "shuffle":
+        return await dj_mix(sources=[{"kind": "folder", "query": path, "recursive": recursive}])
+    try:
+        label, tracks = await _resolve_source("folder", path, recursive=recursive)
+    except (PermissionError, LookupError, httpx.HTTPStatusError) as e:
+        return f"Couldn't read folder '{path}': {e}"
+    ids = [int(t["id"]) for t in tracks]
+    if not ids:
+        return f"{label} has no tracks."
+    if action == "queue":
+        data = await _enqueue("queue", {"track_ids": ids})
+        if isinstance(data, str):
+            return _held_result(data)
+        return await _result(data, len(ids)) + f"Queued {_sent_count(data, len(ids))} track(s) from {label}." + _missing_note(data)
+    if action == "playlist":
+        title = name or path.replace("\\", "/").rstrip("/").split("/")[-1] or "Folder"
+        pl = await _post("/api/playback/playlists", {"name": title, "track_ids": ids})
+        return f"Saved playlist '{pl['name']}' (#{pl['id']}) with {pl['track_count']} track(s) from {label}."
+    return f"Unknown action '{action}'. Use 'shuffle', 'queue' or 'playlist'."
+
+
+async def _put(path: str, body: dict):  # #ride0928
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.put(f"{AUDIPLEX_URL}{path}", headers=_headers(), json=body)
+    if resp.status_code == 401:
+        raise PermissionError("Auth failed (401). Check AUDIPLEX_TOKEN.")
+    resp.raise_for_status()
+    return resp.json()
 
 
 SPEECH_GATE_WAIT_SECONDS = 20  # #2858

@@ -25,6 +25,18 @@ Nothing here merges the two.
 the current song finishes, which is how a real DJ break lands. `mode='now'`
 interrupts mid-song — use it only when Todd asks for something immediately.
 
+## Between songs: previous, now, next (#ride0928)
+
+The brief lists `Previous:`, `Now playing:` and `Next:` (the bridge watcher's
+payload uses the same `prev` / `now` / `next`). A between-song break names all
+three when it can: what just played, what's on, what's coming. Skip a slot the
+brief doesn't give you rather than guess it.
+
+If the brief shows a `DJ note on this pairing`, use it. When you notice
+something worth keeping ("great lift into the climb", "Todd skipped this one
+twice"), save it with `dj_pair_note(track_a, note, track_b)`; it's there on
+the next ride.
+
 ## Writing rules
 
 Every character you write gets spoken aloud. That means:
