@@ -408,7 +408,35 @@ def post_stat(event: PlayStatEvent, db: Session = Depends(get_db), user: User = 
     db.add(stat)
     db.commit()
     db.refresh(stat)
+    if event.event == "complete":
+        _note_duration_mismatch(db, event.track_id, event.played_seconds)  # #3249
     return stat
+
+
+_duration_mismatch_logged: set[int] = set()  # #3249
+
+
+def _note_duration_mismatch(db: Session, track_id: int, player_seconds: float) -> None:
+    """#3249: a 'complete' carries the player's own duration for the file. When
+    it is far from the DB's, the DB is wrong (track 986: DB 839 s, file 168 s),
+    which skews the DJ's timing. Log it once per track per process; the fix is
+    scripts/audit_track_durations.py. Never lets a stat post fail."""
+    try:
+        if track_id in _duration_mismatch_logged or player_seconds <= 0:
+            return
+        track = db.get(Track, track_id)
+        db_s = float(track.duration_seconds or 0.0) if track else 0.0
+        if not track or abs(db_s - player_seconds) <= max(5.0, 0.02 * player_seconds):
+            return
+        _duration_mismatch_logged.add(track_id)
+        from audiplex.playback_bus import _append_diag
+
+        print(f"[stats] #3249 duration mismatch track {track_id} {track.title!r}: "
+              f"db {db_s:.0f}s, player {player_seconds:.0f}s", flush=True)
+        _append_diag("duration_mismatch", {"track_id": track_id, "title": track.title,
+                                           "db_seconds": db_s, "player_seconds": player_seconds})
+    except Exception as e:  # never let a diagnostic break a stat post
+        print(f"[stats] duration check skipped: {e}", flush=True)
 
 
 @router.get("/playlists", response_model=list[PlaylistSummary])
