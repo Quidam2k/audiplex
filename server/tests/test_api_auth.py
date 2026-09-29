@@ -313,3 +313,25 @@ def test_owner_login_never_expires_invitees_keep_30_days():
     assert token_hours_for(SimpleNamespace(is_admin=True), settings) == OWNER_TOKEN_HOURS
     assert OWNER_TOKEN_HOURS >= 24 * 365 * 50
     assert token_hours_for(SimpleNamespace(is_admin=False), settings) == 720
+
+
+def test_pre_ruling_30_day_owner_token_upgrades_on_first_use(auth_client):
+    """#ride0928: Todd's phone holds a token minted before 2026-09-23 with the
+    old 30-day life. Its FIRST authenticated request must come back with a
+    ~100-year token, no password step, so one app open fixes the phone."""
+    from audiplex.auth import OWNER_TOKEN_HOURS
+    fresh_30d = _token_for(1, "boss", timedelta(hours=EXPIRY_HOURS))  # brand-new 30-day token
+    resp = auth_client.get("/api/auth/me", headers={"Authorization": f"Bearer {fresh_30d}"})
+    assert resp.status_code == 200
+    renewed = resp.headers.get(REFRESH_HEADER)
+    assert renewed, "owner's 30-day token was not upgraded"
+    exp = datetime.fromtimestamp(jwt.decode(renewed, JWT_SECRET, algorithms=["HS256"])["exp"], timezone.utc)
+    assert exp - datetime.now(timezone.utc) > timedelta(hours=OWNER_TOKEN_HOURS * 0.99)
+    again = auth_client.get("/api/auth/me", headers={"Authorization": f"Bearer {renewed}"})
+    assert again.status_code == 200 and REFRESH_HEADER not in again.headers
+
+
+def test_invitee_30_day_token_is_not_upgraded(auth_client):
+    fresh_30d = _token_for(2, "peon", timedelta(hours=EXPIRY_HOURS))
+    resp = auth_client.get("/api/auth/me", headers={"Authorization": f"Bearer {fresh_30d}"})
+    assert resp.status_code == 200 and REFRESH_HEADER not in resp.headers
