@@ -108,6 +108,19 @@ LINK_LOG_PATH = Path(
     or Path(__file__).resolve().parent.parent / "data" / "link-history.jsonl"
 )
 
+# Rotating JSONL of every client-log entry and command transition (#3249).
+# The client log and the command registry are memory-only, so on 2026-09-26
+# and 09-27 the ~6 s-early halt at a ride's end was undiagnosable: two server
+# restarts wiped both before anyone read them. Size-capped and rotated so it
+# can never grow without bound; lives under server/data/, which is outside
+# every library root, so no scan or phone sync will pick it up as content.
+DIAG_LOG_PATH = Path(
+    os.environ.get("AUDIPLEX_DIAG_LOG")
+    or Path(__file__).resolve().parent.parent / "data" / "playback-diag.jsonl"
+)
+DIAG_LOG_MAX_BYTES = 5 * 1024 * 1024
+DIAG_LOG_BACKUPS = 3
+
 
 # Command lifecycle. `failed` is a terminal ACK too: the device told us it
 # could not carry the command out, which is a FAR better answer than silence
@@ -230,6 +243,7 @@ class PlaybackBus:
         self._commands[rec.id] = rec
         while len(self._commands) > COMMAND_HISTORY_CAPACITY:
             self._commands.popitem(last=False)
+        _append_diag("cmd_queued", _cmd_diag(rec))
         self._event().set()
         return rec
 
@@ -256,6 +270,10 @@ class PlaybackBus:
                 rec.delivery_count += 1
                 self._last_delivered = rec
                 self._last_delivered_at = now
+                _append_diag("cmd_delivered", {
+                    "id": rec.id, "type": rec.type, "poller": poller_id,
+                    "delivery_count": rec.delivery_count,
+                })
                 return rec
         return None
 
@@ -325,6 +343,9 @@ class PlaybackBus:
         rec.ack_status = status
         rec.ack_detail = detail
         rec.acked_at = time.time()
+        _append_diag("cmd_ack", {
+            "id": rec.id, "type": rec.type, "status": status, "detail": detail,
+        })
         if rec.type == "deactivate" and rec.target_device_id:
             # The old device has paused and posted its final state (or said it
             # can't — an older app acks unknown_type); either way hand over now.
@@ -536,7 +557,22 @@ class PlaybackBus:
 
     def set_state(self, state: dict[str, Any], device_id: Optional[str] = None) -> None:
         device_key = device_id or LEGACY_DEVICE_ID
+        prev = self._states.get(device_key)
         self._states[device_key] = (state, time.time())
+        # #3249: log a state line only when play/pause, track or queue index
+        # changes, so a halt ("paused 6 s before the end") is on disk without
+        # writing every heartbeat.
+        if prev is None or _state_key(prev[0]) != _state_key(state):
+            track = state.get("track") or {}
+            _append_diag("state", {
+                "device": device_key,
+                "playing": state.get("playing"),
+                "track_id": track.get("id") if isinstance(track, dict) else None,
+                "position_ms": state.get("position_ms"),
+                "duration_ms": state.get("duration_ms"),
+                "queue_index": state.get("queue_index"),
+                "queue_length": state.get("queue_length"),
+            })
 
         # Hook: top_up the DJ pool if it's running (#5495, item 1)
         self._maybe_top_up_pool(state, device_key)
@@ -655,6 +691,7 @@ class PlaybackBus:
         self._client_log.append(record)
         if record.get("event") == "process_exit":
             _persist_exit(record)
+        _append_diag("client_log", record)
         return record
 
     def client_log(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -712,6 +749,64 @@ def read_link_history(limit: int = 50) -> list[dict[str, Any]]:
         except ValueError:
             continue
     return out
+
+
+def _state_key(state: dict[str, Any]) -> tuple:
+    track = state.get("track") or {}
+    tid = track.get("id") if isinstance(track, dict) else None
+    return (bool(state.get("playing")), tid, state.get("queue_index"))
+
+
+def _cmd_diag(rec: PlaybackCommandRecord) -> dict[str, Any]:
+    """A command's diag line. Track lists are summarized (count + first few
+    ids), since a 990-track queue would otherwise put ~10 KB per line."""
+    payload = dict(rec.payload or {})
+    ids = payload.get("track_ids")
+    if isinstance(ids, list) and len(ids) > 5:
+        payload["track_ids"] = ids[:5]
+        payload["track_count"] = len(ids)
+    return {"id": rec.id, "type": rec.type, "payload": payload,
+            "target": rec.target_device_id}
+
+
+def _append_diag(kind: str, record: dict[str, Any]) -> None:
+    """Append one line to the rotating playback diag log (#3249).
+
+    Best-effort like the exit and link logs: this runs inside a phone request
+    or a DJ command, and a disk problem must never become a 500 there.
+    """
+    try:
+        path = DIAG_LOG_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size >= DIAG_LOG_MAX_BYTES:
+            for n in range(DIAG_LOG_BACKUPS - 1, 0, -1):
+                older = path.with_name(f"{path.name}.{n}")
+                if older.exists():
+                    os.replace(older, path.with_name(f"{path.name}.{n + 1}"))
+            os.replace(path, path.with_name(f"{path.name}.1"))
+        line = {"kind": kind, "at": time.time(), **record}
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(line, default=str) + "\n")
+    except OSError:
+        pass
+
+
+def read_diag_history(limit: int = 200, kind: Optional[str] = None) -> list[dict[str, Any]]:
+    """Recent diag lines from the current file, oldest first, optionally one kind."""
+    try:
+        with open(DIAG_LOG_PATH, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if kind is None or rec.get("kind") == kind:
+            out.append(rec)
+    return out[-limit:] if limit > 0 else out
 
 
 def read_persisted_exits(limit: int = 50) -> list[dict[str, Any]]:

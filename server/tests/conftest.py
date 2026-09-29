@@ -400,6 +400,11 @@ def isolated_client_logs(tmp_path, monkeypatch):
     monkeypatch.setattr(
         playback_bus, "LINK_LOG_PATH", tmp_path / "link-history.jsonl"
     )
+    # #3249: the playback diag log gets every client-log entry and command
+    # transition, so it needs the same isolation.
+    monkeypatch.setattr(
+        playback_bus, "DIAG_LOG_PATH", tmp_path / "playback-diag.jsonl"
+    )
 
 
 @pytest.fixture(autouse=True)

@@ -14,6 +14,7 @@ Endpoints:
   GET  /api/playback/client-log    — agent reads recent client diagnostics
   GET  /api/playback/client-exits  — process-exit reports, persisted to disk
   GET  /api/playback/link-history  — link gaps/resumes, persisted to disk
+  GET  /api/playback/diag-history  — client-log, command and state changes, persisted (#3249)
   GET  /api/playback/most-played            — owner's most-played (read-only)
   GET  /api/playback/likely-skips           — owner's early-skip suspects
   GET  /api/playback/playlists              — owner's playlists (read-only)
@@ -53,7 +54,13 @@ from audiplex.auth import get_current_user
 from audiplex.config import get_settings
 from audiplex.database import get_db
 from audiplex.models import Favorite, Playlist, TrackRating, User
-from audiplex.playback_bus import LEGACY_DEVICE_ID, bus, read_link_history, read_persisted_exits
+from audiplex.playback_bus import (
+    LEGACY_DEVICE_ID,
+    bus,
+    read_diag_history,
+    read_link_history,
+    read_persisted_exits,
+)
 from audiplex.routers.music import (
     FAVORITE_TYPES,
     _get_playlist_detail,
@@ -1156,3 +1163,18 @@ def create_owner_playlist(body: dict, db: Session = Depends(get_db), user: User 
             pos += 1
     db.commit()
     return PlaylistSummary(id=pl.id, name=pl.name, track_count=pos)
+
+
+@router.get("/diag-history")
+def get_diag_history(
+    limit: int = Query(200, ge=1, le=2000),
+    kind: str | None = Query(None),
+    user: User = Depends(get_current_user),
+):
+    """Client-log entries, command queued/delivered/ack, and now-playing
+    changes, from disk (#3249). The live views are memory-only, and a restart
+    on 2026-09-27 and 09-28 wiped the evidence for why two rides halted ~6 s
+    before the last song ended. `kind` filters to one of client_log,
+    cmd_queued, cmd_delivered, cmd_ack, state.
+    """
+    return read_diag_history(limit, kind)
