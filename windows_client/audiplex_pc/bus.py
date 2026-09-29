@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from .player import QueueItem
+from .sleep_fade import resolve_url
 
 
 logger = logging.getLogger(__name__)
@@ -266,14 +267,43 @@ class BusClient:
             )
             return "ok", ""
 
-        if command_type in {
-            "bed_play",
-            "bed_stop",
-            "bed_volume",
-            "sleep_timer",
-            "cancel_sleep_timer",
-        }:
-            return "unsupported", "not on the Windows renderer yet"
+        # Sleep engine (#3435): same payloads as the phone's DjCommandClient.
+        if command_type == "bed_play":
+            url = payload.get("url")
+            if not url:
+                return "bad_payload", "url"
+            volume = payload.get("volume")
+            self.player.bed_play(
+                resolve_url(url, self.proxy_base),
+                0.5 if volume is None else float(volume),
+            )
+            return "ok", ""
+
+        if command_type == "bed_stop":
+            self.player.bed_stop()
+            return "ok", ""
+
+        if command_type == "bed_volume":
+            if payload.get("volume") is None:
+                return "bad_payload", "volume"
+            self.player.bed_volume(float(payload["volume"]))
+            return "ok", ""
+
+        if command_type == "sleep_timer":
+            if payload.get("minutes") is None:
+                return "bad_payload", "minutes"
+            fade_seconds = payload.get("fade_seconds")
+            bed_fade_to = payload.get("bed_fade_to")
+            self.player.sleep_timer(
+                float(payload["minutes"]),
+                120 if fade_seconds is None else int(fade_seconds),
+                None if bed_fade_to is None else float(bed_fade_to),
+            )
+            return "ok", ""
+
+        if command_type == "cancel_sleep_timer":
+            self.player.cancel_sleep_timer()
+            return "ok", ""
 
         return "unknown_type", command_type
 

@@ -16,4 +16,8 @@ of on the phone. When it isn't active it just polls and never takes commands.
 
 Audio streams through a loopback proxy (`proxy.py`) that adds the Bearer
 header, since the server takes no `?token=` query auth.
-Music only for now: sleep beds/timers ack as `unsupported`.
+Music plus the sleep engine (#3435): `bed_play`/`bed_volume`/`bed_stop` run a looping bed on a
+second VLC player (DirectSound output: VLC's default mmdevice output shares one volume per
+process, so a fade would mute the bed too), and `sleep_timer` crossfades the main player into
+it like the phone does. Isolated check: `python scripts/e2e_sleep_isolated.py` (never :8100).
+Tests: `python -m pytest tests`.

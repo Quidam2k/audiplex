@@ -7,6 +7,8 @@ from dataclasses import dataclass
 
 import vlc
 
+from . import sleep_fade
+
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +32,17 @@ class Player:
     def __init__(
         self,
         on_error: Callable[[str, str], None] | None = None,
+        vlc_args: Iterable[str] = (),
+        bed_aout: str | None = "directsound",
     ) -> None:
         self.on_error = on_error
 
+        # vlc_args lets a test harness pass e.g. --aout=dummy (no speakers).
         self._instance = vlc.Instance(
             "--no-video",
             "--quiet",
             "--intf=dummy",
+            *vlc_args,
         )
         self._player = self._instance.media_player_new()
         self._lock = threading.RLock()
@@ -52,6 +58,23 @@ class Player:
         # previous track that lands after a skip can't advance the new one.
         self._gen = 0
         self._pause_on_start = False
+
+        # Sleep engine (#3435): a second, independent looping "bed" player on
+        # the same VLC instance (Windows mixes the two outputs), and a sleep
+        # timer that fades the MAIN player. The fade drives _fade_volume, an
+        # override on top of the configured self.volume, so a track change
+        # mid-fade keeps the faded level and resume/cancel restores the real one.
+        self._fade_volume: float | None = None
+        self._sleep_cancel: threading.Event | None = None
+        self._sleep_thread: threading.Thread | None = None
+        self._bed: vlc.MediaPlayer | None = None
+        self._bed_url: str | None = None
+        self.bed_level = 0.0
+        self._bed_gen = 0
+        # VLC's default Windows output (mmdevice, also wasapi) shares ONE volume
+        # across every player in the process, so fading the main player would
+        # fade the bed with it. DirectSound gives the bed its own volume.
+        self._bed_aout = bed_aout
 
         self._event_manager = self._player.event_manager()
         self._event_manager.event_attach(
@@ -72,6 +95,7 @@ class Player:
     ) -> None:
         """Replace the queue. start_ms/paused let a transfer resume mid-track."""
         with self._lock:
+            self._fade_volume = None
             self.queue = list(items)
             if not self.queue:
                 self.index = -1
@@ -182,12 +206,14 @@ class Player:
             if not self.queue or self.index < 0:
                 return
 
+            self._fade_volume = None
             if self._ended:
                 self._start(self.index)
                 return
 
             self._paused = False
             self._playing = True
+            self._apply_main_volume()
             self._player.play()
 
     def toggle(self) -> None:
@@ -206,11 +232,182 @@ class Player:
     def set_volume(self, volume: float) -> None:
         with self._lock:
             self.volume = max(0.0, min(1.0, float(volume)))
-            self._player.audio_set_volume(round(self.volume * 100))
+            if self._fade_volume is None:
+                self._apply_main_volume()
 
     def stop(self) -> None:
         with self._lock:
             self._stop_player()
+
+    # --- sleep engine (#3435) -------------------------------------------
+
+    def bed_play(self, url: str, volume: float) -> None:
+        """Start (or replace) the looping bed layer. Never touches the main
+        player, its queue, or the reported state."""
+        with self._lock:
+            self._release_bed()
+            bed = self._instance.media_player_new()
+            if self._bed_aout and bed.audio_output_set(self._bed_aout) != 0:
+                logger.warning("Bed output %s unavailable; its volume may follow the main player", self._bed_aout)
+            gen = self._bed_gen  # bound per player: a stale bed can't restart a new one
+            events = bed.event_manager()
+            events.event_attach(
+                vlc.EventType.MediaPlayerEndReached,
+                lambda _event: self._dispatch_bed_end(gen),
+            )
+            # The output only exists once playing: re-apply the level then, so
+            # a bed meant to start silent never starts at full volume.
+            events.event_attach(
+                vlc.EventType.MediaPlayerPlaying,
+                lambda _event: self._dispatch_bed_playing(gen),
+            )
+            self._bed = bed
+            self._bed_url = url
+            self.bed_level = max(0.0, min(1.0, float(volume)))
+            self._play_bed_media()
+
+    def bed_stop(self) -> None:
+        with self._lock:
+            self._release_bed()
+
+    def bed_volume(self, volume: float) -> None:
+        with self._lock:
+            self._set_bed_level(volume)
+
+    def bed_active(self) -> bool:
+        with self._lock:
+            return self._bed is not None
+
+    def sleep_timer(
+        self, minutes: float, fade_seconds: int = 120, bed_fade_to: float | None = None
+    ) -> None:
+        """After `minutes`, fade the MAIN player to 0 over `fade_seconds` and
+        pause it; whatever is playing is never re-queued or restarted. With
+        bed_fade_to the bed ramps up to it in the same loop (phone parity,
+        SleepFade.kt). Superseded by a later call or cancel_sleep_timer."""
+        with self._lock:
+            self._cancel_sleep_thread()
+            if self._fade_volume is not None:
+                self._fade_volume = None
+                self._apply_main_volume()
+            cancel = threading.Event()
+            self._sleep_cancel = cancel
+            self._sleep_thread = threading.Thread(
+                target=self._run_sleep_timer,
+                args=(cancel, float(minutes), int(fade_seconds), bed_fade_to),
+                name="audiplex-sleep-timer",
+                daemon=True,
+            )
+            self._sleep_thread.start()
+
+    def cancel_sleep_timer(self) -> None:
+        """Stop a pending/running fade and restore the configured volume. A
+        bed still at 0 was only there to be crossfaded into, so it is stopped
+        rather than left looping silently all night."""
+        with self._lock:
+            self._cancel_sleep_thread()
+            self._fade_volume = None
+            self._apply_main_volume()
+            if self._bed is not None and self.bed_level <= 0.0:
+                self._release_bed()
+
+    def sleep_timer_active(self) -> bool:
+        with self._lock:
+            thread = self._sleep_thread
+        return thread is not None and thread.is_alive()
+
+    def _run_sleep_timer(
+        self,
+        cancel: threading.Event,
+        minutes: float,
+        fade_seconds: int,
+        bed_fade_to: float | None,
+    ) -> None:
+        if cancel.wait(max(minutes * 60.0, 0.0)):
+            return
+        with self._lock:
+            if cancel.is_set():
+                return
+            main_start = self.volume
+            bed_start = self.bed_level if self._bed is not None else 0.0
+        steps = max(max(fade_seconds, 1) * 4, 1)
+        step_delay = max(fade_seconds / steps, 0.05)
+        logger.info(
+            "Sleep fade: %ss, main %.2f->0, bed %s", fade_seconds, main_start,
+            "untouched" if bed_fade_to is None else f"{bed_start:.2f}->{bed_fade_to:.2f}",
+        )
+        for i in range(steps + 1):
+            main, bed = sleep_fade.levels(i, steps, main_start, bed_start, bed_fade_to)
+            with self._lock:
+                if cancel.is_set():
+                    return
+                self._fade_volume = main
+                self._apply_main_volume()
+                if bed is not None and self._bed is not None:
+                    self._set_bed_level(bed)
+            if cancel.wait(step_delay):
+                return
+        with self._lock:
+            if cancel.is_set():
+                return
+            # _fade_volume stays at 0 until play_now/resume/cancel, so there is
+            # no full-volume blip while VLC's async pause lands.
+            self.pause()
+            if self._sleep_cancel is cancel:
+                self._sleep_cancel = None
+            bed_note = f"at {self.bed_level:.2f}" if self._bed is not None else "off"
+        logger.info("Sleep fade done: main paused, bed %s", bed_note)
+
+    def _cancel_sleep_thread(self) -> None:
+        if self._sleep_cancel is not None:
+            self._sleep_cancel.set()
+        self._sleep_cancel = None
+
+    def _apply_main_volume(self) -> None:
+        level = self.volume if self._fade_volume is None else self._fade_volume
+        self._player.audio_set_volume(round(level * 100))
+
+    def _set_bed_level(self, volume: float) -> None:
+        self.bed_level = max(0.0, min(1.0, float(volume)))
+        if self._bed is not None:
+            self._bed.audio_set_volume(round(self.bed_level * 100))
+
+    def _play_bed_media(self) -> None:
+        media = self._instance.media_new(self._bed_url)
+        # Loop forever; the EndReached restart below is the backstop.
+        media.add_option(":input-repeat=65535")
+        self._bed.set_media(media)
+        self._bed.audio_set_volume(round(self.bed_level * 100))
+        self._bed.play()
+
+    def _release_bed(self) -> None:
+        self._bed_gen += 1
+        bed, self._bed, self._bed_url = self._bed, None, None
+        self.bed_level = 0.0
+        if bed is not None:
+            try:
+                bed.stop()
+                bed.release()
+            except Exception:
+                logger.exception("Releasing the bed player failed")
+
+    def _dispatch_bed_end(self, gen: int) -> None:
+        threading.Thread(target=self._on_bed_end, args=(gen,), daemon=True).start()
+
+    def _dispatch_bed_playing(self, gen: int) -> None:
+        threading.Thread(target=self._on_bed_playing, args=(gen,), daemon=True).start()
+
+    def _on_bed_playing(self, gen: int) -> None:
+        with self._lock:
+            if gen == self._bed_gen and self._bed is not None:
+                self._bed.audio_set_volume(round(self.bed_level * 100))
+
+    def _on_bed_end(self, gen: int) -> None:
+        with self._lock:
+            if gen != self._bed_gen or self._bed is None:
+                return
+            logger.info("Bed reached its end; restarting the loop")
+            self._play_bed_media()
 
     def state(self) -> dict[str, object]:
         with self._lock:
@@ -323,7 +520,7 @@ class Player:
 
     def _on_playing(self) -> None:
         with self._lock:
-            self._player.audio_set_volume(round(self.volume * 100))
+            self._apply_main_volume()
             if self._pause_on_start:
                 # A paused handoff: load at the position, then hold there.
                 self._pause_on_start = False

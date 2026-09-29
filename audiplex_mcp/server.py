@@ -806,7 +806,7 @@ async def dj_sleep_start(
 ) -> str:
     """Sleep mode, in one call. With NO arguments while a book is playing:
     the book keeps playing untouched for 30 min, then fades out over 2 min
-    while Todd's brown-noise bed fades in on the same phone, and the bed loops
+    while Todd's brown-noise bed fades in on the same device (phone or PC), and the bed loops
     on all night. That is what "Jarvis, sleep mode" means.
 
     bed_url: defaults to the brown-noise track found in the library.
