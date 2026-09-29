@@ -20,6 +20,24 @@ class QueueItem:
     title: str | None
     artist: str | None
     url: str
+    offset_ms: int = 0  # #2680: where a book part starts in the whole book
+
+
+@dataclass
+class BookInfo:
+    """The audiobook on the main player (#2680). Positions are book-global."""
+
+    id: int
+    title: str | None
+    duration_ms: int
+    chapter_starts_ms: list[int]  # ascending, one per chapter; [0] when unknown
+
+    def chapter_at(self, position_ms: int) -> int:
+        index = 0
+        for i, start in enumerate(self.chapter_starts_ms):
+            if start <= position_ms:
+                index = i
+        return index
 
 
 def _reported_id(item: QueueItem) -> int:
@@ -36,6 +54,10 @@ class Player:
         bed_aout: str | None = "directsound",
     ) -> None:
         self.on_error = on_error
+        # #2680: called (outside the lock) when a sleep fade finishes, BEFORE
+        # the main player pauses, so the book's spot is saved first.
+        self.on_sleep_end: Callable[[], None] | None = None
+        self.book: BookInfo | None = None
 
         # vlc_args lets a test harness pass e.g. --aout=dummy (no speakers).
         self._instance = vlc.Instance(
@@ -95,6 +117,7 @@ class Player:
     ) -> None:
         """Replace the queue. start_ms/paused let a transfer resume mid-track."""
         with self._lock:
+            self.book = None
             self._fade_volume = None
             self.queue = list(items)
             if not self.queue:
@@ -103,6 +126,35 @@ class Player:
                 return
             self._start(0, start_ms)
             self._pause_on_start = paused
+
+    def play_book(
+        self, book: BookInfo, parts: list[QueueItem], position_ms: int = 0, paused: bool = False
+    ) -> None:
+        """Replace the queue with an audiobook's parts (one for an M4B) and
+        start at a book-global position (#2680)."""
+        with self._lock:
+            self.play_now([])
+            if not parts:
+                return
+            self.book = book
+            self.queue = list(parts)
+            index, local_ms = self._locate(position_ms)
+            self._start(index, local_ms)
+            self._pause_on_start = paused
+
+    def book_position_ms(self) -> int | None:
+        """Book-global position, or None when no book is loaded."""
+        with self._lock:
+            return self._book_position_unlocked()
+
+    def book_finished(self) -> bool:
+        """The last part played to its end."""
+        with self._lock:
+            return self.book is not None and self._ended and self.index == len(self.queue) - 1
+
+    def is_playing(self) -> bool:
+        with self._lock:
+            return self._playing
 
     def enqueue(self, items: Iterable[QueueItem]) -> None:
         with self._lock:
@@ -175,6 +227,13 @@ class Player:
 
     def skip(self) -> None:
         with self._lock:
+            if self.book is not None:
+                # A book skips by chapter; the last chapter has nowhere to go.
+                position = self._book_position_unlocked() or 0
+                chapter = self.book.chapter_at(position)
+                if chapter + 1 < len(self.book.chapter_starts_ms):
+                    self._seek_book(self.book.chapter_starts_ms[chapter + 1])
+                return
             if self.index + 1 < len(self.queue):
                 self._start(self.index + 1)
             else:
@@ -183,6 +242,15 @@ class Player:
     def previous(self) -> None:
         with self._lock:
             if not self.queue or self.index < 0:
+                return
+
+            if self.book is not None:
+                position = self._book_position_unlocked() or 0
+                chapter = self.book.chapter_at(position)
+                start = self.book.chapter_starts_ms[chapter]
+                if position - start <= 3000 and chapter > 0:
+                    start = self.book.chapter_starts_ms[chapter - 1]
+                self._seek_book(start)
                 return
 
             position_ms = max(self._player.get_time(), 0)
@@ -226,6 +294,9 @@ class Player:
     def seek(self, position_ms: int) -> None:
         with self._lock:
             if not self.queue or self.index < 0:
+                return
+            if self.book is not None:
+                self._seek_book(int(position_ms))
                 return
             self._player.set_time(max(int(position_ms), 0))
 
@@ -347,6 +418,13 @@ class Player:
                     self._set_bed_level(bed)
             if cancel.wait(step_delay):
                 return
+        # #2680: save the book's spot while it is still there, then pause.
+        # Outside the lock: the hook does network I/O.
+        if self.on_sleep_end is not None and not cancel.is_set():
+            try:
+                self.on_sleep_end()
+            except Exception:
+                logger.exception("Sleep-end hook failed")
         with self._lock:
             if cancel.is_set():
                 return
@@ -414,11 +492,20 @@ class Player:
             item = self._current_unlocked()
             position_ms = max(self._player.get_time(), 0) if item else 0
             duration_ms = max(self._player.get_length(), 0) if item else 0
+            book = None
+            if self.book is not None and item is not None:
+                position_ms = self._book_position_unlocked() or 0
+                duration_ms = self.book.duration_ms or duration_ms
+                book = {
+                    "id": self.book.id,
+                    "title": self.book.title,
+                    "chapter_index": self.book.chapter_at(position_ms),
+                }
             queue_start = max(self.index, 0)
             queue_end = min(len(self.queue), queue_start + 200)
 
             track = None
-            if item is not None:
+            if item is not None and book is None:
                 track = {
                     "id": _reported_id(item),
                     "title": item.title,
@@ -447,11 +534,35 @@ class Player:
                 "queue_index": max(self.index, 0),
                 "queue": reported_queue,
                 "volume": self.volume,
+                "book": book,
             }
 
     def current(self) -> QueueItem | None:
         with self._lock:
             return self._current_unlocked()
+
+    def _book_position_unlocked(self) -> int | None:
+        item = self._current_unlocked()
+        if self.book is None or item is None:
+            return None
+        return item.offset_ms + max(self._player.get_time(), 0)
+
+    def _locate(self, position_ms: int) -> tuple[int, int]:
+        """(part index, ms into that part) for a book-global position."""
+        index = 0
+        for i, part in enumerate(self.queue):
+            if part.offset_ms <= position_ms:
+                index = i
+        return index, max(int(position_ms) - self.queue[index].offset_ms, 0)
+
+    def _seek_book(self, position_ms: int) -> None:
+        index, local_ms = self._locate(max(int(position_ms), 0))
+        if index == self.index and not self._ended:
+            self._player.set_time(local_ms)
+        else:
+            paused = self._paused
+            self._start(index, local_ms)
+            self._pause_on_start = paused
 
     def _current_unlocked(self) -> QueueItem | None:
         if 0 <= self.index < len(self.queue):
