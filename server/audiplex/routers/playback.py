@@ -166,7 +166,7 @@ def ack_command(
     difference between that and a command still in flight. An ack — including
     a FAILING one — ends the ambiguity, and it is what stops redelivery.
     """
-    rec = bus.ack(command_id, ack.status, ack.detail)
+    rec = bus.ack(command_id, ack.status, ack.detail or "")
     if rec is None:
         raise HTTPException(status_code=404, detail=f"Unknown command {command_id}")
     return PlaybackCommandAckResult(**rec.summary())

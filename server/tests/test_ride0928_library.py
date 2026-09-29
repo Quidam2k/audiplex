@@ -113,3 +113,10 @@ def test_scanner_content_kind_rules(db_session, sample_album, tmp_path):
         ("music", "podcast", "clip", "music")
     assert apply_content_kinds(db_session, str(root), "ambient") == 1  # only the one still 'music'
     assert song.content_kind == "ambient" and ep.content_kind == "podcast"
+
+
+def test_ack_with_null_detail_is_accepted(client):
+    """#ride0928: a 422 here means the command is never acked and is redelivered every 60s."""
+    cmd = client.post("/api/playback/command", json={"type": "pause", "payload": {}}).json()
+    r = client.post(f"/api/playback/command/{cmd['id']}/ack", json={"status": "ok", "detail": None})
+    assert r.status_code == 200

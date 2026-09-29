@@ -358,7 +358,7 @@ class PlaybackCommandAck(BaseModel):
     """
 
     status: str = "ok"
-    detail: str = ""
+    detail: str | None = ""  # #ride0928: a null detail must not 422 the ack (= silent redelivery)
 
 
 class PlaybackCommandAckResult(BaseModel):
