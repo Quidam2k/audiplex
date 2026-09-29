@@ -136,6 +136,10 @@ class FakeRenderer(threading.Thread):
 
     def apply(self, cmd: dict) -> None:
         typ, p = cmd["type"], cmd.get("payload") or {}
+        if typ == "set_crossfade":  # #2806: behaves like the phone, which can't crossfade
+            self.crossfade_asked = p.get("seconds")
+            self.ack(cmd["id"], "unknown_type", typ)
+            return
         ids = list(p.get("track_ids") or [])
         if typ == "play_now":
             self.queue, self.index = ids, 0
@@ -329,6 +333,9 @@ async def energy_checks(dj, fake: FakeRenderer, ids: list[int], db_path: Path) -
     out = await tk.dj_untag(ids, ["e2e ride"])
     out = await tk.dj_energy_set("rise", sources=[{"kind": "tag", "query": "e2e ride"}])
     check(out.startswith("REFUSED"), f"an empty tag source refuses and sends nothing: {out[:100]!r}")
+    out = await tk.dj_crossfade(20)  # #2806 S3: over the real bus to a phone-like device
+    check(getattr(fake, "crossfade_asked", None) == 12.0 and "can't crossfade" in out,
+          f"dj_crossfade clamps to 12 s, and a phone-like device's refusal is said plainly: {out!r}")
     await dj.dj_pause()
 
 

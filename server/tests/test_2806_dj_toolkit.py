@@ -309,3 +309,21 @@ def test_unknown_kind_lists_valid_kinds_in_pool_refusal():
     lanes, empty = run(mcp._resolve_lanes([{"kind": "vibes", "query": "x", "label": "V"}]))
     assert lanes == {"V": []}
     assert "'search', 'tag', or 'tracks'" in empty[0]  # #2806
+
+
+# ----- MCP: S3 crossfade (PC renderer only) -------------------------------  # #2806
+
+
+def test_crossfade_sends_clamped_seconds_and_reports(dev):  # #2806
+    dev["ack"] = {"ack_status": "ok", "ack_detail": "crossfade 12s"}
+    out = run(dj_toolkit.dj_crossfade(30))
+    assert dev["sent"][-1] == ("set_crossfade", {"seconds": 12.0})
+    assert "crossfade 12s" in out and "next song change" in out
+    dev["ack"] = {"ack_status": "ok", "ack_detail": "crossfade 0s"}
+    assert "Crossfade off" in run(dj_toolkit.dj_crossfade(0))
+
+
+def test_crossfade_on_the_phone_says_it_cant(dev):  # #2806
+    dev["ack"] = {"ack_status": "unknown_type", "ack_detail": "set_crossfade"}
+    out = run(dj_toolkit.dj_crossfade(6))
+    assert "can't crossfade" in out and "PC" in out

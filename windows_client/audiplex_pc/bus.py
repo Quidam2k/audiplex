@@ -347,6 +347,12 @@ class BusClient:
             )
             return "ok", ""
 
+        if command_type == "set_crossfade":  # #2806: seconds 0-12, 0 = off
+            if payload.get("seconds") is None:
+                return "bad_payload", "seconds"
+            self.player.set_crossfade(float(payload["seconds"]))
+            return "ok", f"crossfade {self.player.crossfade_ms / 1000:g}s"
+
         if command_type == "cancel_sleep_timer":
             self.player.cancel_sleep_timer()
             return "ok", ""

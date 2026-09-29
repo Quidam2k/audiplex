@@ -17,7 +17,8 @@ def register(mcp, ns: dict) -> None:
     global _NS
     _NS = ns
     for fn in (dj_upcoming, dj_remove, dj_insert, dj_swap, dj_pool_lane,
-               dj_ban, dj_unban, dj_bans, dj_tag, dj_untag, dj_tags, dj_energy_set):
+               dj_ban, dj_unban, dj_bans, dj_tag, dj_untag, dj_tags, dj_energy_set,
+               dj_crossfade):
         mcp.tool()(fn)
 
 
@@ -425,3 +426,23 @@ async def dj_energy_set(
             f"{e[0]} -> {max(e)} -> {e[-1]}.{left_out}{recent} ")
     return head + await _h("dj_mix")(track_ids=ordered, shuffle=False, keep_upcoming=False,
                                      exclude_recent_hours=0)
+
+
+async def dj_crossfade(seconds: float = 6) -> str:
+    """Overlap the end of each song with the start of the next (0 = off, max 12 s).
+
+    PC speaker renderer only: the phone doesn't crossfade yet and says so.
+    Only song -> song: books, streams, DJ clips and a paused player never
+    crossfade. The setting lasts until the PC app restarts.
+    """
+    data = await _h("_enqueue")("set_crossfade", {"seconds": max(0.0, min(12.0, float(seconds)))})
+    if isinstance(data, str):
+        return _h("_held_result")(data)
+    ack = await _h("_await_ack")(int(data["id"]))
+    if ack is None:
+        return f"Sent (command #{data['id']}); no ack yet, check dj_command_status."
+    if ack.get("ack_status") == "unknown_type":
+        return "This device can't crossfade (only the PC speaker renderer can). Nothing changed."
+    if ack.get("ack_status") != "ok":
+        return f"The device refused it: {ack.get('ack_status')} {ack.get('ack_detail') or ''}".rstrip()
+    return f"Crossfade {'off' if not seconds else ack.get('ack_detail') or 'on'}: applies from the next song change."

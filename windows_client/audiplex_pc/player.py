@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
@@ -98,19 +100,17 @@ class Player:
         # fade the bed with it. DirectSound gives the bed its own volume.
         self._bed_aout = bed_aout
 
-        self._event_manager = self._player.event_manager()
-        self._event_manager.event_attach(
-            vlc.EventType.MediaPlayerEndReached,
-            self._dispatch_end,
-        )
-        self._event_manager.event_attach(
-            vlc.EventType.MediaPlayerEncounteredError,
-            self._dispatch_error,
-        )
-        self._event_manager.event_attach(
-            vlc.EventType.MediaPlayerPlaying,
-            self._dispatch_playing,
-        )
+        # Crossfade (#2806): off by default. When on, the next track starts on a
+        # fresh player (DirectSound, so its volume is its own) and the two
+        # overlap for crossfade_ms with an equal-power ramp. Only track -> track:
+        # books, streams, clips and a paused player never crossfade.
+        self.crossfade_ms = 0
+        self._xfade_old: vlc.MediaPlayer | None = None
+        self._xfade_in: float | None = None  # incoming level, multiplies the main volume
+        self._xfade_gen = 0
+        self._xfade_watch: threading.Thread | None = None
+
+        self._attach_events(self._player)
 
     def play_now(
         self, items: Iterable[QueueItem], start_ms: int = 0, paused: bool = False
@@ -279,6 +279,7 @@ class Player:
             if not self.queue or self.index < 0 or self._ended:
                 return
 
+            self._kill_xfade()  # #2806: pausing mid-crossfade drops the outgoing song
             self._player.set_pause(1)
             self._playing = False
             self._paused = True
@@ -455,9 +456,108 @@ class Player:
             self._sleep_cancel.set()
         self._sleep_cancel = None
 
+    def _base_level(self) -> float:
+        return self.volume if self._fade_volume is None else self._fade_volume
+
     def _apply_main_volume(self) -> None:
-        level = self.volume if self._fade_volume is None else self._fade_volume
+        level = self._base_level() * (1.0 if self._xfade_in is None else self._xfade_in)
         self._player.audio_set_volume(round(level * 100))
+
+    # --- crossfade (#2806) ------------------------------------------------
+
+    def set_crossfade(self, seconds: float) -> None:
+        """0 turns it off. Applies from the next track change on."""
+        with self._lock:
+            self.crossfade_ms = int(max(0.0, min(12.0, float(seconds))) * 1000)
+            if self.crossfade_ms and (self._xfade_watch is None or not self._xfade_watch.is_alive()):
+                self._xfade_watch = threading.Thread(target=self._watch_crossfade, daemon=True)
+                self._xfade_watch.start()
+
+    def _attach_events(self, player: vlc.MediaPlayer) -> None:
+        events = player.event_manager()
+        events.event_attach(vlc.EventType.MediaPlayerEndReached, self._dispatch_end)
+        events.event_attach(vlc.EventType.MediaPlayerEncounteredError, self._dispatch_error)
+        events.event_attach(vlc.EventType.MediaPlayerPlaying, self._dispatch_playing)
+
+    def _detach_events(self, player: vlc.MediaPlayer) -> None:
+        events = player.event_manager()
+        for kind in (vlc.EventType.MediaPlayerEndReached, vlc.EventType.MediaPlayerEncounteredError,
+                     vlc.EventType.MediaPlayerPlaying):
+            events.event_detach(kind)
+
+    def _make_player(self) -> vlc.MediaPlayer:
+        player = self._instance.media_player_new()
+        if self._bed_aout and player.audio_output_set(self._bed_aout) != 0:
+            logger.warning("Crossfade output %s unavailable; the fade may be uneven", self._bed_aout)
+        return player
+
+    def _watch_crossfade(self) -> None:
+        while True:
+            with self._lock:
+                if not self.crossfade_ms:
+                    return
+                if self._should_crossfade():
+                    self._begin_crossfade()
+            time.sleep(0.2)
+
+    def _should_crossfade(self) -> bool:
+        if (self.book is not None or not self._playing or self._paused or self._ended
+                or self._xfade_old is not None or self._fade_volume is not None):
+            return False
+        nxt = self.index + 1
+        if nxt >= len(self.queue):
+            return False
+        cur, following = self.queue[self.index], self.queue[nxt]
+        if cur.kind != "track" or following.kind != "track" or cur.id <= 0 or following.id <= 0:
+            return False
+        length, at = self._player.get_length(), self._player.get_time()
+        if length <= 2 * self.crossfade_ms or at < 0:
+            return False
+        return length - at <= self.crossfade_ms
+
+    def _begin_crossfade(self) -> None:
+        """The current song keeps going on its own player, fading out; the next
+        one becomes the main player and fades in."""
+        old = self._player
+        self._detach_events(old)  # its EndReached must not advance the queue
+        self._player = self._make_player()
+        self._attach_events(self._player)
+        self._start(self.index + 1)
+        self._xfade_old = old
+        self._xfade_in = 0.0
+        self._apply_main_volume()
+        self._xfade_gen += 1
+        threading.Thread(target=self._run_crossfade, args=(self._xfade_gen, self.crossfade_ms),
+                         daemon=True).start()
+
+    def _crossfade_step(self, gen: int, t: float) -> bool:
+        """Set both levels at t (0..1) of the ramp. False once superseded."""
+        with self._lock:
+            if gen != self._xfade_gen or self._xfade_old is None:
+                return False
+            t = max(0.0, min(1.0, t))
+            self._xfade_old.audio_set_volume(round(self._base_level() * math.cos(t * math.pi / 2) * 100))
+            self._xfade_in = math.sin(t * math.pi / 2)
+            self._apply_main_volume()
+            if t >= 1.0:
+                self._kill_xfade()
+            return True
+
+    def _run_crossfade(self, gen: int, ms: int) -> None:
+        start = time.monotonic()
+        while self._crossfade_step(gen, (time.monotonic() - start) * 1000 / max(ms, 1)):
+            time.sleep(0.05)
+
+    def _kill_xfade(self) -> None:
+        """End any overlap now: stop the outgoing song, incoming at full level."""
+        old, self._xfade_old = self._xfade_old, None
+        if self._xfade_in is not None:
+            self._xfade_in = None
+            self._apply_main_volume()
+        if old is not None:
+            self._xfade_gen += 1
+            old.stop()
+            old.release()
 
     def _set_bed_level(self, volume: float) -> None:
         self.bed_level = max(0.0, min(1.0, float(volume)))
@@ -584,6 +684,7 @@ class Player:
         return None
 
     def _start(self, index: int, start_ms: int = 0) -> None:
+        self._kill_xfade()  # #2806: a skip/new queue mid-crossfade ends the overlap
         self._gen += 1
         self._pause_on_start = False
         self.index = index
@@ -599,6 +700,7 @@ class Player:
         self._player.play()
 
     def _stop_player(self) -> None:
+        self._kill_xfade()  # #2806
         self._gen += 1
         self._player.stop()
         self._playing = False
