@@ -47,3 +47,4 @@ Server-side of slice 1 is functional:
 
 ## Verify env before you start
 `orch_get_assignments(project='audiplex', team_name='<your team>', limit=3)`. The signed plan is assignment #5042 (has full reviewer notes). This handoff + `notes/2026-09-24-win-follow-me-plan.md` are the design record.
+- 2026-09-29 #2021/#5964: windows_client/scripts/e2e_handoff_isolated.py proves PC<->test-device handoff on an isolated :8199 server (silent: dummy aout, vol 0). Red with --no-transfer (5 handoff checks fail), green without. Suites: server 738 passed, windows_client 44 passed (C:\Python311\python.exe; the PATH python lacks passlib).
