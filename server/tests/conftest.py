@@ -450,3 +450,11 @@ def isolated_book_handoff(monkeypatch):
     from audiplex import playback_bus
 
     monkeypatch.setattr(playback_bus, "_book_session", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_pantheon_mute(monkeypatch, tmp_path):
+    """#3493: the DJ MCP's mute gate must never read the live quiet window, or a
+    real quiet hour reddens every DJ tool test. Pointing it at a missing Pantheon
+    runs the ungated (sound on) path; test_3493 overrides this per test."""
+    monkeypatch.setenv("DJ_PANTHEON_SRC", str(tmp_path / "no-pantheon"))

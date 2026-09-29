@@ -430,6 +430,8 @@ ACK_WAIT_S = 8.0  # #ride0928
 def _held_kind(text: str) -> str:  # #ride0928
     if text.startswith("HELD (todd_talking)"):
         return "todd_talking"
+    if text.startswith("REFUSED (muted)"):  # #3493
+        return "muted"
     if text.startswith("REFUSED (announce first)"):
         return "announce_first"
     return "not_sent"
@@ -576,8 +578,61 @@ TALK_UNREADABLE = (  # #ride0928
 )
 
 
+MUTE_GUARDED = TALK_GUARDED | {"bed_play", "announce"}  # #3493: muted means nothing audible
+REFILL_CMDS = {"queue", "play_next"}  # #3493
+DEFAULT_PANTHEON_SRC = "Q:/Pantheon/src"  # #3493
+
+
+def _pantheon_src() -> Path:  # #3493
+    return Path(os.environ.get("DJ_PANTHEON_SRC") or DEFAULT_PANTHEON_SRC)
+
+
+def _global_mute() -> tuple[bool, str] | None:  # #3493
+    """(muted, why) from Pantheon's quiet window / phone DND, or None when there
+    is no Pantheon on this box. The GLOBAL mutes only: a muted desk speaker
+    never blocks the phone (#1729). Anything but a missing directory that goes
+    wrong reads as muted (fail closed)."""
+    src = _pantheon_src()
+    if not src.is_dir():
+        return None
+    try:
+        if str(src) not in sys.path:
+            sys.path.append(str(src))  # append: Pantheon names must not shadow ours
+        from device_mute_tell import global_mute_active
+        return global_mute_active(fail_closed=True)
+    except Exception as e:
+        return True, f"mute read failed ({type(e).__name__}: {e}) - failing closed"
+
+
+def _mute_hold(cmd_type: str) -> str | None:  # #3493 (#5971 contract, event 24162)
+    """The refusal text if `cmd_type` would make sound under quiet time/DND, else None.
+    Stop-type commands (pause, skip, volume...) are never gated: music already
+    playing is never stopped by this."""
+    if cmd_type not in MUTE_GUARDED:
+        return None
+    verdict = _global_mute()
+    if verdict is None:
+        print(f"[mute guard] no Pantheon at {_pantheon_src()}; {cmd_type} sent unguarded",
+              file=sys.stderr, flush=True)
+        return None
+    muted, why = verdict
+    if not muted:
+        return None
+    text = (f"REFUSED (muted): Nothing was sent: Todd is in quiet time/DND ({why}). "
+            "If he asked for this, offer to end quiet time, then retry. "
+            "Do not tell him it is playing.")
+    if cmd_type in REFILL_CMDS:  # Karen rider (a): a running set is no longer fed
+        text += (" Any DJ set already playing was NOT refilled: it will stop when its "
+                 "current queue runs out. Tell Todd that; do not assume it keeps going.")
+    return text
+
+
 def _talk_hold(cmd_type: str) -> str | None:  # #ride0928
-    """The hold text if `cmd_type` would put audio on while Todd talks, else None."""
+    """The hold text if `cmd_type` would put audio on while Todd talks (or is
+    muted, #3493), else None."""
+    muted = _mute_hold(cmd_type)  # #3493: checked first, sends nothing
+    if muted:
+        return muted
     if cmd_type not in TALK_GUARDED:
         return None
     verdict = _todd_talking()
@@ -1349,6 +1404,9 @@ async def dj_announce(text: str, mode: str = "next", title: str = "DJ break") ->
     text = (text or "").strip()
     if not text:
         return "No text given; nothing to announce."
+    muted = _mute_hold("announce")  # #3493: before the talk wait and the TTS render
+    if muted:
+        return muted
 
     # #2858: never start a break while Todd is talking. Checked at queue
     # time only; a 'next' break still plays whenever the current song ends.
@@ -3724,6 +3782,10 @@ async def dj_pool_set(
         track = state.get("track") or {}
         cur = track.get("id")
         queue = state.get("queue") or []
+        if cur is None or not queue:  # #3493: this pool would START music, so refuse before saving it
+            muted = _mute_hold("play_now")
+            if muted:
+                return _held_result(muted)
         body: dict = {
             "spec_id": spec_id,
             "lanes": lanes,
