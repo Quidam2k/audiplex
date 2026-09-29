@@ -21,7 +21,9 @@ import httpx
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 POLL_SECONDS = 2.0
-DEFAULT_SETTINGS = {"on": False, "every_min": 2, "every_max": 3}
+DEFAULT_SETTINGS = {"on": False, "every_min": 3, "every_max": 3}  # #5986: one bridge per 3 songs
+OUTRO_LEAD_S = 20.0  # #5986: fire this long before the armed song ends, so the talk spans the fade
+FACTS_TIMEOUT_S = 3.0  # #5986
 
 
 # --------------------------------------------------------------------------
@@ -79,9 +81,9 @@ def load_settings():
     if not isinstance(raw, dict):
         return dict(DEFAULT_SETTINGS)
     try:
-        every_min = max(1, int(raw.get("every_min", 2)))
+        every_min = max(1, int(raw.get("every_min", 3)))  # #5986
     except (TypeError, ValueError):
-        every_min = 2
+        every_min = 3  # #5986
     try:
         every_max = int(raw.get("every_max", 3))
     except (TypeError, ValueError):
@@ -104,7 +106,15 @@ def write_settings(settings):
 
 class BridgeCounter:
     """Decides when a DJ bridge should fire. No I/O, no globals - takes a
-    state dict + settings dict + timestamp, returns a payload or None."""
+    state dict + settings dict + timestamp, returns a payload or None.
+
+    #5986: every `target` (3) track changes, the new track is ARMED and the
+    bridge fires ~OUTRO_LEAD_S before it ENDS (mode 'outro': now = the
+    outgoing song, next = the queue's next), so the persona talks across the
+    fade. If the armed song is skipped before that, or its duration is
+    unknown, the bridge fires at the start of the following song instead
+    (mode 'intro', the pre-#5986 behaviour). Either way exactly one bridge,
+    then `target` track changes before the next is even armed."""
 
     def __init__(self):
         self.prev_music = None     # {"id","title","artist"} of the prior music track
@@ -112,11 +122,12 @@ class BridgeCounter:
         self.counter = 0
         self.target = None
         self._bounds = None
+        self.armed = None          # #5986: {"id", "prev"} of the track whose end fires the bridge
         self.last_skip_reason = None  # informational only, for the run loop's logging
 
     @staticmethod
     def _clamp(settings):
-        every_min = max(1, int(settings.get("every_min", 2)))
+        every_min = max(1, int(settings.get("every_min", 3)))  # #5986
         every_max = max(every_min, int(settings.get("every_max", 3)))
         return every_min, every_max
 
@@ -125,6 +136,50 @@ class BridgeCounter:
         if self.target is None or bounds != self._bounds:
             self.target = random.randint(bounds[0], bounds[1])
             self._bounds = bounds
+
+    @staticmethod
+    def _position_s(state, now):  # #5986: extrapolate from the device's last post
+        position_s = (state.get("position_ms") or 0) / 1000.0
+        updated_at = state.get("updated_at")
+        if state.get("playing") and isinstance(updated_at, (int, float)) and 0 < now - updated_at < 120:
+            position_s += now - updated_at
+        return position_s
+
+    @staticmethod
+    def _next_item(state):
+        queue_index = state.get("queue_index")
+        if isinstance(queue_index, int):
+            for q in state.get("queue") or []:
+                if q.get("index") == queue_index + 1:
+                    return {"id": q.get("id"), "title": q.get("title"), "artist": q.get("artist")}  # #5986 id -> facts
+        return None
+
+    def _reset_after_fire(self, settings):
+        self.counter = 0
+        self.armed = None
+        self._bounds = None
+        self.target = None
+        self._maybe_redraw(settings)  # redraw target after every fire
+
+    def _payload(self, mode, track, prev, state, now):  # #5986
+        prev_payload = {"title": prev.get("title"), "artist": prev.get("artist")} if prev else None
+        detected_dt = datetime.fromtimestamp(now, tz=timezone.utc)
+        return {
+            "mode": mode,  # #5986 'outro' | 'intro'
+            "prev": prev_payload,
+            "now": {
+                "id": track.get("id"),  # #5986
+                "title": track.get("title"),
+                "artist": track.get("artist"),
+                "position_s": self._position_s(state, now),
+                "duration_s": (state.get("duration_ms") or 0) / 1000.0,
+            },
+            "next": self._next_item(state),
+            "cadence": self.target,  # #5986 songs until the next bridge
+            "detected_at": detected_dt.isoformat().replace("+00:00", "Z"),
+            "detected_epoch": now,
+            "source": "audiplex",
+        }
 
     def observe(self, state, settings, now):
         self.last_skip_reason = None
@@ -151,7 +206,18 @@ class BridgeCounter:
             return None
 
         if tid == self.last_music.get("id"):
-            # Same track: pause/resume/seek. Not a transition.
+            # Same track: pause/resume/seek. Not a transition - but the armed
+            # track's end is where the outro bridge fires (#5986).
+            if self.armed and self.armed["id"] == tid and bool(settings.get("on", False)):
+                duration_s = (state.get("duration_ms") or 0) / 1000.0
+                remaining = duration_s - self._position_s(state, now)
+                if duration_s > 0 and remaining <= OUTRO_LEAD_S:
+                    if remaining < 5:  # #5986 too late to talk across the fade; the intro fallback takes it
+                        self.last_skip_reason = "armed"
+                        return None
+                    payload = self._payload("outro", track, self.armed["prev"], state, now)
+                    self._reset_after_fire(settings)
+                    return payload
             self.last_skip_reason = "same_track"
             return None
 
@@ -161,11 +227,22 @@ class BridgeCounter:
 
         if not bool(settings.get("on", False)):
             self.counter = 0
+            self.armed = None  # #5986
             self.last_skip_reason = "off"
             return None
 
         position_s = (state.get("position_ms") or 0) / 1000.0
-        duration_s = (state.get("duration_ms") or 0) / 1000.0
+
+        if self.armed is not None:
+            # #5986: the armed song ended (or was skipped) before its outro
+            # fired - bridge now, at this song's start, like pre-#5986.
+            if position_s > 25:
+                self._reset_after_fire(settings)
+                self.last_skip_reason = "stale"
+                return None
+            payload = self._payload("intro", track, self.prev_music, state, now)
+            self._reset_after_fire(settings)
+            return payload
 
         if position_s > 25:
             # Detected too late (e.g. watcher was down) - reset but don't fire.
@@ -178,38 +255,10 @@ class BridgeCounter:
             self.last_skip_reason = "counting"
             return None
 
-        # --- fire ---
-        self.counter = 0
-        self._bounds = None
-        self.target = None
-        self._maybe_redraw(settings)  # redraw target after every fire
-
-        next_item = None
-        queue_index = state.get("queue_index")
-        if isinstance(queue_index, int):
-            for q in state.get("queue") or []:
-                if q.get("index") == queue_index + 1:
-                    next_item = {"title": q.get("title"), "artist": q.get("artist")}
-                    break
-
-        prev_payload = None
-        if self.prev_music:
-            prev_payload = {"title": self.prev_music.get("title"), "artist": self.prev_music.get("artist")}
-
-        detected_dt = datetime.fromtimestamp(now, tz=timezone.utc)
-        return {
-            "prev": prev_payload,
-            "now": {
-                "title": track.get("title"),
-                "artist": track.get("artist"),
-                "position_s": position_s,
-                "duration_s": duration_s,
-            },
-            "next": next_item,
-            "detected_at": detected_dt.isoformat().replace("+00:00", "Z"),
-            "detected_epoch": now,
-            "source": "audiplex",
-        }
+        # #5986: arm this song; its outro fires the bridge.
+        self.armed = {"id": tid, "prev": self.prev_music}
+        self.last_skip_reason = "armed"
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -221,6 +270,44 @@ def fetch_state(client, base_url, token):
     resp = client.get(f"{base_url}/api/playback/state", headers=headers, timeout=10.0)
     resp.raise_for_status()
     return resp.json()
+
+
+def fetch_facts(client, base_url, token, track_id):  # #5986
+    """Library facts for one track: album, year, genre. Best-effort - any
+    failure or placeholder value is simply absent (the persona gets fewer
+    facts, never an invented one)."""
+    if not isinstance(track_id, int) or track_id <= 0:
+        return {}
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        t = client.get(f"{base_url}/api/music/tracks/{track_id}", headers=headers, timeout=FACTS_TIMEOUT_S)
+        t.raise_for_status()
+        album_id = t.json().get("album_id")
+        a = client.get(f"{base_url}/api/music/albums/{album_id}", headers=headers, timeout=FACTS_TIMEOUT_S)
+        a.raise_for_status()
+        album = a.json()
+    except Exception as exc:
+        log_line(f"facts fetch failed for {track_id}: {exc!r}")
+        return {}
+    facts = {}
+    title = (album.get("title") or "").strip()
+    if title and title.lower() not in ("unknown", "unknown album", "music", "various"):
+        facts["album"] = title
+    year = album.get("year")
+    if isinstance(year, int) and 1900 < year < 2100:
+        facts["year"] = year
+    genre = (album.get("genre") or "").strip()
+    if genre and genre.lower() not in ("unknown", "other", "misc"):
+        facts["genre"] = genre
+    return facts
+
+
+def enrich_payload(payload, client, base_url, token):  # #5986
+    for key in ("now", "next"):
+        item = payload.get(key)
+        if item:
+            item["facts"] = fetch_facts(client, base_url, token, item.get("id"))
+    return payload
 
 
 def build_argv(json_file_path):
@@ -282,13 +369,15 @@ def run_loop():
 
             payload = counter.observe(state, settings, time.time())
             reason = counter.last_skip_reason
-            if payload is not None or reason in ("counting", "off", "stale", "init"):
+            if payload is not None or reason in ("counting", "off", "stale", "init") or (
+                    reason == "armed" and counter.armed and not getattr(counter, "_armed_logged", False)):  # #5986
                 # #2858: one line per track change, so a missing bridge is explainable
                 title = (state.get("track") or {}).get("title")
-                verdict = "FIRE" if payload is not None else reason
+                verdict = f"FIRE {payload['mode']}" if payload is not None else reason  # #5986
                 log_line(f"track -> {title!r}: {verdict} ({counter.counter}/{counter.target})")
+                counter._armed_logged = reason == "armed"  # #5986 one 'armed' line per song
             if payload is not None:
-                fire_hook(payload)
+                fire_hook(enrich_payload(payload, client, base_url, token))  # #5986
 
             time.sleep(POLL_SECONDS)
 

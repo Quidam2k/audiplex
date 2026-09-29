@@ -46,12 +46,19 @@ def test_counts_transitions_and_fires_at_target(monkeypatch):
     assert r1 is None
     assert c.counter == 1
 
-    r2 = c.observe(make_state(3, "C", "CC"), SETTINGS_ON, 1002.0)  # transition 2 -> fire
-    assert r2 is not None
-    assert r2["prev"] == {"title": "B", "artist": "BB"}
-    assert r2["now"]["title"] == "C"
-    assert r2["source"] == "audiplex"
-    assert c.counter == 0
+    r2 = c.observe(make_state(3, "C", "CC"), SETTINGS_ON, 1002.0)  # transition 2 -> arm (#5986)
+    assert r2 is None
+    assert c.last_skip_reason == "armed"
+    # mid-song: nothing
+    assert c.observe(make_state(3, "C", "CC", position_ms=100000), SETTINGS_ON, 1100.0) is None
+    # 18 s before the end: outro fires (#5986)
+    r3 = c.observe(make_state(3, "C", "CC", position_ms=182000), SETTINGS_ON, 1200.0)
+    assert r3 is not None
+    assert r3["mode"] == "outro"
+    assert r3["prev"] == {"title": "B", "artist": "BB"}
+    assert r3["now"]["title"] == "C"
+    assert r3["source"] == "audiplex"
+    assert c.counter == 0 and c.armed is None
 
 
 def test_ignores_nonmusic_clip_without_resetting_prev(monkeypatch):
@@ -123,9 +130,68 @@ def test_payload_next_is_queue_index_plus_one(monkeypatch):
         {"index": 2, "id": 3, "title": "C", "artist": "CC"},
     ]
     c.observe(make_state(1, "A", "AA", queue=queue, queue_index=0), SETTINGS_ON, 1000.0)
+    assert c.observe(make_state(2, "B", "BB", queue=queue, queue_index=1, position_ms=1000),
+                     SETTINGS_ON, 1001.0) is None  # armed
     r = c.observe(
-        make_state(2, "B", "BB", queue=queue, queue_index=1, position_ms=1000),
-        SETTINGS_ON, 1001.0,
+        make_state(2, "B", "BB", queue=queue, queue_index=1, position_ms=185000),
+        SETTINGS_ON, 1180.0,
     )
     assert r is not None
-    assert r["next"] == {"title": "C", "artist": "CC"}
+    assert r["next"] == {"id": 3, "title": "C", "artist": "CC"}
+
+
+# --- #5986 outro timing + cadence ------------------------------------------
+
+def _armed(monkeypatch, target=1):
+    monkeypatch.setattr(dbw.random, "randint", lambda a, b: target)
+    c = BridgeCounter()
+    c.observe(make_state(1, "A", "AA"), SETTINGS_ON, 1000.0)
+    assert c.observe(make_state(2, "B", "BB"), SETTINGS_ON, 1001.0) is None
+    assert c.armed["id"] == 2
+    return c
+
+
+def test_outro_extrapolates_from_updated_at(monkeypatch):  # #5986
+    c = _armed(monkeypatch)
+    st = make_state(2, "B", "BB", position_ms=150000)  # 50 s left as posted...
+    st["updated_at"] = 1000.0
+    assert c.observe(st, SETTINGS_ON, 1035.0)["mode"] == "outro"  # ...but 35 s have passed
+
+
+def test_skipped_armed_song_fires_intro_on_next(monkeypatch):  # #5986
+    c = _armed(monkeypatch)
+    r = c.observe(make_state(3, "C", "CC", position_ms=2000), SETTINGS_ON, 1010.0)
+    assert r["mode"] == "intro"
+    assert r["prev"] == {"title": "B", "artist": "BB"} and r["now"]["title"] == "C"
+    assert c.armed is None and c.counter == 0
+
+
+def test_too_close_to_end_waits_for_intro(monkeypatch):  # #5986
+    c = _armed(monkeypatch)
+    assert c.observe(make_state(2, "B", "BB", position_ms=197000), SETTINGS_ON, 1200.0) is None
+    assert c.observe(make_state(3, "C", "CC", position_ms=1000), SETTINGS_ON, 1204.0)["mode"] == "intro"
+
+
+def test_unknown_duration_falls_back_to_intro(monkeypatch):  # #5986
+    c = _armed(monkeypatch)
+    assert c.observe(make_state(2, "B", "BB", position_ms=500000, duration_ms=0), SETTINGS_ON, 1300.0) is None
+    assert c.observe(make_state(3, "C", "CC"), SETTINGS_ON, 1301.0)["mode"] == "intro"
+
+
+def test_cadence_three_songs_between_bridges(monkeypatch):  # #5986
+    monkeypatch.setattr(dbw.random, "randint", lambda a, b: 3)
+    c = BridgeCounter()
+    fires, t = [], 1000.0
+    c.observe(make_state(1, "S1", "X"), SETTINGS_ON, t)
+    for tid in range(2, 12):
+        t += 1
+        if c.observe(make_state(tid, f"S{tid}", "X"), SETTINGS_ON, t):
+            fires.append(("intro", tid))
+        t += 190
+        if c.observe(make_state(tid, f"S{tid}", "X", position_ms=185000), SETTINGS_ON, t):
+            fires.append(("outro", tid))
+    assert fires == [("outro", 4), ("outro", 7), ("outro", 10)]
+
+
+def test_default_cadence_is_three():  # #5986
+    assert dbw.DEFAULT_SETTINGS["every_min"] == dbw.DEFAULT_SETTINGS["every_max"] == 3
