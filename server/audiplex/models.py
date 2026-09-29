@@ -310,3 +310,19 @@ class DjPairNote(Base):
     note: Mapped[str] = mapped_column(Text, nullable=False)
     persona: Mapped[str | None] = mapped_column(String(50))
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
+class DjBan(Base):
+    """A track the DJ must never pick again (#2806). Reversible: delete the row.
+
+    Honored by mix plans and pool picks, across every copy of the same
+    recording. An explicit dj_play_now by id still plays: a song asked for by
+    name wins.
+    """
+
+    __tablename__ = "dj_bans"
+
+    track_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    reason: Mapped[str | None] = mapped_column(Text)
+    persona: Mapped[str | None] = mapped_column(String(50))
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)

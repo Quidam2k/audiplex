@@ -15,7 +15,7 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_play_now` — play these track ids now, replacing the queue.
 - `dj_queue` — append track ids to the end of the queue.
 - `dj_play_next` — insert track ids right after the current song.
-- `dj_queue_by` — resolve an artist/album/genre/folder/playlist/favorites/bucket NAME and play or queue it.
+- `dj_queue_by` — resolve an artist/album/genre/folder/playlist/favorites/bucket/search NAME (or `tracks`: ids) and play or queue it.
 - `dj_mix` — build or re-plan a balanced, shuffled mix from several sources; never interrupts the current song.
 - `dj_mix_status` — did dj_mix's song-boundary swap (old phone builds) fire yet?
 - `dj_folder` — one folder: shuffle it (via dj_mix), queue it, or save it as a playlist.
@@ -25,11 +25,15 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_seek` — jump to a position in the current track.
 - `dj_volume` — app player volume 0-100.
 - `dj_reorder` — move a queued item by index (indices from dj_now_playing).
+- `dj_upcoming` — the upcoming queue in order, with each track's `#index` and mix source.
+- `dj_remove` / `dj_insert` / `dj_swap` — edit what's still to come by `#index` (from dj_upcoming) or track id; one replace_upcoming, the current song is never touched.
+- `dj_ban` / `dj_unban` / `dj_bans` — never pick a track again (every copy of the recording) in mixes and the pool; reversible; lists who banned what and why.
 
 ## Rolling pool, specs, cues (a whole ride)
 - `dj_pool_set` — start the server-side rolling pool from a saved spec or inline sources; arms its cues.
 - `dj_pool_status` — lanes, pending cues, chime and outro state.
 - `dj_pool_stop` — stop the pool (what's queued keeps playing).
+- `dj_pool_lane` — pause, resume or remove one lane of the running pool.
 - `dj_spec_save` / `dj_spec_list` / `dj_spec_show` — save, list, show a named mix spec.
 - `dj_spec_add` / `dj_spec_remove` — add or remove sources on a spec (re-syncs a live pool).
 - `dj_spec_note` / `dj_spec_notes` — add / list cues on a spec (pre-rendered patter at song boundaries).

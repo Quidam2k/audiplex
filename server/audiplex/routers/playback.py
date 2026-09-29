@@ -49,6 +49,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from audiplex import taste
 from audiplex.identity import build_identity_map
+from audiplex.dj_bans import banned_ids  # #2806
 from audiplex.mix import plan_mix, plan_summary
 from audiplex.auth import get_current_user
 from audiplex.config import get_settings
@@ -559,6 +560,7 @@ def plan_owner_mix(
     skip = non_music(db, body.new_ids)  # #ride0928: no podcast/clip/ambient in a mix
     long_ids = too_long_for_mix(db, body.new_ids)  # #3249
     skip |= long_ids
+    skip |= banned_ids(db, identities)  # #2806
     plan = plan_mix(
         body.current_id,
         list(body.played_ids) + [p.track_id for p in recent],
@@ -698,6 +700,7 @@ def set_pool(
         for ids in lanes.values():
             long_ids |= too_long_for_mix(db, ids)
         skip |= long_ids
+        skip |= banned_ids(db)  # #2806
         lanes = {label: [t for t in ids if t not in skip] for label, ids in lanes.items()}
         track_ids = [t for ids in lanes.values() for t in ids]
         source_labels = {t: label for label, ids in lanes.items() for t in ids}
@@ -708,8 +711,9 @@ def set_pool(
     else:
         legacy_ids = [int(t) for t in body.get("track_ids", [])]
         long_ids = too_long_for_mix(db, legacy_ids)  # #3249
+        drop = long_ids | banned_ids(db)  # #2806
         result = pool.set_pool(
-            spec_id, [t for t in legacy_ids if t not in long_ids],
+            spec_id, [t for t in legacy_ids if t not in drop],  # #2806
             body.get("source_labels", {}),
             balance=balance, ahead=ahead, exclude_recent_hours=exclude_recent_hours,
         )
@@ -798,6 +802,66 @@ def set_pool_chimes(body: dict, user: User = Depends(get_current_user)):
     return dj_triggers.set_chime_settings(
         enabled=body.get("enabled"), volume=vol, hour_strikes=body.get("hour_strikes"),
     )
+
+
+@router.patch("/pool/lanes", tags=["dj_pool"])
+def set_pool_lane(body: dict, user: User = Depends(get_current_user)):
+    """Pause, resume or remove one lane of the running pool (#2806).
+
+    body: {lane: <label, case-insensitive prefix ok>, action: pause|resume|remove}.
+    Tracks already queued stay; this only changes what the next top-ups pick.
+    """
+    from audiplex.dj_pool import get_pool
+
+    try:
+        return get_pool().set_lane(str(body.get("lane", "")), str(body.get("action", "")))
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e.args[0] if e.args else e))
+
+
+# ----- #2806: DJ bans: never pick this track again (reversible) -----
+
+
+@router.get("/bans", tags=["dj_library"])
+def list_bans(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from audiplex.models import DjBan, Track
+
+    rows = db.query(DjBan, Track).outerjoin(Track, Track.id == DjBan.track_id).order_by(DjBan.created_at).all()
+    return [
+        {"track_id": b.track_id, "title": t.title if t else None,
+         "artist": t.artist.name if t and t.artist else None,
+         "reason": b.reason, "persona": b.persona, "created_at": b.created_at.isoformat()}
+        for b, t in rows
+    ]
+
+
+@router.post("/bans", tags=["dj_library"])
+def add_bans(body: dict, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """body: {track_ids: [...], reason?, persona?}. Positive catalog ids only."""
+    from audiplex.models import DjBan, Track
+
+    ids = {int(i) for i in body.get("track_ids") or [] if int(i) > 0}
+    known = {r[0] for r in db.query(Track.id).filter(Track.id.in_(ids)).all()} if ids else set()
+    added = []
+    for tid in sorted(known):
+        if db.get(DjBan, tid) is None:
+            db.add(DjBan(track_id=tid, reason=body.get("reason"), persona=body.get("persona")))
+            added.append(tid)
+    db.commit()
+    return {"banned": added, "already": sorted(known - set(added)), "unknown": sorted(ids - known)}
+
+
+@router.delete("/bans", tags=["dj_library"])
+def remove_bans(body: dict, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """body: {track_ids: [...]}. Lifts the ban; the track can be picked again."""
+    from audiplex.models import DjBan
+
+    ids = {int(i) for i in body.get("track_ids") or []}
+    removed = [r.track_id for r in db.query(DjBan).filter(DjBan.track_id.in_(ids)).all()] if ids else []
+    if removed:
+        db.query(DjBan).filter(DjBan.track_id.in_(removed)).delete(synchronize_session=False)
+        db.commit()
+    return {"unbanned": sorted(removed), "not_banned": sorted(ids - set(removed))}
 
 
 # ----- DJ Specs: persistent mix specs with cues (#5477) -----

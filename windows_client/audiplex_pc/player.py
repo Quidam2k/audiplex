@@ -188,6 +188,20 @@ class Player:
             insert_at = self.index + 1
             self.queue[insert_at:insert_at] = new_items
 
+    def replace_upcoming(self, items: Iterable[QueueItem]) -> None:  # #2806
+        """Replace everything after the current item; the current one plays on."""
+        with self._lock:
+            new_items = list(items)
+            if not self.queue:
+                if new_items:
+                    self.queue.extend(new_items)
+                    self._start(0)
+                return
+            ended_at_tail = self._ended and self.index == len(self.queue) - 1
+            self.queue[self.index + 1:] = new_items
+            if ended_at_tail and new_items:
+                self._start(self.index + 1)
+
     def insert_clip(self, item: QueueItem, play_now: bool) -> None:
         with self._lock:
             if not self.queue:

@@ -61,6 +61,7 @@ def _lane(track_ids: list[int], prior: Optional[dict] = None) -> dict[str, Any]:
         "last_played_at": prior.get("last_played_at"),
         "exhausted": not ids,
         "zero_on_resolve": not ids,
+        "paused": prior.get("paused", False),  # #2806: survives a spec resync
     }
 
 
@@ -218,6 +219,7 @@ class DJPool:
                 "minutes_since_played": minutes_since_played,
                 "exhausted": lane_data.get("exhausted", False),
                 "zero_on_resolve": lane_data.get("zero_on_resolve", False),
+                "paused": lane_data.get("paused", False),  # #2806
             })
 
         return {
@@ -278,7 +280,7 @@ class DJPool:
         starving = []
         for name in lane_names:
             lane = lanes[name]
-            if lane.get("exhausted"):
+            if lane.get("exhausted") or lane.get("paused"):  # #2806
                 continue
 
             picks_since = self.state.get("round_robin_index", 0) - lane.get("played_count", 0)
@@ -300,7 +302,7 @@ class DJPool:
             attempts = 0
             while attempts < len(lane_names):
                 candidate = lane_names[current_idx % len(lane_names)]
-                if not lanes[candidate].get("exhausted"):
+                if not lanes[candidate].get("exhausted") and not lanes[candidate].get("paused"):  # #2806
                     selected = candidate
                     break
                 current_idx += 1
@@ -310,6 +312,25 @@ class DJPool:
                 return None
 
         return selected
+
+    def set_lane(self, lane: str, action: str) -> dict[str, Any]:  # #2806
+        """Pause, resume or remove one lane. Raises KeyError/ValueError with a sayable message."""
+        if action not in ("pause", "resume", "remove"):
+            raise ValueError(f"Unknown action '{action}'. Use pause, resume or remove.")
+        lanes = self.state.get("lanes", {})
+        q = lane.strip().lower()
+        name = next((n for n in lanes if n.lower() == q), None) or next(
+            (n for n in lanes if q and n.lower().startswith(q)), None)
+        if name is None:
+            raise KeyError(f"No lane '{lane}'. Lanes: {', '.join(lanes) or 'none'}.")
+        if action == "remove":
+            gone = set(int(t) for t in lanes.pop(name).get("track_ids", []))
+            self.state["eligible_track_ids"] = [
+                t for t in self.state.get("eligible_track_ids", []) if int(t) not in gone]
+        else:
+            lanes[name]["paused"] = action == "pause"
+        self._persist()
+        return {"lane": name, "action": action, "lanes": self.status()["lanes"]}
 
     def resync_lanes(self, lanes: dict[str, list[int]]) -> dict[str, int]:
         """Replace lane track lists after a spec edit, keeping per-lane stats (#5495).
@@ -408,6 +429,9 @@ class DJPool:
         if db is not None:
             try:
                 identities = build_identity_map(db)
+                from audiplex.dj_bans import banned_ids  # #2806
+
+                skip_ids.update(banned_ids(db, identities))
                 if owner_id is None:
                     owner_id = owner_user_id(db)
                 window_minutes = float(self.state.get("exclude_recent_hours", 12)) * 60

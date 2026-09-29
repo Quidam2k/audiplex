@@ -241,6 +241,46 @@ async def verdict_checks(dj, fake: FakeRenderer, ids: list[int]) -> None:
     check(only <= {None, TEST_ID}, f"no command ever targeted another device: {only}")
 
 
+async def toolkit_checks(dj, fake: FakeRenderer, ids: list[int]) -> None:  # #2806 S1
+    from audiplex_mcp import dj_toolkit as tk
+
+    fake.mode = "honest"
+    await dj.dj_play_now(ids)
+    a, b, c, d = ids[:4]
+    out = await tk.dj_upcoming()
+    check(f">#0  id {a}" in out and "3 track(s) after" in out, f"dj_upcoming shows the queue: {out[:120]!r}")
+    out = await tk.dj_remove(indexes=[2])
+    check(fake.queue == [a, b, d] and fake.index == 0, f"dj_remove #2 -> {fake.queue} ({out[:80]!r})")
+    await tk.dj_insert([c], at_index=1)
+    check(fake.queue == [a, c, b, d], f"dj_insert at #1 -> {fake.queue}")
+    await tk.dj_swap(3, [a])
+    check(fake.queue == [a, c, b, a], f"dj_swap #3 -> {fake.queue}")
+    before = list(fake.queue)
+    out = await tk.dj_remove(indexes=[0])
+    check(fake.queue == before and "playing now" in out, "an edit never touches the current song")
+    out = await tk.dj_ban([b], reason="e2e")
+    check(b not in fake.queue[1:] and "Banned 1" in out, f"dj_ban drops it from the queue: {fake.queue}")
+    plan = await dj._post("/api/playback/mix/plan", {"new_ids": ids, "shuffle": False})
+    check(b not in plan["upcoming"], f"a banned track is not planned into a mix: {plan['upcoming']}")
+    out = await tk.dj_bans()
+    check(f"id {b}" in out, "dj_bans lists it")
+    await tk.dj_unban([b])
+    plan = await dj._post("/api/playback/mix/plan", {"new_ids": ids, "shuffle": False})
+    check(b in plan["upcoming"] or b == a, f"dj_unban makes it plannable again: {plan['upcoming']}")
+    await dj.dj_pause()
+    fake.queue, fake.index, fake.playing = [], 0, False
+    fake.report()
+    await dj.dj_pool_set(sources=[{"kind": "search", "query": "alpha"}, {"kind": "search", "query": "beta"}],
+                         ahead=2, exclude_recent_hours=0)
+    out = await tk.dj_pool_lane("beta", "pause")
+    check("(paused)" in out, f"dj_pool_lane pauses a lane: {out!r}")
+    st = await dj._get("/api/playback/pool")
+    check(any(ln.get("paused") for ln in st["lanes"]), "the server pool reports the paused lane")
+    out = await dj.dj_pool_set(sources=[{"kind": "vibes", "query": "x"}])
+    check("REFUSED" in out and "'search', or 'tracks'" in out, f"an unknown kind names the valid ones: {out[:160]!r}")
+    await dj.dj_pool_stop()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8199)
@@ -265,6 +305,7 @@ def main() -> int:
         "cover_cache_dir": str(tmp / "covers"),
         "dj_clip_dir": str(tmp / "dj_clips"),
         "jwt_secret": "e2e-dj-" + "0" * 40,
+        "dj_owner_username": "owner",  # #2806: mix/plan resolves the owner
     }), encoding="utf-8")
     env = {
         **os.environ,
@@ -305,6 +346,7 @@ def main() -> int:
         # guard reads a missing speech file (unguarded) and the announce gate,
         # which reads Pantheon's chat DB, is bypassed: neither is under test.
         os.environ["DJ_SPEECH_STATE_FILE"] = str(tmp / "no-speech-state.json")
+        os.environ["DJ_MIX_SOURCES_FILE"] = str(tmp / "mix-sources.json")  # #2806: not the live labels
         from audiplex_mcp import server as dj
         dj.AUDIPLEX_URL, dj.AUDIPLEX_TOKEN = base, owner
 
@@ -313,6 +355,7 @@ def main() -> int:
 
         dj._announce_gate = no_gate
         asyncio.run(verdict_checks(dj, fake, ids))
+        asyncio.run(toolkit_checks(dj, fake, ids))  # #2806
     finally:
         if fake:
             fake.stop.set()

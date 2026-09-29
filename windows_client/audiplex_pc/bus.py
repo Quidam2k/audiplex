@@ -169,9 +169,19 @@ class BusClient:
                 paused=payload.get("playing") is False,
             )
 
-        if command_type in {"play_now", "queue", "play_next"}:
+        if command_type in {"play_now", "queue", "play_next", "replace_upcoming"}:  # #2806
             ids = payload.get("track_ids") or []
             items = self._resolve_tracks(ids)
+
+            if command_type == "replace_upcoming":  # #2806: DJ queue edits
+                if self.player.book is not None:
+                    return "no_music_queue", "an audiobook is playing"  # same code as the phone
+                if ids and not items:
+                    return "no_tracks", f"none of {ids} resolved"
+                self.player.replace_upcoming(items)
+                if len(items) < len(ids):
+                    return "partial", f"{len(items)}/{len(ids)} resolved"
+                return "ok", ""
 
             if not items:
                 return "no_tracks", f"none of {ids} resolved"

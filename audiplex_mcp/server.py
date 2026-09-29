@@ -1443,6 +1443,17 @@ async def _delete(path: str):
     return resp.json()
 
 
+async def _delete_json(path: str, body: dict):  # #2806: DELETE with a body
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.request(
+            "DELETE", f"{AUDIPLEX_URL}{path}", headers=_headers(), json=body
+        )
+    if resp.status_code == 401:
+        raise PermissionError("Auth failed (401). Check AUDIPLEX_TOKEN.")
+    resp.raise_for_status()
+    return resp.json()
+
+
 async def _patch(path: str, body: dict):  # #5495
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.patch(
@@ -1597,10 +1608,22 @@ async def _resolve_source(kind: str, query: str, recursive: bool = True) -> tupl
             raise LookupError(f"No bucket matching '{query}'.")  # #5518
         label = f"bucket '{b['name']}'"  # #5518
         tracks = [{"id": t["track_id"], "path": t["path"]} for t in b["tracks"]]  # #5518
+    elif kind == "search":  # #2806: every music track whose title/artist has all the words
+        terms = query.lower().split()
+        if not terms:
+            raise LookupError("A 'search' source needs words to match.")
+        tracks = [t for t in await _all_music_tracks() if not _is_longform(t) and all(
+            w in f"{t.get('title') or ''} {t.get('artist_name') or ''}".lower() for w in terms)]
+        label = f"search '{query}'"
+    elif kind == "tracks":  # #2806: explicit ids, "12, 34 56"
+        ids = [int(x) for x in re.findall(r"\d+", query)]
+        if not ids:
+            raise LookupError("A 'tracks' source needs track ids in query, e.g. '12, 34'.")
+        label, tracks = f"{len(ids)} track id(s)", [{"id": i} for i in ids]
     else:
         raise LookupError(
-            f"Unknown kind '{kind}'. Use 'artist', 'album', 'genre', "
-            "'folder', 'folder_match', 'playlist', 'favorites', or 'bucket'."  # #5473 #5518
+            f"Unknown kind '{kind}'. Use 'artist', 'album', 'genre', 'folder', "  # #5473 #5518 #2806
+            "'folder_match', 'playlist', 'favorites', 'bucket', 'search', or 'tracks'."
         )
     return label, tracks
 
@@ -3510,18 +3533,21 @@ async def _resolve_lanes(sources: list[dict]) -> tuple[dict[str, list[int]], lis
         kind = str(src.get("kind", "folder"))
         query = str(src.get("query", ""))
         label = str(src.get("label") or query or kind)
-        if kind == "tracks":
+        why = ""  # #2806: an unknown kind says which kinds exist, not just "0 tracks"
+        if kind == "tracks" and src.get("ids"):
             ids = [int(i) for i in src.get("ids") or []]
         else:
             try:
                 _, tracks = await _resolve_source(kind, query, recursive=bool(src.get("recursive", True)))
-            except (LookupError, httpx.HTTPStatusError):
+            except LookupError as e:  # #2806
+                tracks, why = [], f" ({e})"
+            except httpx.HTTPStatusError:
                 tracks = []
             ids = [int(t["id"]) for t in tracks]
         lanes.setdefault(label, [])
         lanes[label].extend(i for i in ids if i not in lanes[label])
         if not ids:
-            empty.append(label)
+            empty.append(label + why)  # #2806
     return lanes, empty
 
 
@@ -3983,6 +4009,10 @@ playlist_fetch.register(mcp, globals())  # #5448
 from audiplex_mcp import bucket_tools  # noqa: E402  #5518: themed music buckets
 
 bucket_tools.register(mcp, globals())  # #5518
+
+from audiplex_mcp import dj_toolkit  # noqa: E402  #2806: queue edits, pool lanes, bans
+
+dj_toolkit.register(mcp, globals())  # #2806
 
 
 def main() -> None:
