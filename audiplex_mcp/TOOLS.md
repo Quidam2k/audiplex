@@ -80,4 +80,4 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 ## Sleep engine
 - `dj_bed_play` / `dj_bed_stop` / `dj_bed_volume` — the looping sleep-bed layer.
 - `dj_sleep_timer` / `dj_cancel_sleep_timer` — fade out and pause the main player after N minutes.
-- `dj_sleep_start` — one-call nightly setup (bed + optional fade layer + timer).
+- `dj_sleep_start` — "sleep mode". No args: the playing book fades out after 30 min while the brown-noise bed (found by title in the library) crossfades in; `bed_mode="under"` keeps the bed underneath from the start.

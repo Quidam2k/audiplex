@@ -317,6 +317,9 @@ data class DjCommandPayload(
     // over the last `fade_seconds` of that.
     val minutes: Float? = null,
     @Json(name = "fade_seconds") val fadeSeconds: Int? = null,
+    // 'sleep_timer' (#3367): when set, the bed layer ramps UP to this volume
+    // (0.0-1.0) over the same fade window, so the book crossfades into the bed.
+    @Json(name = "bed_fade_to") val bedFadeTo: Float? = null,
     // 'activate' (#2021 transfer handoff): resume playing, or hold paused.
     val playing: Boolean? = null
 )

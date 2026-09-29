@@ -732,20 +732,28 @@ async def dj_bed_volume(level: int) -> str:
 
 
 @mcp.tool()
-async def dj_sleep_timer(minutes: float, fade_seconds: int = 120) -> str:
+async def dj_sleep_timer(minutes: float, fade_seconds: int = 120, bed_fade_to: int | None = None) -> str:
     """Fade out and pause the MAIN player (whatever dj_play_now/dj_play_stream
     started — typically an audiobook) after `minutes`, ramping its volume to 0
     linearly over the last `fade_seconds` of that. The sleep-bed loop
-    (dj_bed_play) is untouched and keeps playing underneath. Cancel early with
-    dj_cancel_sleep_timer.
+    (dj_bed_play) is untouched and keeps playing underneath, unless
+    bed_fade_to (0-100) is given: then the bed ramps UP to that volume over
+    the same window, so the book crossfades into the bed (#3367). Cancel
+    early with dj_cancel_sleep_timer.
     """
     if minutes <= 0:
         return "minutes must be > 0."
-    data = await _enqueue("sleep_timer", {"minutes": minutes, "fade_seconds": fade_seconds})
+    payload = {"minutes": minutes, "fade_seconds": fade_seconds}
+    if bed_fade_to is not None:
+        if not 0 <= bed_fade_to <= 100:
+            return f"bed_fade_to must be 0-100 (got {bed_fade_to})."
+        payload["bed_fade_to"] = bed_fade_to / 100.0
+    data = await _enqueue("sleep_timer", payload)
     if isinstance(data, str):
         return data
+    into = f", crossfading the bed up to {bed_fade_to}%" if bed_fade_to is not None else ""
     return (
-        f"Queued sleep timer: fade out over the last {fade_seconds}s of {minutes} min "
+        f"Queued sleep timer: fade out over the last {fade_seconds}s of {minutes} min{into} "
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
     )
 
@@ -760,29 +768,84 @@ async def dj_cancel_sleep_timer() -> str:
     return f"Queued sleep-timer cancel (command #{data.get('id')}, {data.get('pending')} pending)."
 
 
+# #3367: the default bed, found by title in the library (any category) so
+# dropping Todd's own track into a library root and rescanning switches it over
+# with no config edit. First match wins; the generated loop is the fallback.
+# AUDIPLEX_SLEEP_BED_URL overrides the lookup outright.
+SLEEP_BED_TITLES = (
+    "Star Ship Sleeping Quarters",
+    "Starship Sleeping Quarters",
+    "Sleeping Quarters",
+    "Brown Noise - Sleep Loop",
+)
+
+
+async def _default_sleep_bed() -> tuple[str, str] | None:
+    """(url, title) of the default sleep bed, or None if none is in the library."""
+    env = os.environ.get("AUDIPLEX_SLEEP_BED_URL")
+    if env:
+        return env, "Sleep bed"
+    books = await _get("/api/library/books") or []
+    for want in SLEEP_BED_TITLES:
+        for b in books:
+            if want.lower() in (b.get("title") or "").lower():
+                return f"/api/stream/{b['id']}", b["title"]
+    return None
+
+
 @mcp.tool()
 async def dj_sleep_start(
-    bed_url: str,
+    bed_url: str | None = None,
     fade_track_ids: list[int] | None = None,
     fade_stream_url: str | None = None,
-    fade_after_minutes: float = 45,
+    fade_after_minutes: float = 30,
     fade_seconds: int = 120,
     bed_volume: int = 50,
-    bed_title: str = "Sleep bed",
+    bed_title: str | None = None,
+    bed_mode: str = "crossfade",
 ) -> str:
-    """One-call nightly setup: start the looping sleep bed and, optionally,
-    the fade-out layer with its sleep timer, so nothing has to be remembered
-    or set up as separate steps. Pass fade_track_ids for an audiobook/music
-    queue, or fade_stream_url for an external stream, to also start the main
-    player and its timer — leave both None to start just the bed on its own.
+    """Sleep mode, in one call. With NO arguments while a book is playing:
+    the book keeps playing untouched for 30 min, then fades out over 2 min
+    while Todd's brown-noise bed fades in on the same phone, and the bed loops
+    on all night. That is what "Jarvis, sleep mode" means.
+
+    bed_url: defaults to the brown-noise track found in the library.
+    bed_mode: "crossfade" (bed silent until the book fades, then rises) or
+    "under" (bed at bed_volume from the start, underneath the book).
+    fade_track_ids / fade_stream_url: optionally START something new to fade;
+    leave both None to fade whatever is already playing (never restarted or
+    re-queued). If nothing is playing and nothing is passed, just the bed
+    starts, at bed_volume.
     """
-    notes = [await dj_bed_play(bed_url, bed_title, bed_volume)]
+    if bed_mode not in ("crossfade", "under"):
+        return f"bed_mode must be 'crossfade' or 'under' (got {bed_mode!r})."
+    if not bed_url:
+        found = await _default_sleep_bed()
+        if not found:
+            return ("No sleep bed found: nothing titled like "
+                    f"{', '.join(SLEEP_BED_TITLES)} is in the library. Pass bed_url.")
+        bed_url, found_title = found
+        bed_title = bed_title or found_title
+    bed_title = bed_title or "Sleep bed"
+
+    starting = bool(fade_track_ids or fade_stream_url)
+    if not starting:
+        state = await _get("/api/playback/state") or {}
+        fading = bool(state.get("track"))
+    else:
+        fading = True
+    crossfade = fading and bed_mode == "crossfade"
+
+    notes = [await dj_bed_play(bed_url, bed_title, 0 if crossfade else bed_volume)]
     if fade_track_ids:
         notes.append(await dj_play_now(fade_track_ids))
     elif fade_stream_url:
         notes.append(await dj_play_stream(fade_stream_url))
-    if fade_track_ids or fade_stream_url:
-        notes.append(await dj_sleep_timer(fade_after_minutes, fade_seconds))
+    if fading:
+        notes.append(await dj_sleep_timer(fade_after_minutes, fade_seconds,
+                                          bed_volume if crossfade else None))
+    else:
+        notes.append("Nothing is playing, so there's no timer: just the bed.")
     return "\n".join(notes)
 
 

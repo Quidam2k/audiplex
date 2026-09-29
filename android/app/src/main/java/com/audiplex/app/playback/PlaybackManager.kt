@@ -1109,21 +1109,24 @@ class PlaybackManager @Inject constructor(
      * [minutes] from now, then pause it — the "fade-out" layer (#1728). Only
      * touches [controller]/[setPlayerVolume]; the bed layer plays on
      * regardless. Superseded by a later call or [cancelSleepTimer].
+     *
+     * [bedFadeTo] (#3367 crossfade): when set, the bed ramps UP from its
+     * current volume to this level over the same window, so the book fades
+     * INTO the bed instead of into silence. Null keeps the bed untouched.
      */
-    fun startSleepTimer(minutes: Float, fadeSeconds: Int) {
+    fun startSleepTimer(minutes: Float, fadeSeconds: Int, bedFadeTo: Float? = null) {
         sleepTimerJob?.cancel()
         sleepTimerJob = scope.launch {
             delay((minutes * 60_000).toLong().coerceAtLeast(0))
             val ctrl = controller ?: return@launch
             val startVolume = ctrl.volume
-            if (startVolume <= 0f) {
-                ctrl.pause()
-                return@launch
-            }
+            val bedStart = bedPlayer?.volume ?: 0f
             val steps = (fadeSeconds.coerceAtLeast(1) * 4).coerceAtLeast(1)
             val stepDelayMs = (fadeSeconds * 1000L / steps).coerceAtLeast(50L)
-            for (i in steps downTo 0) {
-                setPlayerVolume(startVolume * (i / steps.toFloat()))
+            for (i in 0..steps) {
+                val (main, bed) = SleepFade.levels(i, steps, startVolume, bedStart, bedFadeTo)
+                if (startVolume > 0f) setPlayerVolume(main)
+                if (bed != null) bedPlayer?.volume = bed
                 delay(stepDelayMs)
             }
             controller?.pause()
