@@ -17,11 +17,9 @@ Config via environment:
                   tts_backend.py for the full TTS config surface. Only
                   dj_announce needs it; the other tools work without it.
 
-Tools: dj_library, dj_tracks, dj_search, dj_play_now, dj_skip, dj_queue,
-dj_play_next, dj_reorder, dj_queue_by, dj_now_playing, dj_pause, dj_resume,
-dj_previous, dj_seek, dj_volume, dj_play_stream, dj_break_brief, dj_announce,
-dj_recommend, dj_rate, dj_taste, dj_bed_play, dj_bed_stop, dj_bed_volume,
-dj_sleep_timer, dj_cancel_sleep_timer, dj_sleep_start.
+Tools: the full catalog, one line each and grouped, is audiplex_mcp/TOOLS.md
+(#ride0928). server/tests/test_ride0928_tools_catalog.py fails if a registered
+tool is missing from it, so add the line when you add a tool.
 
 dj_bed_play/dj_bed_stop/dj_bed_volume/dj_sleep_timer/dj_cancel_sleep_timer/
 dj_sleep_start are the sleep-engine lane (item #1728): a continuously-looping
@@ -990,6 +988,56 @@ async def dj_folder(path: str, action: str = "shuffle", recursive: bool = True, 
         pl = await _post("/api/playback/playlists", {"name": title, "track_ids": ids})
         return f"Saved playlist '{pl['name']}' (#{pl['id']}) with {pl['track_count']} track(s) from {label}."
     return f"Unknown action '{action}'. Use 'shuffle', 'queue' or 'playlist'."
+
+
+@mcp.tool()
+async def dj_outro(text: str, agent: str = "") -> str:
+    """End the ride well (#ride0928, server half #5515): after the CURRENT song
+    ends, play your spoken outro, then pause. Never cuts a song. Write the copy
+    like a break (no markdown; every character is spoken). Needs music playing.
+    Cancel with dj_outro_cancel."""
+    text = (text or "").strip()
+    if not text:
+        return "No text given; nothing armed."
+    title = f"Ride outro · {agent}" if agent else "Ride outro"
+    clip = await _render_clip(text, title)
+    if isinstance(clip, str):
+        return clip
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.post(
+            f"{AUDIPLEX_URL}/api/playback/pool/outro", headers=_headers(),
+            json={"clip_id": clip["clip_id"], "duration_seconds": clip.get("duration_seconds"),
+                  "title": title, "agent": agent or None, "say": text},
+        )
+    if resp.status_code == 401:
+        return "Auth failed (401). Check AUDIPLEX_TOKEN."
+    body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+    if resp.status_code >= 400 or not body.get("armed"):
+        return f"Outro NOT armed: {body.get('reason') or body.get('detail') or resp.status_code}."
+    return (f"Outro armed: plays after the current song (clip #{clip['clip_id']}), then the player "
+            "pauses. dj_pool_status shows it; dj_outro_cancel disarms.")
+
+
+@mcp.tool()
+async def dj_outro_cancel() -> str:
+    """Disarm a pending ride-end outro (#ride0928). Music keeps going."""
+    r = await _delete("/api/playback/pool/outro")
+    return "Outro disarmed." if r.get("disarmed") else "No outro was armed."
+
+
+@mcp.tool()
+async def dj_cooldown() -> str:
+    """What Todd heard recently enough that a pick would repeat it (#ride0928:
+    the /cooldown read had no tool). Same windows dj_check_picks uses."""
+    c = await _get("/api/playback/cooldown")
+    plays = c.get("recent_plays") or c.get("recent") or []
+    head = (f"Cooldown: same recording {c.get('recording_cooldown_minutes', '?')} min, "
+            f"same song {c.get('work_cooldown_minutes', '?')} min.")
+    if not plays:
+        return head + " Nothing inside the window."
+    return head + "\n" + "\n".join(
+        f"  {p.get('track_id')} | {p.get('artist_name') or ''} - {p.get('title') or ''}".rstrip(" -")
+        for p in plays[:30])
 
 
 async def _put(path: str, body: dict):  # #ride0928
