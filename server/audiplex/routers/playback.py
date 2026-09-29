@@ -557,6 +557,8 @@ def plan_owner_mix(
     owner = _resolve_owner(db)
     recent = taste.recent_plays_for(db, owner.id, recording_minutes, identities)
     skip = non_music(db, body.new_ids)  # #ride0928: no podcast/clip/ambient in a mix
+    long_ids = too_long_for_mix(db, body.new_ids)  # #3249
+    skip |= long_ids
     plan = plan_mix(
         body.current_id,
         list(body.played_ids) + [p.track_id for p in recent],
@@ -573,6 +575,7 @@ def plan_owner_mix(
         trimmed_played=plan.trimmed_played,
         trimmed_duplicates=plan.trimmed_duplicates,
         summary=plan_summary(plan),
+        skipped_long=sorted(long_ids),
     )
 
 
@@ -691,6 +694,10 @@ def set_pool(
     if raw_lanes:
         lanes = {str(label): [int(t) for t in ids] for label, ids in raw_lanes.items()}
         skip = non_music(db, [t for ids in lanes.values() for t in ids])  # #ride0928
+        long_ids: set[int] = set()  # #3249: per lane, so a one-track lane is kept
+        for ids in lanes.values():
+            long_ids |= too_long_for_mix(db, ids)
+        skip |= long_ids
         lanes = {label: [t for t in ids if t not in skip] for label, ids in lanes.items()}
         track_ids = [t for ids in lanes.values() for t in ids]
         source_labels = {t: label for label, ids in lanes.items() for t in ids}
@@ -699,10 +706,14 @@ def set_pool(
             balance=balance, ahead=ahead, exclude_recent_hours=exclude_recent_hours,
         )
     else:
+        legacy_ids = [int(t) for t in body.get("track_ids", [])]
+        long_ids = too_long_for_mix(db, legacy_ids)  # #3249
         result = pool.set_pool(
-            spec_id, body.get("track_ids", []), body.get("source_labels", {}),
+            spec_id, [t for t in legacy_ids if t not in long_ids],
+            body.get("source_labels", {}),
             balance=balance, ahead=ahead, exclude_recent_hours=exclude_recent_hours,
         )
+    result["skipped_long"] = sorted(long_ids)  # #3249
     if isinstance(body.get("starvation_config"), dict):
         pool.state["starvation_config"].update(body["starvation_config"])
     pool.state["pending_cues"] = _spec_cues(db, spec_id)
@@ -1012,6 +1023,44 @@ def non_music(db: Session, track_ids) -> set[int]:  # #ride0928
     if not ids:
         return set()
     rows = db.query(Track.id).filter(Track.id.in_(ids), Track.content_kind != "music").all()
+    return {r[0] for r in rows}
+
+
+# #3249: 2026-09-28 21:49 a 62-minute soundtrack file ("Mr. Robot OST Vol 4")
+# landed in the ride mix and Todd skipped it at 9 minutes. A MUSIC mix or pool
+# drops anything longer than this. It never applies to what a mix doesn't touch
+# (play_now of a named track, audiobooks), and a source that resolves to ONE
+# track is kept, since that one was asked for by name.
+MAX_MIX_TRACK_SECONDS = 20 * 60
+_long_skip_logged: set[int] = set()
+
+
+def too_long_for_mix(db: Session, track_ids) -> set[int]:  # #3249
+    """Music ids in a multi-track source whose duration is over the cap.
+    Each skipped id is logged once per process so a long track that someone
+    really wanted is visible, not silently gone."""
+    from audiplex.models import Track
+    from audiplex.playback_bus import _append_diag
+
+    ids = {int(i) for i in track_ids if int(i) > 0}
+    if len(ids) <= 1:
+        return set()
+    rows = (
+        db.query(Track.id, Track.title, Track.duration_seconds)
+        .filter(
+            Track.id.in_(ids),
+            Track.content_kind == "music",
+            Track.duration_seconds > MAX_MIX_TRACK_SECONDS,
+        )
+        .all()
+    )
+    for tid, title, secs in rows:
+        if tid not in _long_skip_logged:
+            _long_skip_logged.add(tid)
+            print(f"[mix] #3249 skipped over-{MAX_MIX_TRACK_SECONDS // 60}-min track "
+                  f"{tid} {title!r} ({secs / 60:.0f} min)", flush=True)
+            _append_diag("mix_skip_long", {"track_id": tid, "title": title,
+                                           "duration_seconds": secs})
     return {r[0] for r in rows}
 
 

@@ -1742,6 +1742,9 @@ async def dj_mix(
     _SWAP["ids"] = list(upcoming)
     mixed = f" {balance.capitalize()} balance, {describe_head(upcoming, source_of)}." if upcoming else ""  # #5463
     head = f"Mix from {', '.join(labels)}: {plan.get('summary')}.{recent_note}{mixed}{pool_stopped}"  # #5463, #5495 item 4
+    if plan.get("skipped_long"):  # #3249: say so, so a wanted long track isn't silently gone
+        head += (f" Left out {len(plan['skipped_long'])} track(s) over 20 min"
+                 f" (ids {plan['skipped_long'][:5]}); dj_play_next them by id if wanted.")
     if loaded_now and not state.get("playing"):  # #3249: 13:17 mixed into a stopped player
         head += (" NOTE: the player is loaded but NOT playing, so this mix will sit"
                  " there silently until you dj_resume (announce first).")

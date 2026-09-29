@@ -325,6 +325,7 @@ class MixPlanResult(BaseModel):
     trimmed_played: list[int]
     trimmed_duplicates: list[int]
     summary: str
+    skipped_long: list[int] = []  # #3249: music over MAX_MIX_TRACK_SECONDS
 
 
 # ----- DJ playback command bus (remote control) -----
