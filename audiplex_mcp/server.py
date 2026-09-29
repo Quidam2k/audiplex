@@ -1615,6 +1615,11 @@ async def _resolve_source(kind: str, query: str, recursive: bool = True) -> tupl
         tracks = [t for t in await _all_music_tracks() if not _is_longform(t) and all(
             w in f"{t.get('title') or ''} {t.get('artist_name') or ''}".lower() for w in terms)]
         label = f"search '{query}'"
+    elif kind == "tag":  # #2806: every track a DJ tagged with this mood/vibe
+        rows = await _get(f"/api/playback/tags/{quote(query.strip(), safe='')}")
+        if not rows:
+            raise LookupError(f"No tracks tagged '{query}'. dj_tags() lists the tags.")
+        label, tracks = f"tag '{query}'", [{"id": r["track_id"]} for r in rows]
     elif kind == "tracks":  # #2806: explicit ids, "12, 34 56"
         ids = [int(x) for x in re.findall(r"\d+", query)]
         if not ids:
@@ -1623,7 +1628,7 @@ async def _resolve_source(kind: str, query: str, recursive: bool = True) -> tupl
     else:
         raise LookupError(
             f"Unknown kind '{kind}'. Use 'artist', 'album', 'genre', 'folder', "  # #5473 #5518 #2806
-            "'folder_match', 'playlist', 'favorites', 'bucket', 'search', or 'tracks'."
+            "'folder_match', 'playlist', 'favorites', 'bucket', 'search', 'tag', or 'tracks'."
         )
     return label, tracks
 
@@ -1837,6 +1842,7 @@ async def dj_mix(
     balance: str = "even",
     exclude_recent_hours: float = 12,
     allow_empty: bool = False,
+    keep_upcoming: bool = True,  # #2806
 ) -> str:
     """Build or extend a shuffled mix from several sources — Todd's standing order.
 
@@ -1868,6 +1874,8 @@ async def dj_mix(
                     Sources may also carry "recursive": false (loose files in
                     that folder only) or use kind "folder_match" (every indexed
                     folder whose path contains the query).
+    keep_upcoming:  False = the new tracks REPLACE what's queued after the
+                    current song instead of mixing into it (#2806; dj_energy_set).
     exclude_recent_hours: drop tracks Todd heard in the last N hours
                     (default 12; 0 = off). Explicit dj_play_now/dj_queue never
                     filter — a song asked for by name plays.
@@ -1945,9 +1953,9 @@ async def dj_mix(
     loaded_now = track.get("id") is not None and bool(raw_queue)
     queue = [q for q in raw_queue if (q.get("id") or 0) > 0]
     idx = state.get("queue_index") or 0
-    upcoming_ids = [q["id"] for q in queue if q.get("index", 0) > idx] if loaded_now else []  # #5463
+    upcoming_ids = [q["id"] for q in queue if q.get("index", 0) > idx] if loaded_now and keep_upcoming else []  # #5463 #2806
     pending = _SWAP.get("task")
-    if loaded_now and pending is not None and not pending.done():
+    if loaded_now and keep_upcoming and pending is not None and not pending.done():  # #2806
         upcoming_ids = list(_SWAP["ids"])  # #5463: a not-yet-fired swap IS the queue to come
     recent_note = ""  # #5463
     kept_new, dropped_new = await _recent_split(new_ids, exclude_recent_hours)

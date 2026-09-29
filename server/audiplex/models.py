@@ -148,6 +148,8 @@ class Track(Base):
     )
     # #3255: EBU R128 integrated loudness (LUFS), filled by scripts/measure_loudness.py.
     loudness_lufs: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # #2806: 0-100 measured energy (loudness + onset density), filled by scripts/measure_energy.py.
+    energy: Mapped[int | None] = mapped_column(Integer, nullable=True)
     added_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 
@@ -324,5 +326,20 @@ class DjBan(Base):
 
     track_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     reason: Mapped[str | None] = mapped_column(Text)
+    persona: Mapped[str | None] = mapped_column(String(50))
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
+class DjTrackTag(Base):
+    """A mood/vibe tag the DJ put on a track (#2806): "chill", "anthem", "rainy".
+
+    Applied by a DJ persona (or Todd), never inferred. Tags feed dj_energy_set
+    filters and the 'tag' mix/pool source. Reversible: delete the row.
+    """
+
+    __tablename__ = "dj_track_tags"
+
+    track_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tag: Mapped[str] = mapped_column(String(40), primary_key=True, index=True)
     persona: Mapped[str | None] = mapped_column(String(50))
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)

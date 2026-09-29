@@ -277,8 +277,59 @@ async def toolkit_checks(dj, fake: FakeRenderer, ids: list[int]) -> None:  # #28
     st = await dj._get("/api/playback/pool")
     check(any(ln.get("paused") for ln in st["lanes"]), "the server pool reports the paused lane")
     out = await dj.dj_pool_set(sources=[{"kind": "vibes", "query": "x"}])
-    check("REFUSED" in out and "'search', or 'tracks'" in out, f"an unknown kind names the valid ones: {out[:160]!r}")
+    check("REFUSED" in out and "'tag', or 'tracks'" in out, f"an unknown kind names the valid ones: {out[:160]!r}")  # #2806
     await dj.dj_pool_stop()
+
+
+def analyzer_checks(fake: FakeRenderer, base: str, token: str, db_path: Path, tmp: Path) -> None:  # #2806 S2
+    """The real energy analyzer against the throwaway server: busy while playing, runs when idle."""
+    script = SERVER / "scripts" / "measure_energy.py"
+    common = [sys.executable, str(script), "--db", str(db_path), "--all-tracks", "--url", base,
+              "--token", token, "--bike-state", str(tmp / "no-bike.json"), "--sleep", "0",
+              "--report", str(tmp / "energy.json")]
+    fake.queue, fake.index, fake.playing = [1], 0, True
+    fake.report()
+    r = subprocess.run(common, capture_output=True, text=True)
+    check(r.returncode == 3 and "music is playing" in r.stderr, f"analyzer refuses while playing ({r.returncode} {r.stderr.strip()!r})")
+    (tmp / "ride.json").write_text('{"active": true}', encoding="utf-8")
+    fake.playing = False
+    fake.report()
+    r = subprocess.run(common[:-6] + ["--bike-state", str(tmp / "ride.json")] + common[-4:], capture_output=True, text=True)
+    check(r.returncode == 3 and "bike ride" in r.stderr, f"analyzer refuses during a ride ({r.stderr.strip()!r})")
+    r = subprocess.run(common, capture_output=True, text=True)
+    rep = json.loads((tmp / "energy.json").read_text(encoding="utf-8")) if r.returncode == 0 else {}
+    check(r.returncode == 0 and len(rep.get("failed", [])) == len(TITLES),
+          f"analyzer runs when idle; silent e2e tracks are reported, not scored ({r.stdout.strip()[:120]!r})")
+
+
+async def energy_checks(dj, fake: FakeRenderer, ids: list[int], db_path: Path) -> None:  # #2806 S2
+    import sqlite3
+
+    from audiplex_mcp import dj_toolkit as tk
+
+    energy = dict(zip(ids, (70, 20, 90, 40)))
+    con = sqlite3.connect(db_path)
+    with con:
+        con.executemany("UPDATE tracks SET energy=? WHERE id=?", [(e, i) for i, e in energy.items()])
+    con.close()
+    out = await tk.dj_tag(ids, ["e2e ride"])
+    check(f"Tagged {len(ids)} track(s)" in out, f"dj_tag: {out!r}")
+    out = await tk.dj_tags()
+    check("e2e ride (4)" in out, f"dj_tags lists the tag: {out!r}")
+    fake.mode = "honest"
+    await dj.dj_play_now([ids[0]])
+    cur = fake.queue[fake.index]
+    out = await tk.dj_energy_set("wind_down", sources=[{"kind": "tag", "query": "e2e ride"}], exclude_recent_hours=0)
+    tail = [energy[i] for i in fake.queue[fake.index + 1:]]
+    check(fake.queue[fake.index] == cur and tail and tail == sorted(tail, reverse=True),
+          f"dj_energy_set wind_down queues high->low after the current song: {tail} ({out[:140]!r})")
+    out = await tk.dj_energy_set("rise", sources=[{"kind": "tag", "query": "e2e ride"}], exclude_recent_hours=0)
+    tail = [energy[i] for i in fake.queue[fake.index + 1:]]
+    check(tail and tail == sorted(tail), f"a second set REPLACES the tail, low->high: {tail}")
+    out = await tk.dj_untag(ids, ["e2e ride"])
+    out = await tk.dj_energy_set("rise", sources=[{"kind": "tag", "query": "e2e ride"}])
+    check(out.startswith("REFUSED"), f"an empty tag source refuses and sends nothing: {out[:100]!r}")
+    await dj.dj_pause()
 
 
 def main() -> int:
@@ -356,6 +407,8 @@ def main() -> int:
         dj._announce_gate = no_gate
         asyncio.run(verdict_checks(dj, fake, ids))
         asyncio.run(toolkit_checks(dj, fake, ids))  # #2806
+        analyzer_checks(fake, base, owner, db_path, tmp)  # #2806 S2
+        asyncio.run(energy_checks(dj, fake, ids, db_path))  # #2806 S2
     finally:
         if fake:
             fake.stop.set()

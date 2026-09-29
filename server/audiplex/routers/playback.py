@@ -864,6 +864,123 @@ def remove_bans(body: dict, db: Session = Depends(get_db), user: User = Depends(
     return {"unbanned": sorted(removed), "not_banned": sorted(ids - set(removed))}
 
 
+# ----- #2806: DJ tags (applied, never inferred) and measured-energy arcs -----
+
+
+def _norm_tags(tags) -> list[str]:
+    out = []
+    for t in tags or []:
+        t = " ".join(str(t).lower().split())[:40]
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
+@router.get("/tags", tags=["dj_library"])
+def list_tags(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Every DJ tag with how many tracks carry it."""
+    from sqlalchemy import func
+
+    from audiplex.models import DjTrackTag
+
+    rows = db.query(DjTrackTag.tag, func.count()).group_by(DjTrackTag.tag).order_by(DjTrackTag.tag).all()
+    return [{"tag": t, "count": n} for t, n in rows]
+
+
+@router.get("/tags/{tag}", tags=["dj_library"])
+def tagged_tracks(tag: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """The tracks carrying one tag, with their measured energy (None = unmeasured)."""
+    from audiplex.models import DjTrackTag, Track
+
+    norm = _norm_tags([tag])
+    rows = (db.query(Track).join(DjTrackTag, DjTrackTag.track_id == Track.id)
+            .filter(DjTrackTag.tag == (norm[0] if norm else "")).order_by(Track.id).all())
+    return [{"track_id": t.id, "title": t.title, "artist": t.artist.name if t.artist else None,
+             "energy": t.energy} for t in rows]
+
+
+@router.post("/tags", tags=["dj_library"])
+def add_tags(body: dict, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """body: {track_ids, tags, persona?}. Idempotent; unknown ids are reported."""
+    from audiplex.models import DjTrackTag, Track
+
+    tags = _norm_tags(body.get("tags"))
+    if not tags:
+        raise HTTPException(status_code=400, detail="Give at least one tag.")
+    ids = {int(i) for i in body.get("track_ids") or [] if int(i) > 0}
+    known = {r[0] for r in db.query(Track.id).filter(Track.id.in_(ids)).all()} if ids else set()
+    have = {(r.track_id, r.tag) for r in db.query(DjTrackTag).filter(DjTrackTag.track_id.in_(known)).all()} if known else set()
+    added = 0
+    for tid in sorted(known):
+        for tag in tags:
+            if (tid, tag) not in have:
+                db.add(DjTrackTag(track_id=tid, tag=tag, persona=body.get("persona")))
+                added += 1
+    db.commit()
+    return {"tags": tags, "tracks": sorted(known), "added": added, "unknown": sorted(ids - known)}
+
+
+@router.delete("/tags", tags=["dj_library"])
+def remove_tags(body: dict, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """body: {track_ids, tags?}. No tags = every tag on those tracks."""
+    from audiplex.models import DjTrackTag
+
+    ids = {int(i) for i in body.get("track_ids") or []}
+    if not ids:
+        return {"removed": 0}
+    q = db.query(DjTrackTag).filter(DjTrackTag.track_id.in_(ids))
+    tags = _norm_tags(body.get("tags"))
+    if tags:
+        q = q.filter(DjTrackTag.tag.in_(tags))
+    removed = q.delete(synchronize_session=False)
+    db.commit()
+    return {"removed": removed}
+
+
+@router.post("/energy/arc", tags=["dj_library"])
+def energy_arc(body: dict, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Order candidates into an energy arc (#2806). Pure planning: queues nothing.
+
+    body: {track_ids, arc: rise|peak|wind_down|steady, minutes?, tags?: all
+    required, min_energy?, max_energy?, seed?}. Tracks without a measured
+    energy are left out and counted; banned, too-long and non-music are dropped.
+    """
+    from audiplex.energy_arc import order_arc
+    from audiplex.models import DjTrackTag, Track
+
+    ids = list(dict.fromkeys(int(i) for i in body.get("track_ids") or []))
+    drop = non_music(db, ids) | too_long_for_mix(db, ids) | banned_ids(db)
+    ids = [i for i in ids if i not in drop]
+    tags = _norm_tags(body.get("tags"))
+    untagged = 0
+    if tags and ids:
+        rows = db.query(DjTrackTag.track_id, DjTrackTag.tag).filter(
+            DjTrackTag.track_id.in_(ids), DjTrackTag.tag.in_(tags)).all()
+        has: dict[int, set] = {}
+        for tid, tag in rows:
+            has.setdefault(tid, set()).add(tag)
+        keep = [i for i in ids if has.get(i, set()) >= set(tags)]
+        untagged, ids = len(ids) - len(keep), keep
+    lo, hi = body.get("min_energy"), body.get("max_energy")
+    rows = db.query(Track.id, Track.energy, Track.duration_seconds).filter(Track.id.in_(ids)).all() if ids else []
+    measured = [(t, e, d) for t, e, d in rows if e is not None
+                and (lo is None or e >= int(lo)) and (hi is None or e <= int(hi))]
+    try:
+        ordered = order_arc(measured, str(body.get("arc", "")), float(body.get("minutes") or 0), body.get("seed"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    by_id = {t: (e, d) for t, e, d in measured}
+    return {
+        "ordered": ordered,
+        "energies": [by_id[t][0] for t in ordered],
+        "minutes": round(sum(by_id[t][1] or 0 for t in ordered) / 60, 1),
+        "unmeasured": sum(1 for _, e, _ in rows if e is None),
+        "out_of_range": sum(1 for _, e, _ in rows if e is not None) - len(measured),
+        "untagged": untagged,
+        "dropped": len(drop),
+    }
+
+
 # ----- DJ Specs: persistent mix specs with cues (#5477) -----
 
 

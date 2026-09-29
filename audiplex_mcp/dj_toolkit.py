@@ -1,4 +1,4 @@
-"""DJ toolkit (#2806): see and edit the upcoming queue, pool lanes, and bans.
+"""DJ toolkit (#2806): the upcoming queue, pool lanes, bans, tags and energy sets.
 
 Every queue edit reads the device's queue, computes the new tail here, and
 sends ONE replace_upcoming: the current song is never touched and never
@@ -17,7 +17,7 @@ def register(mcp, ns: dict) -> None:
     global _NS
     _NS = ns
     for fn in (dj_upcoming, dj_remove, dj_insert, dj_swap, dj_pool_lane,
-               dj_ban, dj_unban, dj_bans):
+               dj_ban, dj_unban, dj_bans, dj_tag, dj_untag, dj_tags, dj_energy_set):
         mcp.tool()(fn)
 
 
@@ -284,3 +284,144 @@ async def dj_bans() -> str:
         by = f" [{r['persona']}]" if r.get("persona") else ""
         lines.append(f"  id {r['track_id']}  {r.get('title') or '?'}{who}{why}{by}")
     return "\n".join(lines)
+
+
+async def _say_http_error(e: Exception) -> str:
+    resp = getattr(e, "response", None)
+    try:
+        return f"Not done: {resp.json().get('detail')}"
+    except Exception:
+        return f"Not done: {e}"
+
+
+async def dj_tag(track_ids: list[int], tags: list[str], persona: str = "") -> str:
+    """Put mood/vibe tags on tracks ("chill", "anthem", "rainy day"). Tags are
+    yours to apply by ear; nothing is inferred. Use them as a mix/pool source
+    ({"kind": "tag", "query": "chill"}) or to filter dj_energy_set.
+    dj_untag removes them; dj_tags lists them."""
+    if not track_ids or not tags:
+        return "Give track_ids and tags."
+    try:
+        res = await _h("_post")("/api/playback/tags",
+                                {"track_ids": track_ids, "tags": tags, "persona": persona or None})
+    except PermissionError as e:
+        return str(e)
+    except Exception as e:
+        return await _say_http_error(e)
+    out = f"Tagged {len(res.get('tracks') or [])} track(s) {', '.join(res.get('tags') or [])} ({res.get('added', 0)} new)."
+    if res.get("unknown"):
+        out += f" Unknown id(s) {res['unknown']}."
+    return out
+
+
+async def dj_untag(track_ids: list[int], tags: list[str] | None = None) -> str:
+    """Take tags off tracks. No tags = every tag on those tracks."""
+    try:
+        res = await _h("_delete_json")("/api/playback/tags", {"track_ids": track_ids, "tags": tags or []})
+    except PermissionError as e:
+        return str(e)
+    return f"Removed {res.get('removed', 0)} tag(s)."
+
+
+async def dj_tags(tag: str = "") -> str:
+    """No tag: every DJ tag with its track count. With a tag: the tracks carrying
+    it, with measured energy (0-100, '?' = not measured yet)."""
+    try:
+        if not tag:
+            rows = await _h("_get")("/api/playback/tags")
+            if not rows:
+                return "No tags yet. dj_tag(track_ids, tags) adds some."
+            return "Tags: " + ", ".join(f"{r['tag']} ({r['count']})" for r in rows)
+        from urllib.parse import quote
+
+        rows = await _h("_get")(f"/api/playback/tags/{quote(tag.strip(), safe='')}")
+    except PermissionError as e:
+        return str(e)
+    if not rows:
+        return f"No tracks tagged '{tag}'."
+    lines = [f"{len(rows)} tagged '{tag}':"]
+    for r in rows:
+        who = f" - {r['artist']}" if r.get("artist") else ""
+        e = r.get("energy")
+        lines.append(f"  id {r['track_id']}  {r.get('title') or '?'}{who}  energy {'?' if e is None else e}")
+    return "\n".join(lines)
+
+
+async def dj_energy_set(
+    arc: str,
+    sources: list[dict] | None = None,
+    track_ids: list[int] | None = None,
+    minutes: float = 0,
+    tags: list[str] | None = None,
+    min_energy: int | None = None,
+    max_energy: int | None = None,
+    seed: int | None = None,
+    exclude_recent_hours: float = 12,
+) -> str:
+    """Build a set that follows an energy arc, from MEASURED energy (0-100).
+
+    arc:      rise (low to high) | peak (builds, tops out ~2/3 in, comes down)
+              | wind_down (high to low) | steady (near the middle, shuffled).
+    sources:  same as dj_mix ([{"kind": "folder", "query": ...}], kinds incl.
+              'tag' and 'search'); track_ids: explicit ids as well.
+    minutes:  fill about this long (0 = every candidate).
+    tags:     keep only tracks carrying ALL these DJ tags.
+    min_energy / max_energy: an energy window.
+
+    It REPLACES what's queued after the current song (never the current song)
+    and stops the rolling pool, like dj_mix. Tracks without a measured energy
+    are left out and counted: the analyzer (server/scripts/measure_energy.py)
+    fills them in a quiet hour, never during a ride.
+    """
+    ids: list[int] = [int(t) for t in track_ids or []]
+    empty: list[str] = []
+    for src in sources or []:
+        try:
+            _label, tracks = await _h("_resolve_source")(
+                str(src.get("kind", "folder")), str(src.get("query", "")),
+                recursive=bool(src.get("recursive", True)))
+        except PermissionError as e:
+            return str(e)
+        except Exception as e:  # LookupError / unknown folder: name it
+            tracks, why = [], f" ({e})"
+        else:
+            why = ""
+        if not tracks:
+            empty.append(f"{src.get('kind', 'folder')} '{src.get('query', '')}'{why}")
+        ids += [int(t["id"]) for t in tracks]
+    if empty:
+        return "REFUSED, nothing sent: " + "; ".join(f"{x}: 0 tracks" for x in empty) + "."
+    if not ids:
+        return "Give sources or track_ids for the set."
+    recent = ""
+    if exclude_recent_hours:
+        kept, dropped = await _h("_recent_split")(ids, exclude_recent_hours)
+        if kept:
+            ids = kept
+            recent = f" Left out {dropped} heard in the last {exclude_recent_hours:g}h." if dropped else ""
+    body = {"track_ids": ids, "arc": arc, "minutes": minutes, "tags": tags or [], "seed": seed,
+            "min_energy": min_energy, "max_energy": max_energy}
+    try:
+        res = await _h("_post")("/api/playback/energy/arc", body)
+    except PermissionError as e:
+        return str(e)
+    except Exception as e:
+        return await _say_http_error(e)
+    ordered = res.get("ordered") or []
+    why = []
+    if res.get("unmeasured"):
+        why.append(f"{res['unmeasured']} not measured yet")
+    if res.get("untagged"):
+        why.append(f"{res['untagged']} without the tags")
+    if res.get("out_of_range"):
+        why.append(f"{res['out_of_range']} outside the energy window")
+    if res.get("dropped"):
+        why.append(f"{res['dropped']} banned/non-music/too long")
+    left_out = f" Left out: {', '.join(why)}." if why else ""
+    if not ordered:
+        return "Nothing fits that set, nothing sent." + left_out
+    e = res.get("energies") or []
+    head = (f"{arc} set: {len(ordered)} track(s), ~{res.get('minutes')} min, energy "
+            f"{e[0]} -> {max(e)} -> {e[-1]}.{left_out}{recent} ")
+    return head + await _h("dj_mix")(track_ids=ordered, shuffle=False, keep_upcoming=False,
+                                     exclude_recent_hours=0)
