@@ -203,3 +203,57 @@ def test_cadence_three_songs_between_bridges(monkeypatch):  # #5986
 
 def test_default_cadence_is_three():  # #5986
     assert dbw.DEFAULT_SETTINGS["every_min"] == dbw.DEFAULT_SETTINGS["every_max"] == 3
+
+
+# --- #6038 real queue order + album artist ---------------------------------
+
+def _q(*items):  # #6038 (id, title) in queue order
+    return [{"index": i, "id": tid, "title": t, "artist": t * 2} for i, (tid, t) in enumerate(items)]
+
+
+def test_next_and_after_skip_dj_clips():  # #6038 a clip between two songs is not 'coming up next'
+    state = {"queue_index": 0, "queue": _q((1, "A"), (-7, "clip"), (2, "B"), (0, "stream"), (3, "C"))}
+    assert BridgeCounter._next_item(state) == {"id": 2, "title": "B", "artist": "BB"}
+    assert BridgeCounter._next_item(state, 2) == {"id": 3, "title": "C", "artist": "CC"}
+    assert BridgeCounter._next_item(state, 3) is None
+
+
+def test_next_follows_index_not_list_position():  # #6038
+    queue = list(reversed(_q((1, "A"), (2, "B"), (3, "C"))))
+    assert BridgeCounter._next_item({"queue_index": 0, "queue": queue}) == {"id": 2, "title": "B", "artist": "BB"}
+    assert BridgeCounter._next_item({"queue_index": None, "queue": queue}) is None
+
+
+def test_intro_prev_falls_back_to_the_queue(monkeypatch):  # #6038 watcher restarted mid-set: no remembered prev
+    c = BridgeCounter()
+    state = make_state(3, "C", "CC", queue=_q((1, "A"), (-7, "clip"), (3, "C"), (4, "D")), queue_index=2)
+    p = c._payload("intro", state["track"], None, state, 1000.0)
+    assert p["prev"] == {"title": "A", "artist": "AA"} and p["next"]["title"] == "D"
+    remembered = c._payload("intro", state["track"], {"title": "Z", "artist": "ZZ"}, state, 1000.0)
+    assert remembered["prev"] == {"title": "Z", "artist": "ZZ"}  # what was actually heard wins
+
+
+class _Resp:  # #6038
+    def __init__(self, data):
+        self._data = data
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._data
+
+
+class _Client:  # #6038
+    def __init__(self, album):
+        self.album = album
+
+    def get(self, url, headers=None, timeout=None):
+        return _Resp({"album_id": 9} if "/tracks/" in url else self.album)
+
+
+def test_facts_carry_album_artist():  # #6038 Pantheon needs it to tell a folder from an album
+    folder = {"title": "On Playa", "artist_name": "faster", "year": 1999, "genre": None}
+    assert dbw.fetch_facts(_Client(folder), "http://x", "", 5) == {
+        "album_artist": "faster", "album": "On Playa", "year": 1999}
+    assert "album_artist" not in dbw.fetch_facts(_Client({"title": "Kick", "year": 1987}), "http://x", "", 5)

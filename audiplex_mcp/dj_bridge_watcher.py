@@ -146,13 +146,29 @@ class BridgeCounter:
         return position_s
 
     @staticmethod
-    def _next_item(state, offset=1):  # #6005 offset 2 = the song after next
-        queue_index = state.get("queue_index")
-        if isinstance(queue_index, int):
-            for q in state.get("queue") or []:
-                if q.get("index") == queue_index + offset:
-                    return {"id": q.get("id"), "title": q.get("title"), "artist": q.get("artist")}  # #5986 id -> facts
+    def _music_items(state, ahead=True):  # #6038 queue entries that are SONGS, nearest first
+        queue_index = state.get("queue_index")  # #6038
+        if not isinstance(queue_index, int):  # #6038
+            return []  # #6038
+        items = [q for q in state.get("queue") or []  # #6038
+                 if isinstance(q.get("index"), int) and isinstance(q.get("id"), int) and q["id"] > 0  # #6038 DJ clips / streams are not beats
+                 and (q["index"] > queue_index if ahead else q["index"] < queue_index)]  # #6038
+        return sorted(items, key=lambda q: q["index"], reverse=not ahead)  # #6038
+
+    @classmethod  # #6038
+    def _next_item(cls, state, offset=1):  # #6005 offset 2 = the song after next
+        # #6038: the offset-th SONG ahead in the real queue. index+offset alone named a DJ
+        # clip as 'coming up next' whenever one sat between two songs.
+        items = cls._music_items(state)  # #6038
+        if 1 <= offset <= len(items):  # #6038
+            q = items[offset - 1]  # #6038
+            return {"id": q.get("id"), "title": q.get("title"), "artist": q.get("artist")}  # #5986 id -> facts
         return None
+
+    @classmethod  # #6038
+    def _prev_item(cls, state):  # #6038 the song before this one in the queue
+        items = cls._music_items(state, ahead=False)  # #6038
+        return {"title": items[0].get("title"), "artist": items[0].get("artist")} if items else None  # #6038
 
     def _reset_after_fire(self, settings):
         self.counter = 0
@@ -163,6 +179,8 @@ class BridgeCounter:
 
     def _payload(self, mode, track, prev, state, now):  # #5986
         prev_payload = {"title": prev.get("title"), "artist": prev.get("artist")} if prev else None
+        if prev_payload is None:  # #6038 watcher just started: the queue still knows what played before
+            prev_payload = self._prev_item(state)  # #6038
         detected_dt = datetime.fromtimestamp(now, tz=timezone.utc)
         return {
             "mode": mode,  # #5986 'outro' | 'intro'
@@ -291,6 +309,9 @@ def fetch_facts(client, base_url, token, track_id):  # #5986
         log_line(f"facts fetch failed for {track_id}: {exc!r}")
         return {}
     facts = {}
+    album_artist = (album.get("artist_name") or "").strip()  # #6038
+    if album_artist:  # #6038 Pantheon states an album only when this matches the track's artist:
+        facts["album_artist"] = album_artist  # #6038 a folder's album record is 'Various Artists'/'Individual'/'faster'
     title = (album.get("title") or "").strip()
     if title and title.lower() not in ("unknown", "unknown album", "music", "various"):
         facts["album"] = title
