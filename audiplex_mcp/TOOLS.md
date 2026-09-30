@@ -88,5 +88,11 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 
 ## Sleep engine
 - `dj_bed_play` / `dj_bed_stop` / `dj_bed_volume` — the looping sleep-bed layer.
-- `dj_sleep_timer` / `dj_cancel_sleep_timer` — fade out and pause the main player after N minutes.
+- `dj_sleep_timer` / `dj_cancel_sleep_timer` — fade out and pause the main player after N minutes. Checked (#3505): if the phone's app is too old or silent, the server runs the fade itself; the first line says which path is armed.
+
+## Stopping (#3505)
+- `dj_stop_after_current` — "stop after this song": trims the queue, stops the pool, latches against refills, pauses at the song's end on any phone build, then verifies playing=no.
+- `dj_stop_status` — the verdict (VERIFIED or NOT verified) and whether the stop latch is on. Never tell Todd it stopped until this says VERIFIED.
+- `dj_stop_cancel` — cancel the stop and lift the latch. While the latch is on, dj_queue/dj_play_next answer STOPPED; that's deliberate. dj_play_now also lifts it; it expires after 3 h.
+- Command tools (pause, skip, volume, seek, previous, reorder, bed_*) now lead with DONE only when the phone acked ok; otherwise NOT DONE.
 - `dj_sleep_start` — "sleep mode". No args: the playing book fades out after 30 min while the brown-noise bed (found by title in the library) crossfades in; `bed_mode="under"` keeps the bed underneath from the start.

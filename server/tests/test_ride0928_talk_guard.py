@@ -117,7 +117,7 @@ def test_non_start_commands_pass_while_talking(wire):
     sent, _, speech = wire
     _talk(speech, talk_active=True)
     assert isinstance(asyncio.run(mcp_server._enqueue("pause", {})), dict)
-    assert "Queued skip" in asyncio.run(mcp_server.dj_skip())
+    assert "skip was sent" in asyncio.run(mcp_server.dj_skip())  # #3505: unacked = NOT DONE
     assert [c for c, _ in sent] == ["pause", "skip"]
 
 

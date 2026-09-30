@@ -311,12 +311,7 @@ async def dj_skip() -> str:
     afterward to confirm what's playing.
     """
     data = await _enqueue("skip", {})  # #ride0928: one send path for every command
-    if isinstance(data, str):
-        return data
-    return (
-        f"Queued skip (command #{data.get('id')}, {data.get('pending')} pending). "
-        "The device skips to the next track when it next polls."
-    )
+    return await _acked(data, "skip")  # #3505
 
 
 # --- #3249: announce before music starts, and never send a dead file -------
@@ -434,11 +429,50 @@ def _held_kind(text: str) -> str:  # #ride0928
         return "muted"
     if text.startswith("REFUSED (announce first)"):
         return "announce_first"
+    if text.startswith("STOPPED"):  # #3505
+        return "stopped"
     return "not_sent"
 
 
 def _held_result(text: str) -> str:  # #ride0928: same shape as _result, for a refusal
     return f"RESULT sent=0 held={_held_kind(text)} skipped_missing=[] phone_ack=none\n{text}"
+
+
+async def _ack_row(command_id: int, timeout: float) -> dict | None:  # #3505
+    """The registry row once the device has answered `command_id`, else None."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        try:
+            for row in await _get("/api/playback/commands?limit=50") or []:
+                if isinstance(row, dict) and row.get("id") == command_id and row.get("ack_status"):
+                    return row
+        except Exception:
+            pass
+        if loop.time() >= deadline:
+            return None
+        await asyncio.sleep(min(0.25, max(0.01, deadline - loop.time())))
+
+
+async def _acked(data, did: str) -> str:  # #3505 (Karen rider b)
+    """Honest result for a command that doesn't start audio: DONE only when the
+    device acked ok. A refusal, a failed ack or silence all say NOT DONE, so a
+    persona can never read "queued" as "it happened"."""
+    if isinstance(data, str):
+        return f"NOT DONE: {did} was not sent. {data}"
+    cid = data.get("id")
+    ack = await _ack_row(int(cid), ACK_WAIT_S) if cid is not None else None
+    if ack is None:
+        return (f"NOT DONE (unconfirmed): {did} was sent (command #{cid}) but the device "
+                f"did not answer in {ACK_WAIT_S:g}s. Do NOT tell Todd it happened; check "
+                f"dj_command_status({cid}) or dj_now_playing.")
+    if ack.get("ack_status") != "ok":
+        detail = f": {ack['ack_detail']}" if ack.get("ack_detail") else ""
+        hint = (" The phone's Audiplex app is too old for this command; Todd needs to "
+                "install the current build." if ack.get("ack_status") == "unknown_type" else "")
+        return (f"NOT DONE: {did} - the device answered {ack.get('ack_status')}{detail} "
+                f"(command #{cid}).{hint} Do NOT tell Todd it happened.")
+    return f"DONE: {did} (command #{cid}, device acked ok)."
 
 
 # #2843: "the DJ says your phone took the play command, but no music plays."
@@ -708,6 +742,11 @@ async def _enqueue_raw(cmd_type: str, payload: dict) -> str:  # #3249: pre-gate 
         )
     if resp.status_code == 401:
         return "Auth failed (401). Check AUDIPLEX_TOKEN."
+    if resp.status_code == 409:  # #3505: the stop latch refused a refill
+        try:
+            return resp.json().get("detail") or "STOPPED: the server refused it (409)."
+        except ValueError:
+            return "STOPPED: the server refused it (409)."
     resp.raise_for_status()
     return resp.json()
 
@@ -756,21 +795,14 @@ async def dj_reorder(from_index: int, to_index: int) -> str:
     the queue with its indices.
     """
     data = await _enqueue("reorder", {"from_index": from_index, "to_index": to_index})
-    if isinstance(data, str):
-        return data
-    return (
-        f"Queued reorder {from_index} -> {to_index} "
-        f"(command #{data.get('id')}, {data.get('pending')} pending)."
-    )
+    return await _acked(data, f"reorder {from_index} -> {to_index}")  # #3505
 
 
 @mcp.tool()
 async def dj_pause() -> str:
     """Pause playback on the Audiplex device."""
     data = await _enqueue("pause", {})
-    if isinstance(data, str):
-        return data
-    return f"Queued pause (command #{data.get('id')}, {data.get('pending')} pending)."
+    return await _acked(data, "pause")  # #3505
 
 
 @mcp.tool()
@@ -786,21 +818,14 @@ async def dj_resume() -> str:
 async def dj_previous() -> str:
     """Go back to the previous track in the Audiplex device's current queue."""
     data = await _enqueue("previous", {})
-    if isinstance(data, str):
-        return data
-    return f"Queued previous (command #{data.get('id')}, {data.get('pending')} pending)."
+    return await _acked(data, "previous")  # #3505
 
 
 @mcp.tool()
 async def dj_seek(position_seconds: int) -> str:
     """Seek to an absolute position (in seconds) in the current track."""
     data = await _enqueue("seek", {"position_ms": position_seconds * 1000})
-    if isinstance(data, str):
-        return data
-    return (
-        f"Queued seek to {position_seconds}s "
-        f"(command #{data.get('id')}, {data.get('pending')} pending)."
-    )
+    return await _acked(data, f"seek to {position_seconds}s")  # #3505
 
 
 @mcp.tool()
@@ -811,12 +836,7 @@ async def dj_volume(level: int) -> str:
     if not 0 <= level <= 100:
         return f"level must be 0-100 (got {level})."
     data = await _enqueue("volume", {"volume": level / 100.0})
-    if isinstance(data, str):
-        return data
-    return (
-        f"Queued volume {level}% "
-        f"(command #{data.get('id')}, {data.get('pending')} pending)."
-    )
+    return await _acked(data, f"volume {level}%")  # #3505
 
 
 @mcp.tool()
@@ -902,12 +922,7 @@ async def dj_bed_play(url: str, title: str = "Sleep bed", volume: int = 50) -> s
     if not 0 <= volume <= 100:
         return f"volume must be 0-100 (got {volume})."
     data = await _enqueue("bed_play", {"url": url, "title": title, "volume": volume / 100.0})
-    if isinstance(data, str):
-        return data
-    return (
-        f"Queued sleep-bed loop '{title}' from {url} at {volume}% "
-        f"(command #{data.get('id')}, {data.get('pending')} pending)."
-    )
+    return await _acked(data, f"sleep-bed loop '{title}' from {url} at {volume}%")  # #3505
 
 
 @mcp.tool()
@@ -915,9 +930,7 @@ async def dj_bed_stop() -> str:
     """Stop the sleep-bed loop layer started by dj_bed_play. Leaves the main
     player (audiobook/music/stream) untouched."""
     data = await _enqueue("bed_stop", {})
-    if isinstance(data, str):
-        return data
-    return f"Queued sleep-bed stop (command #{data.get('id')}, {data.get('pending')} pending)."
+    return await _acked(data, "sleep-bed stop")  # #3505
 
 
 @mcp.tool()
@@ -927,20 +940,24 @@ async def dj_bed_volume(level: int) -> str:
     if not 0 <= level <= 100:
         return f"level must be 0-100 (got {level})."
     data = await _enqueue("bed_volume", {"volume": level / 100.0})
-    if isinstance(data, str):
-        return data
-    return f"Queued sleep-bed volume {level}% (command #{data.get('id')}, {data.get('pending')} pending)."
+    return await _acked(data, f"sleep-bed volume {level}%")  # #3505
 
 
 @mcp.tool()
 async def dj_sleep_timer(minutes: float, fade_seconds: int = 120, bed_fade_to: int | None = None) -> str:
-    """Fade out and pause the MAIN player (whatever dj_play_now/dj_play_stream
-    started — typically an audiobook) after `minutes`, ramping its volume to 0
-    linearly over the last `fade_seconds` of that. The sleep-bed loop
-    (dj_bed_play) is untouched and keeps playing underneath, unless
-    bed_fade_to (0-100) is given: then the bed ramps UP to that volume over
-    the same window, so the book crossfades into the bed (#3367). Cancel
-    early with dj_cancel_sleep_timer.
+    """Fade out and pause the MAIN player (music, audiobook or stream: whatever
+    dj_play_now/dj_play_book/dj_play_stream started) after `minutes`, ramping
+    its volume to 0 over the last `fade_seconds`. The sleep-bed loop
+    (dj_bed_play) keeps playing underneath, unless bed_fade_to (0-100) is
+    given: then the bed ramps UP to that volume over the same window (#3367).
+
+    #3505: this is checked, not fire-and-forget. If the phone's app doesn't
+    know sleep_timer (builds before 2026-09-07 answer unknown_type) or doesn't
+    answer, the SERVER runs the fade itself (volume steps, then pause, then it
+    verifies playing=no); bed_fade_to is not available on that path. Read the
+    first line: it says which path is armed. dj_stop_status reports the
+    server path's verdict. To stop DJ music at the end of the current song,
+    use dj_stop_after_current instead. Cancel with dj_cancel_sleep_timer.
     """
     if minutes <= 0:
         return "minutes must be > 0."
@@ -951,22 +968,131 @@ async def dj_sleep_timer(minutes: float, fade_seconds: int = 120, bed_fade_to: i
         payload["bed_fade_to"] = bed_fade_to / 100.0
     data = await _enqueue("sleep_timer", payload)
     if isinstance(data, str):
-        return data
-    into = f", crossfading the bed up to {bed_fade_to}%" if bed_fade_to is not None else ""
-    return (
-        f"Queued sleep timer: fade out over the last {fade_seconds}s of {minutes} min{into} "
-        f"(command #{data.get('id')}, {data.get('pending')} pending)."
-    )
+        return f"NOT ARMED: {data}"
+    cid = data.get("id")
+    ack = await _ack_row(int(cid), ACK_WAIT_S) if cid is not None else None
+    if ack is not None and ack.get("ack_status") == "ok":
+        into = f", crossfading the bed up to {bed_fade_to}%" if bed_fade_to is not None else ""
+        return (f"ARMED on the phone (command #{cid} acked ok): fade out over the last "
+                f"{fade_seconds}s of {minutes} min{into}.")
+    why = ("no answer in " + f"{ACK_WAIT_S:g}s" if ack is None else
+           f"the phone answered {ack.get('ack_status')}"
+           + (f": {ack['ack_detail']}" if ack.get("ack_detail") else ""))
+    try:
+        armed = await _post("/api/playback/scheduled-stop",
+                            {"mode": "fade", "minutes": minutes, "fade_seconds": fade_seconds})
+    except Exception as e:
+        return (f"NOT ARMED: the phone did not take the sleep timer ({why}) and the server "
+                f"fallback failed too ({e}). Nothing will stop the music; use dj_pause or "
+                "dj_stop_after_current, and tell Todd.")
+    old = (" The phone's Audiplex app is too old for sleep_timer; Todd should install "
+           "the current build." if ack is not None and ack.get("ack_status") == "unknown_type" else "")
+    lost = " bed_fade_to is ignored on this path." if bed_fade_to is not None else ""
+    return (f"ARMED on the SERVER (fallback): the phone did not take the sleep timer ({why}).{old} "
+            f"The server will fade the main player over the last {fade_seconds}s of {minutes} min, "
+            f"pause it and verify it stopped.{lost} Check dj_stop_status afterwards; "
+            f"until it says verdict YES, do not tell Todd the music stopped. (job: {armed.get('job')})")
 
 
 @mcp.tool()
 async def dj_cancel_sleep_timer() -> str:
-    """Cancel a pending dj_sleep_timer fade-out on the main player, restoring
-    its configured volume. Does not affect the sleep-bed loop."""
+    """Cancel a pending dj_sleep_timer fade-out on the phone AND any server-run
+    fallback (#3505), restoring the configured volume. Does not affect the
+    sleep-bed loop. Also lifts a stop latch."""
     data = await _enqueue("cancel_sleep_timer", {})
-    if isinstance(data, str):
-        return data
-    return f"Queued sleep-timer cancel (command #{data.get('id')}, {data.get('pending')} pending)."
+    phone = await _acked(data, "phone sleep-timer cancel")
+    try:
+        cleared = await _delete("/api/playback/scheduled-stop")
+        server = "Server stop cleared." if cleared.get("cleared") else "No server stop was armed."
+    except Exception as e:
+        server = f"Server stop NOT cleared: {e}"
+    return f"{phone}\n{server}"
+
+
+# ----- #3505: stop after the current song, verified -----
+
+
+def _describe_stop(stop: dict | None) -> str:
+    if not isinstance(stop, dict) or not (stop.get("job") or stop.get("latched")):
+        return "No DJ stop is armed and nothing is latched."
+    lines = []
+    job = stop.get("job") or {}
+    if job:
+        state = "ARMED" if stop.get("active") else "FINISHED"
+        verdict = job.get("verdict")
+        head = f"{state} {job.get('mode')} stop"
+        if job.get("track_title"):
+            head += f" after '{job['track_title']}'"
+        if job.get("ends_in_s") is not None:
+            head += f", song ends in ~{int(job['ends_in_s'])}s"
+        if job.get("fires_in_s") is not None:
+            head += f", fade finishes in ~{int(job['fires_in_s'])}s"
+        if job.get("trim"):
+            head += f" (queue trim: {job['trim']})"
+        lines.append(head + ".")
+        if verdict == "YES":
+            lines.append(f"VERIFIED stopped: {job.get('reason')}.")
+        elif verdict == "NO":
+            lines.append(f"NOT VERIFIED - the music may still be playing: {job.get('reason')}. "
+                         "Tell Todd plainly; try dj_pause.")
+        elif verdict == "CANCELLED":
+            lines.append(f"Cancelled: {job.get('reason')}.")
+        else:
+            lines.append("Not done yet: NOT verified. Do not tell Todd it stopped until "
+                         "dj_stop_status says VERIFIED.")
+    if stop.get("latched"):
+        mins = int((stop.get("latch_expires_in_s") or 0) // 60)
+        lines.append(f"STOP LATCH ON ({stop.get('latch_reason')}): dj_queue/dj_play_next are "
+                     f"refused for ~{mins} more min. This is deliberate, not a broken queue. "
+                     "If Todd asks for music, dj_play_now lifts it (or dj_stop_cancel).")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def dj_stop_after_current() -> str:
+    """Stop the DJ music at the END of the song playing now, and prove it.
+
+    The server trims the rest of the queue, stops the DJ pool, latches against
+    refills (dj_queue/dj_play_next are refused until dj_play_now,
+    dj_resume or dj_stop_cancel, or 3 h pass), and makes sure the phone
+    stops when the song ends: if the phone can't trim (old app build), it
+    pauses ~1 s before the end. It then waits for the phone to report
+    playing=no. Returns right away with the ETA; call dj_stop_status after the
+    song ends for the verdict. Works on every phone build."""
+    try:
+        armed = await _post("/api/playback/scheduled-stop", {"mode": "after_current"})
+    except httpx.HTTPStatusError as e:
+        try:
+            detail = e.response.json().get("detail")
+        except ValueError:
+            detail = e.response.text
+        return f"NOT ARMED: {detail}"
+    except Exception as e:
+        return f"NOT ARMED: {e}"
+    return "ARMED (not yet verified).\n" + _describe_stop(armed)
+
+
+@mcp.tool()
+async def dj_stop_status() -> str:
+    """The verdict of the latest dj_stop_after_current / server sleep-timer
+    stop, and whether the stop latch is on. VERIFIED means the phone reported
+    playing=no after the stop; anything else is NOT verified."""
+    try:
+        return _describe_stop(await _get("/api/playback/scheduled-stop"))
+    except Exception as e:
+        return f"Could not read the stop status: {e}. NOT verified."
+
+
+@mcp.tool()
+async def dj_stop_cancel() -> str:
+    """Cancel an armed dj_stop_after_current / server sleep-timer stop and lift
+    the stop latch, so dj_queue/dj_play_next work again."""
+    try:
+        cleared = await _delete("/api/playback/scheduled-stop")
+    except Exception as e:
+        return f"NOT cancelled: {e}"
+    return ("Stop cancelled and latch lifted." if cleared.get("cleared")
+            else "Nothing was armed or latched.")
 
 
 # #3367: the default bed, found by title in the library (any category) so
@@ -2448,6 +2574,9 @@ async def dj_now_playing() -> str:
             else "No player has reported state."
         )
         errs = "\n".join(await _player_error_lines())  # #3249
+        stop = s.get("stop") or {}
+        if stop.get("job") or stop.get("latched"):  # #3505
+            errs = _describe_stop(stop) + "\n" + errs
         return f"Nothing is playing. {why}\n{device_line}\n{errs}".rstrip()
     age = device.get("last_state_age_seconds")
     if age is None and s.get("updated_at"):  # #3249: age from the snapshot itself
@@ -2480,6 +2609,11 @@ async def dj_now_playing() -> str:
             )
     if device_line:
         lines.append(device_line)
+    if s.get("app_version_name"):  # #3505
+        lines.append(f"Phone app: {s['app_version_name']}")
+    stop = s.get("stop") or {}
+    if stop.get("job") or stop.get("latched"):  # #3505 (Jarvis rider 3)
+        lines.append(_describe_stop(stop))
     lines += await _player_error_lines()  # #3249
     miss = await _missing_on_phone()  # #ride0928
     if miss:

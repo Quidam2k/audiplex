@@ -429,6 +429,10 @@ class PlaybackState(BaseModel):
     queue_index: int = 0
     queue: list[NowPlayingQueueItem] = []
     volume: float | None = None
+    # #3505: which app build is reporting, so the DJ can tell "phone too old"
+    # before it sends a command the build doesn't know. None from older builds.
+    app_version_name: str | None = None
+    app_version_code: int | None = None
 
 
 class ClientLogEntry(BaseModel):

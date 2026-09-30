@@ -1,5 +1,8 @@
 package com.audiplex.app.playback
 
+import android.app.NotificationManager
+import android.content.Context
+import com.audiplex.app.BuildConfig
 import com.audiplex.app.data.ApiServiceHolder
 import com.audiplex.app.data.SettingsStore
 import com.audiplex.app.data.api.DjCommandAckDto
@@ -8,6 +11,7 @@ import com.audiplex.app.data.api.NowPlayingTrackDto
 import com.audiplex.app.data.api.PlaybackStateDto
 import com.audiplex.app.data.api.QueueTrackDto
 import com.audiplex.app.data.api.TrackSchema
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -217,6 +221,7 @@ internal class CommandPump<T : Any>(
 
 @Singleton
 class DjCommandClient @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val apiHolder: ApiServiceHolder,
     private val settingsStore: SettingsStore,
     private val playbackManager: PlaybackManager,
@@ -361,6 +366,9 @@ class DjCommandClient @Inject constructor(
             } else signals
             fresh.first { (playing, err) -> playing || err != null }
         }
+        // #3505: every DJ start (play_now, activate, ...) checks that the media
+        // notification (Todd's only way to stop it off-app) actually appeared.
+        if (outcome?.first == true && outcome.second == null) scheduleNotificationCheck()
         return startResult(
             started = outcome?.first == true && outcome.second == null,
             error = outcome?.second,
@@ -607,6 +615,8 @@ class DjCommandClient @Inject constructor(
             // Cached snapshot, NOT controller.volume — that call is main-thread
             // only and we are on Dispatchers.IO here (#2961).
             volume = playbackManager.playerVolume(),
+            appVersionName = BuildConfig.VERSION_NAME,
+            appVersionCode = BuildConfig.VERSION_CODE,
         )
         // Always refresh while playing (position moves); otherwise on a
         // meaningful state change, plus a slow idle heartbeat. Without it a
@@ -619,6 +629,43 @@ class DjCommandClient @Inject constructor(
             api.postPlaybackState(state)
             lastReportKey = key
             lastReportAt = now
+        }
+    }
+
+    /**
+     * Schedule a check for PlaybackService notification 3 seconds after a DJ playback command (#3505).
+     * If the service is not in the foreground (no notification), report a diagnostic event.
+     */
+    private fun scheduleNotificationCheck() {
+        scope.launch {
+            delay(3000)
+            if (!hasMediaNotification()) {
+                clientLog.report(
+                    level = "error",
+                    event = "no_media_notification",
+                    message = "PlaybackService not in foreground 3s after DJ play command",
+                    detail = mapOf(
+                        "isPlaying" to playbackManager.isPlaying.value.toString()
+                    ),
+                )
+            }
+        }
+    }
+
+    /**
+     * Check if PlaybackService has posted a notification (is in foreground).
+     */
+    private fun hasMediaNotification(): Boolean {
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            ?: return false
+        // The media notification is the one carrying a MediaSession token
+        // (Media3's MediaStyle sets EXTRA_MEDIA_SESSION). "Any ongoing
+        // notification" would always pass: DjLinkService keeps its own
+        // foreground notification up the whole time.
+        val activeNotifications = runCatching { notificationManager.activeNotifications }
+            .getOrNull() ?: return false
+        return activeNotifications.any {
+            it.notification.extras?.containsKey(android.app.Notification.EXTRA_MEDIA_SESSION) == true
         }
     }
 }

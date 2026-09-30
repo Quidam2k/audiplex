@@ -6,6 +6,7 @@ import com.audiplex.app.data.ApiServiceHolder
 import com.audiplex.app.data.api.BookDetail
 import com.audiplex.app.data.api.ChapterSchema
 import com.audiplex.app.data.api.TrackRatingCreate
+import com.audiplex.app.playback.ControllerMetadata
 import com.audiplex.app.playback.MusicQueueState
 import com.audiplex.app.playback.PlaybackManager
 import com.audiplex.app.playback.PlayerKind
@@ -72,11 +73,19 @@ class PlayerViewModel @Inject constructor(
         }
     }
 
+    /** #3505: the controller's own title/artist, for when local state is missing. */
+    val controllerMetadata: StateFlow<ControllerMetadata?> = playbackManager.controllerMetadata
+
+    // #3505: anything the session is playing counts, not only what this
+    // process loaded itself: DJ-driven playback must always show controls.
     val hasActiveBook: StateFlow<Boolean> = combine(
         playbackManager.currentBook,
         playbackManager.currentMusic,
-        playbackManager.currentStreamTitle
-    ) { book, music, streamTitle -> book != null || music != null || streamTitle != null }
+        playbackManager.currentStreamTitle,
+        playbackManager.controllerMetadata
+    ) { book, music, streamTitle, meta ->
+        book != null || music != null || streamTitle != null || meta != null
+    }
         .stateIn(
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main),
             started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000),

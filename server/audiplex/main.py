@@ -55,10 +55,15 @@ async def lifespan(app: FastAPI):
     from audiplex.playback_bus import bus
 
     ticker = asyncio.create_task(dj_triggers.run_ticker(bus))
+    # #3505: verified stop-after-current / fade-then-pause jobs.
+    from audiplex import scheduled_stop
+
+    stop_ticker = asyncio.create_task(scheduled_stop.run_ticker(bus))
     try:
         yield
     finally:
         ticker.cancel()
+        stop_ticker.cancel()
         dj_triggers.set_loop(None)
 
 

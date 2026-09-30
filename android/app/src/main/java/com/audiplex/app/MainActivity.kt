@@ -13,6 +13,7 @@ import androidx.lifecycle.lifecycleScope
 import com.audiplex.app.data.SettingsStore
 import com.audiplex.app.navigation.RootScaffold
 import com.audiplex.app.playback.DjLinkService
+import com.audiplex.app.playback.PlaybackManager
 import com.audiplex.app.ui.theme.AudiplexTheme
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.flow.first
@@ -23,6 +24,7 @@ import javax.inject.Inject
 class MainActivity : ComponentActivity() {
 
     @Inject lateinit var settingsStore: SettingsStore
+    @Inject lateinit var playbackManager: PlaybackManager
 
     private val requestNotifications =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -37,6 +39,14 @@ class MainActivity : ComponentActivity() {
                 RootScaffold()
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Re-hydrate from the MediaController when returning to the activity,
+        // so the UI stays in sync with what the MediaSession is playing (#3505).
+        // This is idempotent and guarded to never clobber local state.
+        playbackManager.refreshFromController()
     }
 
     /**

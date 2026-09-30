@@ -388,5 +388,7 @@ data class PlaybackStateDto(
     @Json(name = "queue_length") val queueLength: Int,
     @Json(name = "queue_index") val queueIndex: Int,
     val queue: List<QueueTrackDto> = emptyList(),
-    val volume: Float? = null
+    val volume: Float? = null,
+    @Json(name = "app_version_name") val appVersionName: String = "",
+    @Json(name = "app_version_code") val appVersionCode: Int = 0
 )

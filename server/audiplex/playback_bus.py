@@ -644,6 +644,10 @@ class PlaybackBus:
             pool = get_pool()
             if not pool.is_active() or device_key != self._renderer_id():
                 return
+            from audiplex.scheduled_stop import controller as stop_controller
+
+            if stop_controller.latch_active(time.time()):  # #3505: Todd asked it to stop
+                return
             track = state.get("track") or {}
             current = track.get("id") if isinstance(track, dict) else None
             if current is None or current < 0 or not state.get("playing"):

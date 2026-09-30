@@ -42,6 +42,7 @@ client simply re-issues.
 """
 
 import json
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -51,6 +52,7 @@ from audiplex import taste
 from audiplex.identity import build_identity_map
 from audiplex.dj_bans import banned_ids  # #2806
 from audiplex.mix import plan_mix, plan_summary
+from audiplex.scheduled_stop import controller as stop_controller  # #3505
 from audiplex.auth import get_current_user
 from audiplex.config import get_settings
 from audiplex.database import get_db
@@ -115,6 +117,10 @@ def _resolve_owner(db: Session) -> User:
 
 @router.post("/command", response_model=PlaybackCommandQueued)
 async def post_command(cmd: PlaybackCommand, user: User = Depends(get_current_user)):
+    # #3505: a stop Todd asked for holds until an explicit start lifts it.
+    refusal = stop_controller.gate(cmd.type, cmd.payload or {}, time.time(), bus)
+    if refusal:
+        raise HTTPException(status_code=409, detail=refusal)
     rec = await bus.enqueue(cmd.type, cmd.payload)
     return PlaybackCommandQueued(id=rec.id, type=rec.type, pending=bus.pending())
 
@@ -207,8 +213,15 @@ def get_state(
     device_id: str | None = Query(None),
     user: User = Depends(get_current_user),
 ):
-    """Now-playing of `device_id`, or by default of whichever device is rendering."""
-    return bus.get_state(device_id) or {
+    """Now-playing of `device_id`, or by default of whichever device is rendering.
+
+    #3505: `stop` carries any armed/finished DJ stop and the stop latch, so a
+    persona reading now-playing sees WHY queueing is refused."""
+    stop = stop_controller.public(time.time(), bus)
+    state = bus.get_state(device_id)
+    if state is not None:
+        return {**state, "stop": stop}
+    return {
         "playing": False,
         "track": None,
         "position_ms": 0,
@@ -218,7 +231,52 @@ def get_state(
         "queue": [],
         "volume": None,
         "updated_at": None,
+        "stop": stop,
     }
+
+
+# ----- #3505: verified stops -----
+
+
+@router.post("/scheduled-stop")
+def arm_scheduled_stop(body: dict, user: User = Depends(get_current_user)):
+    """Arm a server-run, device-verified stop.
+
+    body {"mode": "after_current"}: trim the queue tail, stop the DJ pool,
+    latch against refills, and make sure the device stops at the end of the
+    current song (pause ~1 s before its end if the trim isn't acked ok).
+    body {"mode": "fade", "minutes": m, "fade_seconds": f}: after m minutes
+    ramp the volume to 0 over the last f seconds, pause, restore the volume.
+    Poll GET for the verdict: YES only once the device reports playing=no.
+    """
+    mode = body.get("mode")
+    now = time.time()
+    if mode == "after_current":
+        result = stop_controller.arm_after_current(bus, now)
+    elif mode == "fade":
+        try:
+            minutes = float(body.get("minutes"))
+            fade = float(body.get("fade_seconds", 120))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="fade needs numeric minutes (and fade_seconds)")
+        result = stop_controller.arm_fade(bus, now, minutes, fade)
+    else:
+        raise HTTPException(status_code=422, detail="mode must be 'after_current' or 'fade'")
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result.get("error"))
+    return result
+
+
+@router.get("/scheduled-stop")
+def get_scheduled_stop(user: User = Depends(get_current_user)):
+    return stop_controller.public(time.time(), bus)
+
+
+@router.delete("/scheduled-stop")
+def cancel_scheduled_stop(user: User = Depends(get_current_user)):
+    """Cancel any armed stop and lift the stop latch."""
+    had = stop_controller.clear("cancelled by DELETE", bus, time.time())
+    return {"cleared": had, **stop_controller.public(time.time(), bus)}
 
 
 @router.get("/devices")

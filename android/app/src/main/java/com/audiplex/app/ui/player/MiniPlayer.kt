@@ -48,8 +48,9 @@ fun MiniPlayer(
     val isPlaying by viewModel.isPlaying.collectAsState()
     val positionMs by viewModel.positionMs.collectAsState()
     val durationMs by viewModel.durationMs.collectAsState()
+    val controllerMeta by viewModel.controllerMetadata.collectAsState()
 
-    val info: MiniInfo = when (kind) {
+    val info: MiniInfo? = when (kind) {
         PlayerKind.Audiobook -> book?.let {
             MiniInfo(
                 title = it.title,
@@ -82,7 +83,26 @@ fun MiniPlayer(
             )
         }
         null -> null
+    }
+    // #3505: DJ-driven playback this process never loaded itself still gets a
+    // row with a working play/pause, built from the controller's metadata.
+    val fallback = NowPlayingVisibility.shouldShowFallback(
+        hasLocalState = info != null,
+        controllerHasMetadata = controllerMeta != null,
+        isPlaying = isPlaying
+    )
+    val shown: MiniInfo = info ?: controllerMeta?.takeIf { fallback }?.let { m ->
+        MiniInfo(
+            title = m.title ?: "Playing",
+            subtitle = m.artist,
+            coverUrl = null,
+            fallbackIcon = Icons.Default.MusicNote,
+            effectiveDuration = durationMs
+        )
     } ?: return
+    // The full player can't render without local state, so the fallback row's
+    // tap toggles playback instead of opening a blank screen.
+    val rowClick: () -> Unit = if (info == null) ({ viewModel.togglePlayPause() }) else onClick
 
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -90,8 +110,8 @@ fun MiniPlayer(
         modifier = Modifier.fillMaxWidth()
     ) {
         Column {
-            val progress = if (info.effectiveDuration > 0)
-                positionMs.toFloat() / info.effectiveDuration.toFloat() else 0f
+            val progress = if (shown.effectiveDuration > 0)
+                positionMs.toFloat() / shown.effectiveDuration.toFloat() else 0f
             LinearProgressIndicator(
                 progress = { progress.coerceIn(0f, 1f) },
                 modifier = Modifier
@@ -104,13 +124,13 @@ fun MiniPlayer(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(onClick = onClick)
+                    .clickable(onClick = rowClick)
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (info.coverUrl != null) {
+                if (shown.coverUrl != null) {
                     AsyncImage(
-                        model = info.coverUrl,
+                        model = shown.coverUrl,
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
@@ -125,7 +145,7 @@ fun MiniPlayer(
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            info.fallbackIcon,
+                            shown.fallbackIcon,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -135,12 +155,12 @@ fun MiniPlayer(
 
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = info.title,
+                        text = shown.title,
                         style = MaterialTheme.typography.bodyMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    info.subtitle?.let {
+                    shown.subtitle?.let {
                         Text(
                             text = it,
                             style = MaterialTheme.typography.bodySmall,

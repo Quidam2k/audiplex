@@ -48,6 +48,12 @@ import javax.inject.Singleton
 
 enum class PlayerKind { Audiobook, Music, Stream }
 
+/** Fallback metadata from the MediaController when local state is null (#3505). */
+data class ControllerMetadata(
+    val title: String?,
+    val artist: String?
+)
+
 /** #ride0928: more than this many failures inside the window stops auto-skipping. */
 internal const val SKIP_LOOP_MAX_FAILURES = 5
 internal const val SKIP_LOOP_WINDOW_MS = 30_000L
@@ -211,6 +217,10 @@ class PlaybackManager @Inject constructor(
     // Written on the main thread only; see playerVolume().
     private val _playerVolume = MutableStateFlow(1f)
 
+    /** Controller's current metadata when local state is null (#3505). */
+    private val _controllerMetadata = MutableStateFlow<ControllerMetadata?>(null)
+    val controllerMetadata: StateFlow<ControllerMetadata?> = _controllerMetadata
+
     private var currentBaseUrl: String = ""
     private var lastReportedTrackIndex: Int = -1
     // Position of the previously-playing track at the moment of a SEEK
@@ -359,36 +369,6 @@ class PlaybackManager @Inject constructor(
             lastDiscontinuityReason = reason
         }
 
-        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-            if (!isMusic()) return
-            val ctrl = controller ?: return
-            val music = _currentMusic.value ?: return
-            val newIndex = ctrl.currentMediaItemIndex.coerceAtLeast(0)
-            // Tag the previous track. Auto-advance counts as a real listen
-            // (complete). Manual next/prev counts as a skip, with the
-            // played-time pulled from onPositionDiscontinuity so the server
-            // can flag early-skips.
-            if (lastReportedTrackIndex >= 0 && lastReportedTrackIndex != newIndex) {
-                music.items.getOrNull(lastReportedTrackIndex)?.let { prev ->
-                    if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
-                        postPlayStat(prev.track.id, "complete", prev.track.durationSeconds)
-                    } else {
-                        val playedSeconds = lastDiscontinuityOldPositionMs / 1000.0
-                        postPlayStat(prev.track.id, "skip", playedSeconds)
-                    }
-                }
-            }
-            _currentMusic.value = music.copy(currentIndex = newIndex)
-            // Report start of new track
-            music.items.getOrNull(newIndex)?.let { current ->
-                postPlayStat(current.track.id, "start", 0.0)
-                recordRecentlyPlayed(current)
-            }
-            lastReportedTrackIndex = newIndex
-            _durationMs.value = (music.items.getOrNull(newIndex)?.track?.durationSeconds ?: 0.0)
-                .let { (it * 1000).toLong() }
-        }
-
         override fun onPlaybackStateChanged(playbackState: Int) {
             if (playbackState == Player.STATE_READY) {
                 if (isMusic()) {
@@ -446,6 +426,85 @@ class PlaybackManager @Inject constructor(
                     }
                 }
             }
+        }
+
+        /**
+         * Update controller metadata for fallback mini-player when local state is null (#3505).
+         * Tracks the currently-playing track's title/artist from MediaMetadata.
+         */
+        override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
+            updateControllerMetadata(mediaMetadata)
+        }
+
+        /**
+         * Also update metadata when a new media item transitions.
+         */
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            if (mediaItem != null) {
+                updateControllerMetadata(mediaItem.mediaMetadata)
+            }
+            if (!isMusic()) return
+            val ctrl = controller ?: return
+            val music = _currentMusic.value ?: return
+            val newIndex = ctrl.currentMediaItemIndex.coerceAtLeast(0)
+            // Tag the previous track. Auto-advance counts as a real listen
+            // (complete). Manual next/prev counts as a skip, with the
+            // played-time pulled from onPositionDiscontinuity so the server
+            // can flag early-skips.
+            if (lastReportedTrackIndex >= 0 && lastReportedTrackIndex != newIndex) {
+                music.items.getOrNull(lastReportedTrackIndex)?.let { prev ->
+                    if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
+                        postPlayStat(prev.track.id, "complete", prev.track.durationSeconds)
+                    } else {
+                        val playedSeconds = lastDiscontinuityOldPositionMs / 1000.0
+                        postPlayStat(prev.track.id, "skip", playedSeconds)
+                    }
+                }
+            }
+            _currentMusic.value = music.copy(currentIndex = newIndex)
+            // Report start of new track
+            music.items.getOrNull(newIndex)?.let { current ->
+                postPlayStat(current.track.id, "start", 0.0)
+                recordRecentlyPlayed(current)
+            }
+            lastReportedTrackIndex = newIndex
+            _durationMs.value = (music.items.getOrNull(newIndex)?.track?.durationSeconds ?: 0.0)
+                .let { (it * 1000).toLong() }
+        }
+    }
+
+    /**
+     * Update the fallback controller metadata when local state is null (#3505).
+     * Used by the Player.Listener when MediaController metadata changes, so the
+     * mini-player can show title/artist even if UI hydration hasn't completed.
+     */
+    private fun updateControllerMetadata(metadata: MediaMetadata) {
+        // Always tracked; the UI decides (NowPlayingVisibility) whether local
+        // state covers it. Gating here left it stale/null exactly when the UI
+        // lost its local state after the fact.
+        val title = metadata.title?.toString()
+        val artist = metadata.artist?.toString()
+        _controllerMetadata.value =
+            if (title == null && artist == null) null else ControllerMetadata(title, artist)
+    }
+
+    /**
+     * Re-read the live session on Activity resume (#3505). [connect] is a
+     * no-op once a controller exists, so a walk-up to a DJ session that began
+     * after the controller connected never re-hydrated: the mini-player stayed
+     * blank while the music played. This re-runs hydration (still guarded to
+     * never clobber local state) and re-seeds the fallback metadata and
+     * play/pause flag from the controller.
+     */
+    fun refreshFromController() {
+        ensureController { ctrl ->
+            hydrateFromController(ctrl)
+            if (ctrl.mediaItemCount == 0) {
+                _controllerMetadata.value = null
+            } else {
+                updateControllerMetadata(ctrl.mediaMetadata)
+            }
+            _isPlaying.value = ctrl.isPlaying
         }
     }
 
