@@ -138,6 +138,14 @@ def test_payload_next_is_queue_index_plus_one(monkeypatch):
     )
     assert r is not None
     assert r["next"] == {"id": 3, "title": "C", "artist": "CC"}
+    assert r["after"] is None  # #6005 end of queue: no third beat
+
+
+def test_payload_after_is_queue_index_plus_two(monkeypatch):  # #6005
+    queue = [{"index": i, "id": i + 1, "title": t, "artist": t * 2} for i, t in enumerate("ABCD")]
+    state = {"queue_index": 1, "queue": queue}
+    assert BridgeCounter._next_item(state) == {"id": 3, "title": "C", "artist": "CC"}
+    assert BridgeCounter._next_item(state, 2) == {"id": 4, "title": "D", "artist": "DD"}
 
 
 # --- #5986 outro timing + cadence ------------------------------------------

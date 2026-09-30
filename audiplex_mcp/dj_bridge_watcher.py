@@ -146,11 +146,11 @@ class BridgeCounter:
         return position_s
 
     @staticmethod
-    def _next_item(state):
+    def _next_item(state, offset=1):  # #6005 offset 2 = the song after next
         queue_index = state.get("queue_index")
         if isinstance(queue_index, int):
             for q in state.get("queue") or []:
-                if q.get("index") == queue_index + 1:
+                if q.get("index") == queue_index + offset:
                     return {"id": q.get("id"), "title": q.get("title"), "artist": q.get("artist")}  # #5986 id -> facts
         return None
 
@@ -175,6 +175,7 @@ class BridgeCounter:
                 "duration_s": (state.get("duration_ms") or 0) / 1000.0,
             },
             "next": self._next_item(state),
+            "after": self._next_item(state, 2),  # #6005 third beat: 'coming up next is Z' (no facts fetch)
             "cadence": self.target,  # #5986 songs until the next bridge
             "detected_at": detected_dt.isoformat().replace("+00:00", "Z"),
             "detected_epoch": now,
