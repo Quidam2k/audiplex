@@ -339,6 +339,51 @@ async def energy_checks(dj, fake: FakeRenderer, ids: list[int], db_path: Path) -
     await dj.dj_pause()
 
 
+def tempo_key_analyzer_checks(fake: FakeRenderer, base: str, token: str, db_path: Path, tmp: Path) -> None:  # #1002
+    """The real tempo/key batch against the throwaway server: shares measure_energy's guard."""
+    script = SERVER / "scripts" / "measure_tempo_key.py"
+    common = [sys.executable, str(script), "--db", str(db_path), "--all-tracks", "--url", base,
+              "--token", token, "--bike-state", str(tmp / "no-bike.json"), "--sleep", "0",
+              "--report", str(tmp / "tempo-key.json")]
+    fake.queue, fake.index, fake.playing = [1], 0, True
+    fake.report()
+    r = subprocess.run(common, capture_output=True, text=True)
+    check(r.returncode == 3 and "music is playing" in r.stderr, f"tempo/key batch refuses while playing ({r.returncode} {r.stderr.strip()!r})")
+    r = subprocess.run(common[:-6] + ["--bike-state", str(tmp / "ride.json")] + common[-4:], capture_output=True, text=True)
+    check(r.returncode == 3 and "bike ride" in r.stderr, f"tempo/key batch refuses during a ride ({r.stderr.strip()!r})")
+    fake.playing = False
+    fake.report()
+    r = subprocess.run(common[:5] + ["--url", "http://127.0.0.1:9"] + common[7:], capture_output=True, text=True)
+    check(r.returncode == 3 and "can't verify" in r.stderr, f"tempo/key batch fails closed when the player can't be checked ({r.stderr.strip()!r})")
+    r = subprocess.run(common, capture_output=True, text=True)
+    rep = json.loads((tmp / "tempo-key.json").read_text(encoding="utf-8")) if r.returncode == 0 else {}
+    check(r.returncode == 0 and rep.get("checked") == len(TITLES) and not rep.get("applied"),
+          f"tempo/key batch runs when idle, report-only by default ({r.stdout.strip()[:120]!r})")
+
+
+async def harmonic_checks(dj, fake: FakeRenderer, ids: list[int], db_path: Path) -> None:  # #1002
+    import sqlite3
+
+    from audiplex.harmonic import key_score
+    from audiplex_mcp import dj_toolkit as tk
+
+    meta = dict(zip(ids, ((128.0, "8A"), (126.0, "3B"), (127.0, "9B"), (129.0, "8B"))))
+    con = sqlite3.connect(db_path)
+    with con:
+        con.executemany("UPDATE tracks SET bpm=?, musical_key=? WHERE id=?", [(b, k, i) for i, (b, k) in meta.items()])
+    con.close()
+    fake.mode = "honest"
+    await dj.dj_play_now([ids[0]])
+    cur = fake.queue[fake.index]
+    out = await tk.dj_harmonic_set(track_ids=ids[1:], start_track_id=ids[3], exclude_recent_hours=0)
+    tail = fake.queue[fake.index + 1:]
+    keys = [meta[i][1] for i in tail]
+    check(fake.queue[fake.index] == cur and tail[:2] == [ids[3], ids[2]] and "Harmonic set: 3 track(s)" in out
+          and key_score(keys[0], keys[1]) >= 0.9,
+          f"dj_harmonic_set queues key-compatible hand-offs after the current song: {keys} ({out[:160]!r})")
+    await dj.dj_pause()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8199)
@@ -416,6 +461,8 @@ def main() -> int:
         asyncio.run(toolkit_checks(dj, fake, ids))  # #2806
         analyzer_checks(fake, base, owner, db_path, tmp)  # #2806 S2
         asyncio.run(energy_checks(dj, fake, ids, db_path))  # #2806 S2
+        tempo_key_analyzer_checks(fake, base, owner, db_path, tmp)  # #1002
+        asyncio.run(harmonic_checks(dj, fake, ids, db_path))  # #1002
     finally:
         if fake:
             fake.stop.set()

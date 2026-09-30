@@ -18,7 +18,7 @@ def register(mcp, ns: dict) -> None:
     _NS = ns
     for fn in (dj_upcoming, dj_remove, dj_insert, dj_swap, dj_pool_lane,
                dj_ban, dj_unban, dj_bans, dj_tag, dj_untag, dj_tags, dj_energy_set,
-               dj_crossfade):
+               dj_harmonic_set, dj_crossfade):
         mcp.tool()(fn)
 
 
@@ -348,6 +348,37 @@ async def dj_tags(tag: str = "") -> str:
     return "\n".join(lines)
 
 
+async def _collect_ids(sources, track_ids, exclude_recent_hours) -> tuple:
+    """(ids, recent note) from sources + explicit ids, or (refusal str, '')."""
+    ids: list[int] = [int(t) for t in track_ids or []]
+    empty: list[str] = []
+    for src in sources or []:
+        try:
+            _label, tracks = await _h("_resolve_source")(
+                str(src.get("kind", "folder")), str(src.get("query", "")),
+                recursive=bool(src.get("recursive", True)))
+        except PermissionError as e:
+            return str(e), ""
+        except Exception as e:  # LookupError / unknown folder: name it
+            tracks, why = [], f" ({e})"
+        else:
+            why = ""
+        if not tracks:
+            empty.append(f"{src.get('kind', 'folder')} '{src.get('query', '')}'{why}")
+        ids += [int(t["id"]) for t in tracks]
+    if empty:
+        return "REFUSED, nothing sent: " + "; ".join(f"{x}: 0 tracks" for x in empty) + ".", ""
+    if not ids:
+        return "Give sources or track_ids for the set.", ""
+    recent = ""
+    if exclude_recent_hours:
+        kept, dropped = await _h("_recent_split")(ids, exclude_recent_hours)
+        if kept:
+            ids = kept
+            recent = f" Left out {dropped} heard in the last {exclude_recent_hours:g}h." if dropped else ""
+    return ids, recent
+
+
 async def dj_energy_set(
     arc: str,
     sources: list[dict] | None = None,
@@ -374,32 +405,9 @@ async def dj_energy_set(
     are left out and counted: the analyzer (server/scripts/measure_energy.py)
     fills them in a quiet hour, never during a ride.
     """
-    ids: list[int] = [int(t) for t in track_ids or []]
-    empty: list[str] = []
-    for src in sources or []:
-        try:
-            _label, tracks = await _h("_resolve_source")(
-                str(src.get("kind", "folder")), str(src.get("query", "")),
-                recursive=bool(src.get("recursive", True)))
-        except PermissionError as e:
-            return str(e)
-        except Exception as e:  # LookupError / unknown folder: name it
-            tracks, why = [], f" ({e})"
-        else:
-            why = ""
-        if not tracks:
-            empty.append(f"{src.get('kind', 'folder')} '{src.get('query', '')}'{why}")
-        ids += [int(t["id"]) for t in tracks]
-    if empty:
-        return "REFUSED, nothing sent: " + "; ".join(f"{x}: 0 tracks" for x in empty) + "."
-    if not ids:
-        return "Give sources or track_ids for the set."
-    recent = ""
-    if exclude_recent_hours:
-        kept, dropped = await _h("_recent_split")(ids, exclude_recent_hours)
-        if kept:
-            ids = kept
-            recent = f" Left out {dropped} heard in the last {exclude_recent_hours:g}h." if dropped else ""
+    ids, recent = await _collect_ids(sources, track_ids, exclude_recent_hours)
+    if isinstance(ids, str):
+        return ids
     body = {"track_ids": ids, "arc": arc, "minutes": minutes, "tags": tags or [], "seed": seed,
             "min_energy": min_energy, "max_energy": max_energy}
     try:
@@ -424,6 +432,59 @@ async def dj_energy_set(
     e = res.get("energies") or []
     head = (f"{arc} set: {len(ordered)} track(s), ~{res.get('minutes')} min, energy "
             f"{e[0]} -> {max(e)} -> {e[-1]}.{left_out}{recent} ")
+    return head + await _h("dj_mix")(track_ids=ordered, shuffle=False, keep_upcoming=False,
+                                     exclude_recent_hours=0)
+
+
+async def dj_harmonic_set(
+    sources: list[dict] | None = None,
+    track_ids: list[int] | None = None,
+    minutes: float = 0,
+    start_track_id: int | None = None,
+    bpm_tolerance: float = 0.06,
+    arc: str | None = None,
+    seed: int | None = None,
+    exclude_recent_hours: float = 12,
+) -> str:
+    """Build a set where each song hands off in a compatible KEY near the same TEMPO.
+
+    Uses MEASURED tempo (BPM) and key (tracks.bpm / musical_key, Camelot codes:
+    8B = C major, 8A = A minor; same number or one step round the wheel mixes
+    smoothly). Half/double time counts as a tempo match.
+    sources / track_ids: as dj_energy_set. minutes: fill about this long (0 = all).
+    start_track_id: open with this track. bpm_tolerance: 0.06 = within 6%.
+    arc: optionally also follow an energy arc (rise / peak / wind_down / steady).
+
+    It REPLACES what's queued after the current song (never the current song),
+    like dj_energy_set. Tracks without a measured tempo and key are left out and
+    counted: server/scripts/measure_tempo_key.py fills them in a quiet hour.
+    """
+    ids, recent = await _collect_ids(sources, track_ids, exclude_recent_hours)
+    if isinstance(ids, str):
+        return ids
+    body = {"track_ids": ids, "minutes": minutes, "start_track_id": start_track_id,
+            "bpm_tolerance": bpm_tolerance, "arc": arc, "seed": seed}
+    try:
+        res = await _h("_post")("/api/playback/harmonic/order", body)
+    except PermissionError as e:
+        return str(e)
+    except Exception as e:
+        return await _say_http_error(e)
+    ordered = res.get("ordered") or []
+    why = []
+    if res.get("unanalysed"):
+        why.append(f"{res['unanalysed']} without a measured tempo/key yet")
+    if res.get("dropped"):
+        why.append(f"{res['dropped']} banned/non-music/too long")
+    left_out = f" Left out: {', '.join(why)}." if why else ""
+    if not ordered:
+        return "Nothing fits that set, nothing sent." + left_out
+    keys, bpms = res.get("keys") or [], res.get("bpms") or []
+    hops = len(ordered) - 1
+    path = " > ".join(f"{k} {round(b)}" for k, b in list(zip(keys, bpms))[:6])
+    head = (f"Harmonic set: {len(ordered)} track(s), ~{res.get('minutes')} min, "
+            f"{res.get('smooth', 0)} of {hops} hand-offs key- and tempo-compatible. "
+            f"Opens {path}{' ...' if len(ordered) > 6 else ''}.{left_out}{recent} ")
     return head + await _h("dj_mix")(track_ids=ordered, shuffle=False, keep_upcoming=False,
                                      exclude_recent_hours=0)
 

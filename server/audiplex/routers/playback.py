@@ -981,6 +981,41 @@ def energy_arc(body: dict, db: Session = Depends(get_db), user: User = Depends(g
     }
 
 
+@router.post("/harmonic/order", tags=["dj_library"])
+def harmonic_order(body: dict, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Order candidates so each hand-off is key- and tempo-compatible (#1002). Queues nothing.
+
+    body: {track_ids, minutes?, start_track_id?, bpm_tolerance? (0.06 = 6%),
+    arc?: rise|peak|wind_down|steady, seed?}. Tracks without a measured tempo
+    and key are left out and counted; banned, too-long and non-music are dropped.
+    """
+    from audiplex.harmonic import order_harmonic
+    from audiplex.models import Track
+
+    ids = list(dict.fromkeys(int(i) for i in body.get("track_ids") or []))
+    drop = non_music(db, ids) | too_long_for_mix(db, ids) | banned_ids(db)
+    ids = [i for i in ids if i not in drop]
+    rows = db.query(Track.id, Track.bpm, Track.musical_key, Track.duration_seconds, Track.energy).filter(
+        Track.id.in_(ids)).all() if ids else []
+    analysed = [tuple(r) for r in rows if r[1] and r[2]]
+    start = body.get("start_track_id")
+    try:
+        res = order_harmonic(
+            analysed, float(body.get("minutes") or 0), int(start) if start else None,
+            float(body.get("bpm_tolerance") or 0.06), body.get("arc") or None, body.get("seed"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    by_id = {r[0]: r for r in analysed}
+    return {
+        **res,
+        "bpms": [by_id[t][1] for t in res["ordered"]],
+        "keys": [by_id[t][2] for t in res["ordered"]],
+        "minutes": round(sum(by_id[t][3] or 0 for t in res["ordered"]) / 60, 1),
+        "unanalysed": len(rows) - len(analysed),
+        "dropped": len(drop),
+    }
+
+
 # ----- DJ Specs: persistent mix specs with cues (#5477) -----
 
 

@@ -150,6 +150,13 @@ class Track(Base):
     loudness_lufs: Mapped[float | None] = mapped_column(Float, nullable=True)
     # #2806: 0-100 measured energy (loudness + onset density), filled by scripts/measure_energy.py.
     energy: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # #1002: tempo + key from scripts/measure_tempo_key.py. musical_key is a Camelot
+    # code ('8B' = C major, '8A' = A minor); beat_offset = first beat (s) mod one beat.
+    bpm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bpm_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    beat_offset: Mapped[float | None] = mapped_column(Float, nullable=True)
+    musical_key: Mapped[str | None] = mapped_column(String(4), nullable=True)
+    key_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
     added_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 

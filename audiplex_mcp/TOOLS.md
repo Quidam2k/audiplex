@@ -30,6 +30,7 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_ban` / `dj_unban` / `dj_bans` — never pick a track again (every copy of the recording) in mixes and the pool; reversible; lists who banned what and why.
 - `dj_tag` / `dj_untag` / `dj_tags` — mood/vibe tags you apply by ear (never inferred); a tag is also a mix/pool source: `{"kind": "tag", "query": "chill"}`. (#2806)
 - `dj_energy_set` — a set ordered by MEASURED energy (0-100): arc rise / peak / wind_down / steady, optional minutes, tags, energy window. Replaces what's after the current song. Unmeasured tracks are left out and counted. (#2806)
+- `dj_harmonic_set` — a set where each hand-off is in a compatible KEY near the same TEMPO (measured BPM + Camelot key; half/double time counts), optional minutes, start track, bpm_tolerance, energy arc. Replaces what's after the current song. Unanalysed tracks are left out and counted. (#1002)
 - `dj_crossfade` — overlap song ends 0-12 s (0 = off). PC speaker renderer only; the phone answers that it can't. Never for books, streams, clips. (#2806)
 
 ## Rolling pool, specs, cues (a whole ride)

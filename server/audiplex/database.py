@@ -315,6 +315,23 @@ def _migrate_track_energy(engine):  # #2806
         conn.execute(text("ALTER TABLE tracks ADD COLUMN energy INTEGER"))
 
 
+TEMPO_KEY_COLUMNS = (("bpm", "FLOAT"), ("bpm_conf", "FLOAT"), ("beat_offset", "FLOAT"),
+                     ("musical_key", "VARCHAR(4)"), ("key_conf", "FLOAT"))
+
+
+def _migrate_track_tempo_key(engine):  # #1002
+    inspector = inspect(engine)
+    if "tracks" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("tracks")}
+    missing = [(n, t) for n, t in TEMPO_KEY_COLUMNS if n not in columns]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for name, typ in missing:
+            conn.execute(text(f"ALTER TABLE tracks ADD COLUMN {name} {typ}"))
+
+
 def init_db(database_url: str | None = None):
     """Initialize the database engine and session factory.
 
@@ -339,6 +356,7 @@ def init_db(database_url: str | None = None):
     _migrate_track_content_kind(_engine)  # #ride0928 (dj_pair_notes comes from create_all)
     _migrate_track_loudness(_engine)  # #3255
     _migrate_track_energy(_engine)  # #2806 (dj_track_tags comes from create_all)
+    _migrate_track_tempo_key(_engine)  # #1002
     Base.metadata.create_all(bind=_engine)
     return _engine
 
