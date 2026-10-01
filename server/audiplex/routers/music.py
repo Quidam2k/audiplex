@@ -900,3 +900,163 @@ def list_track_stats(
     """Completion rates and skip positions for the CALLER (see
     [most_played_for] on why agents must use the owner-scoped read instead)."""
     return recording_stats_view(db, user.id, limit, min_starts)
+
+
+# ---- whole-library search (#3696) ----
+from pydantic import BaseModel as _BaseModel  # #3696
+
+
+class SearchResults(_BaseModel):  # #3696
+    artists: list[ArtistSchema] = []
+    albums: list[AlbumSummary] = []
+    tracks: list[TrackSchema] = []
+
+
+SEARCH_MIN_CHARS = 2  # #3696
+FUZZY_BELOW_HITS = 5  # #3696: typo pass only when SQL found fewer than this
+FUZZY_CUTOFF = 75  # #3696: 80 misses "beatels" -> "the beatles" (WRatio 77)
+
+# #3696: signature of the library when built, and {kind: (ids, processed strings)}
+_search_cache: dict = {"sig": None, "data": None}
+
+
+def _like_escape(word: str) -> str:  # #3696
+    return word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _all_words(cols, words: list[str]):  # #3696
+    """AND over words; each word may hit any of `cols` (case-insensitive, literal)."""
+    from sqlalchemy import and_, or_
+
+    return and_(*[
+        or_(*[func.lower(c).like(f"%{_like_escape(w.lower())}%", escape="\\") for c in cols])
+        for w in words
+    ])
+
+
+def _rank(col, q: str):  # #3696: exact, then prefix, then the rest
+    from sqlalchemy import case
+
+    lq = q.lower()
+    return case(
+        (func.lower(col) == lq, 0),
+        (func.lower(col).like(f"{_like_escape(lq)}%", escape="\\"), 1),
+        else_=2,
+    )
+
+
+def _search_signature(db: Session) -> tuple:  # #3696
+    """Cheap change detector: rebuilds after a rescan, not per keystroke."""
+    a = db.query(func.count(Artist.id), func.max(Artist.id)).one()
+    al = db.query(func.count(Album.id), func.max(Album.id), func.max(Album.updated_at)).one()
+    t = db.query(func.count(Track.id), func.max(Track.id), func.max(Track.updated_at)).one()
+    return (tuple(a), tuple(al), tuple(t))
+
+
+def _build_search_cache(db: Session) -> dict:  # #3696
+    from rapidfuzz.utils import default_process
+
+    def pack(rows):
+        ids, strs = [], []
+        for rid, *parts in rows:
+            ids.append(rid)
+            strs.append(default_process(" ".join(p for p in parts if p)))
+        return ids, strs
+
+    return {
+        "artists": pack(db.query(Artist.id, Artist.name).all()),
+        "albums": pack(
+            db.query(Album.id, Album.title, Artist.name)
+            .outerjoin(Artist, Album.artist_id == Artist.id).all()
+        ),
+        "tracks": pack(
+            db.query(Track.id, Track.title, Artist.name)
+            .outerjoin(Artist, Track.artist_id == Artist.id).all()
+        ),
+    }
+
+
+def _get_search_cache(db: Session) -> dict:  # #3696
+    sig = _search_signature(db)
+    if _search_cache["sig"] != sig or _search_cache["data"] is None:
+        _search_cache["data"] = _build_search_cache(db)
+        _search_cache["sig"] = sig
+    return _search_cache["data"]
+
+
+def _fuzzy_ids(db: Session, kind: str, q: str, limit: int, exclude: set[int]) -> list[int]:  # #3696
+    from rapidfuzz import fuzz, process
+    from rapidfuzz.utils import default_process
+
+    ids, strs = _get_search_cache(db)[kind]
+    # Cache strings are pre-processed with default_process, so the query is
+    # processed once here: same scores as processor=default_process, without
+    # re-processing 37k rows per request.
+    hits = process.extract(
+        default_process(q), strs, scorer=fuzz.WRatio, processor=None,
+        score_cutoff=FUZZY_CUTOFF, limit=limit + len(exclude),
+    )
+    out = [ids[idx] for _s, _score, idx in hits if ids[idx] not in exclude]
+    return out[:limit]
+
+
+def _ordered(rows, ids: list[int]) -> list:  # #3696
+    by_id = {r.id: r for r in rows}
+    return [by_id[i] for i in ids if i in by_id]
+
+
+def search_music(db: Session, q: str, limit: int = 50) -> SearchResults:  # #3696
+    q = (q or "").strip()
+    if len(q) < SEARCH_MIN_CHARS:
+        return SearchResults()
+    words = q.split()
+
+    artist_ids = [i for (i,) in (
+        db.query(Artist.id).filter(_all_words([Artist.name], words))
+        .order_by(_rank(Artist.name, q), func.lower(Artist.name)).limit(limit)
+    )]
+    album_ids = [i for (i,) in (
+        db.query(Album.id).outerjoin(Artist, Album.artist_id == Artist.id)
+        .filter(_all_words([Album.title, Artist.name], words))
+        .order_by(_rank(Album.title, q), func.lower(Album.title)).limit(limit)
+    )]
+    track_ids = [i for (i,) in (
+        db.query(Track.id)
+        .outerjoin(Artist, Track.artist_id == Artist.id)
+        .outerjoin(Album, Track.album_id == Album.id)
+        .filter(_all_words([Track.title, Artist.name, Album.title], words))
+        .order_by(_rank(Track.title, q), func.lower(Track.title), Track.id).limit(limit)
+    )]
+
+    if len(artist_ids) < FUZZY_BELOW_HITS:
+        artist_ids += _fuzzy_ids(db, "artists", q, limit - len(artist_ids), set(artist_ids))
+    if len(album_ids) < FUZZY_BELOW_HITS:
+        album_ids += _fuzzy_ids(db, "albums", q, limit - len(album_ids), set(album_ids))
+    if len(track_ids) < FUZZY_BELOW_HITS:
+        track_ids += _fuzzy_ids(db, "tracks", q, limit - len(track_ids), set(track_ids))
+
+    artists = _ordered(db.query(Artist).filter(Artist.id.in_(artist_ids)).all(), artist_ids) if artist_ids else []
+    albums = _ordered(
+        db.query(Album).options(selectinload(Album.artist)).filter(Album.id.in_(album_ids)).all(), album_ids
+    ) if album_ids else []
+    tracks = _ordered(
+        db.query(Track).options(selectinload(Track.artist)).filter(Track.id.in_(track_ids)).all(), track_ids
+    ) if track_ids else []
+    return SearchResults(
+        artists=[ArtistSchema.model_validate(a) for a in artists],
+        albums=[_album_summary(a) for a in albums],
+        tracks=[_track_schema(t) for t in tracks],
+    )
+
+
+@router.get("/search", response_model=SearchResults)  # #3696
+def search_library(
+    q: str = Query(""),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Whole-library search: every word must hit (title/artist/album), with a
+    cached typo-tolerant pass when the exact pass finds little. Like the other
+    browse endpoints it does not filter content_kind."""
+    return search_music(db, q, limit)

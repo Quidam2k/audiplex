@@ -218,7 +218,7 @@ async function pickPlaylist(trackIds) {
     }, `${p.name} (${p.track_count})`)));
   if (!state.playlists.length) list.append(el("p", { class: "muted" }, "No playlists yet."));
   $("pick-new").value = "";
-  $("pick-playlist").showModal();
+  openDialog($("pick-playlist"));  // #3696
 }
 
 $("pick-create").addEventListener("click", async (ev) => {
@@ -247,16 +247,7 @@ function setCrumbs(crumbs) {
 
 function render(nodes) {
   $("content").replaceChildren(...[nodes].flat());
-  applyFilter();
 }
-
-function applyFilter() {
-  const f = $("filter").value.trim().toLowerCase();
-  for (const row of $("content").querySelectorAll("[data-filter]")) {
-    row.hidden = Boolean(f) && !row.dataset.filter.includes(f);
-  }
-}
-$("filter").addEventListener("input", applyFilter);
 
 function actionBar(trackIds, extra) {
   return el("div", { class: "actions" },
@@ -293,12 +284,68 @@ function linkRow(label, sub, go, fav) {
     fav || null);
 }
 
-async function withView(fn) {
+// ---- history (#3696): browser Back steps through the app's own views ----------
+//
+// Every view change goes through withView(), which pushes one history entry and
+// remembers the view's render function in memory (views are closures, so there
+// is no URL routing; after a reload Back leaves the page as before). An open
+// dialog owns one extra entry: Back closes it, and closing it any other way
+// pops that entry. history.back() is async, so withView() waits for that pop
+// before pushing, which keeps the stack from losing or doubling an entry.
+
+const nav = { views: new Map(), seq: 0, cur: 0, pendingBack: null, resolveBack: null };
+
+function navRecord(fn, replace) {
+  const first = !nav.cur;
+  const id = replace && !first ? nav.cur : ++nav.seq;
+  nav.views.set(id, { fn, tab: state.tab });
+  history[replace || first ? "replaceState" : "pushState"]({ v: id }, "");
+  nav.cur = id;
+}
+
+async function withView(fn, opts = {}) {
+  if (nav.pendingBack) await nav.pendingBack;
+  if (!opts.fromHistory) navRecord(fn, opts.replace);
   state.view = fn;
   clearInterval(state.videoTimer);
   $("content").replaceChildren(el("p", { class: "muted" }, "Loading…"));
   await fn();
 }
+
+function openDialog(dlg) {
+  dlg.showModal();
+  history.pushState({ v: nav.cur, modal: true }, "");
+  dlg.ownsHistory = true;
+}
+
+for (const dlg of document.querySelectorAll("dialog")) {
+  dlg.addEventListener("close", () => {
+    if (!dlg.ownsHistory) return;  // closed by Back: its entry is already gone
+    dlg.ownsHistory = false;
+    nav.pendingBack = new Promise((res) => { nav.resolveBack = res; });
+    history.back();
+  });
+}
+
+window.addEventListener("popstate", (ev) => {
+  if (nav.resolveBack) {  // the pop we asked for when a dialog closed
+    nav.resolveBack();
+    nav.resolveBack = nav.pendingBack = null;
+    return;
+  }
+  const open = document.querySelector("dialog[open]");
+  if (open) {
+    open.ownsHistory = false;
+    open.close();
+  }
+  const id = ev.state && ev.state.v;
+  if (ev.state && ev.state.modal) return;  // Forward onto a closed dialog's entry
+  const entry = nav.views.get(id);
+  if (!entry || id === nav.cur) return;
+  nav.cur = id;
+  setTabUI(entry.tab);
+  withView(entry.fn, { fromHistory: true });
+});
 
 // Library: artists -> artist -> album
 async function showArtists() {
@@ -398,7 +445,7 @@ async function showPlaylist(id) {
   const ids = p.tracks.map((t) => t.id);
   const save = async (trackIds, msg) => {
     const ok = await guard(() => api("PUT", `/api/music/playlists/${id}`, { track_ids: trackIds }), msg);
-    if (ok) withView(() => showPlaylist(id));
+    if (ok) withView(() => showPlaylist(id), { replace: true });  // #3696 same view
   };
   const move = (i, d) => {
     const next = ids.slice();
@@ -412,7 +459,7 @@ async function showPlaylist(id) {
           const n = prompt("Rename playlist", p.name);
           if (n && n.trim()) {
             const ok = await guard(() => api("PUT", `/api/music/playlists/${id}`, { name: n.trim() }), "Renamed");
-            if (ok) withView(() => showPlaylist(id));
+            if (ok) withView(() => showPlaylist(id), { replace: true });  // #3696 same view
           }
         },
       }, "Rename"),
@@ -421,7 +468,7 @@ async function showPlaylist(id) {
         onclick: async () => {
           if (!confirm(`Delete the playlist "${p.name}"? The songs stay in your library.`)) return;
           const ok = await guard(() => api("DELETE", `/api/music/playlists/${id}`), "Playlist deleted");
-          if (ok) withView(showPlaylists);
+          if (ok) withView(showPlaylists, { replace: true });  // #3696 deleted: no way back
         },
       }, "Delete"),
     ]),
@@ -570,7 +617,7 @@ async function openMusicVideo(track) {
   $("mv-subs").replaceChildren();
   $("mv-up").hidden = true;
   mvPaint();
-  $("music-video").showModal();
+  openDialog($("music-video"));  // #3696
   const est = await mvLoadEstimate();
   if (!est) return;
   $("mv-direction").value = lsGet("audiplex.mv.direction") || est.last_direction || "";
@@ -650,13 +697,58 @@ const TABS = {
   videos: renderVideosView,
 };
 
-function selectTab(tab) {
+function setTabUI(tab) {
   state.tab = tab;
   for (const b of document.querySelectorAll(".tab")) {
     b.setAttribute("aria-selected", b.dataset.tab === tab ? "true" : "false");
   }
+}
+
+function selectTab(tab) {
+  setTabUI(tab);
   $("filter").value = "";
   withView(TABS[tab]);
+}
+
+// ---- search (#3696): the box searches the whole library ---------------------
+
+let searchTimer = null;
+let searchSeq = 0;
+
+$("filter").addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(runSearch, 300);
+});
+
+function runSearch() {
+  const text = $("filter").value.trim();
+  const inSearch = Boolean(state.view && state.view.isSearch);
+  if (text.length < 2) {
+    if (inSearch && !text) history.back();  // cleared: back to where he was
+    return;
+  }
+  const fn = () => showSearch(text);
+  fn.isSearch = true;
+  // one history entry per search: later keystrokes refine it in place
+  withView(fn, { replace: inSearch });
+}
+
+async function showSearch(text) {
+  if ($("filter").value.trim() !== text) $("filter").value = text;
+  const seq = ++searchSeq;
+  const r = await guard(() => get(`/api/music/search?q=${q(text)}&limit=50`));
+  if (!r || seq !== searchSeq) return;  // a newer search superseded this one
+  const trail = [{ label: `Search: ${text}`, go: () => withView(() => showSearch(text)) }];
+  setCrumbs([{ label: `Search: ${text}` }]);
+  const section = (title, rows) => (rows.length ? [el("h3", {}, title), el("ul", { class: "list" }, rows)] : []);
+  const out = [
+    ...section("Artists", r.artists.map((a) =>
+      linkRow(a.name, null, () => withView(() => showArtist(a.id)), favButton("artist", a.id)))),
+    ...section("Albums", r.albums.map((al) =>
+      linkRow(al.title, al.artist_name, () => withView(() => showAlbum(al.id, trail)), favButton("album", al.id)))),
+    ...(r.tracks.length ? [el("h3", {}, "Songs"), trackList(r.tracks)] : []),
+  ];
+  render(out.length ? out : el("p", { class: "muted" }, `Nothing in the library matches "${text}".`));
 }
 
 for (const b of document.querySelectorAll(".tab")) {
