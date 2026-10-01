@@ -447,6 +447,9 @@ class PlaybackState(BaseModel):
     # before it sends a command the build doesn't know. None from older builds.
     app_version_name: str | None = None
     app_version_code: int | None = None
+    # #3601: who built the current queue: "dj" (a playback-bus command) or
+    # "manual" (a tap in the app). None from builds that predate it.
+    queue_origin: str | None = None
 
 
 class ClientLogEntry(BaseModel):

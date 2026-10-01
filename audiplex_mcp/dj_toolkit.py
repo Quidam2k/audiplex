@@ -18,7 +18,7 @@ def register(mcp, ns: dict) -> None:
     _NS = ns
     for fn in (dj_upcoming, dj_remove, dj_insert, dj_swap, dj_pool_lane,
                dj_ban, dj_unban, dj_bans, dj_tag, dj_untag, dj_tags, dj_energy_set,
-               dj_harmonic_set, dj_crossfade, dj_star):  # #3576 dj_star
+               dj_harmonic_set, dj_crossfade, dj_star, dj_resume):  # #3576 dj_star, #3601 dj_resume
         mcp.tool()(fn)
 
 
@@ -346,6 +346,57 @@ async def dj_star(track_ids: list[int], stars: float, words: str = "", persona: 
     if res.get("unknown"):
         out += f" Unknown id(s) {res['unknown']}."
     return out
+
+
+async def dj_resume(play: bool = False) -> str:
+    """Put Todd's last music queue back on the phone, at the song and spot he
+    left it (#3601). The queue lives only in the phone's memory, so after a
+    pause plus the app being closed it is gone from the app; the server keeps
+    a copy. Use when he says "put my music back" / "where was I".
+
+    play=False (default): restore PAUSED. Nothing starts; he sees it in the
+        app and hits play. Phones older than 1.0.49 can't do a silent restore
+        and will say so; then offer play=True.
+    play=True: restore and start playing now (talk-guarded like any start)."""
+    try:
+        snap = await _h("_get")("/api/playback/resume")
+    except PermissionError as e:
+        return str(e)
+    except Exception as e:
+        if getattr(getattr(e, "response", None), "status_code", None) == 404:
+            return "No saved queue to put back: the phone hasn't reported one since this was added."
+        return await _say_http_error(e)
+    ids = list(snap.get("track_ids") or [])[int(snap.get("index") or 0):]
+    if not ids:
+        return "The saved queue has no tracks left after where he stopped."
+    pos = int(snap.get("position_ms") or 0)
+    what = " - ".join(x for x in (snap.get("artist"), snap.get("title")) if x) or f"track {ids[0]}"
+    mins = round(float(snap.get("age_seconds") or 0) / 60)
+    where = f"{what} at {pos // 60000}:{pos // 1000 % 60:02d}, {len(ids)} track(s) to go (saved {mins} min ago)"
+    if play:
+        data = await _h("_enqueue")("play_now", {"track_ids": ids})
+        if not isinstance(data, dict):
+            return data
+        if pos > 5000:
+            await _h("_enqueue")("seek", {"position_ms": pos})
+        return f"Restored and playing: {where}."
+    head, rest = ids[:40], ids[40:]
+    data = await _h("_enqueue")("activate", {"track_ids": head, "position_ms": pos, "playing": False})
+    if not isinstance(data, dict):
+        return data
+    ack = await _h("_await_ack")(data["id"], 12.0)
+    if ack is None:
+        return f"Sent the restore but the phone hasn't answered yet: {where}."
+    if ack.get("ack_status") == "unknown_type":
+        return ("This phone build can't restore without playing (needs 1.0.49 or later). "
+                f"Nothing changed. Saved: {where}. dj_resume(play=True) restores and starts it.")
+    if ack.get("ack_status") not in ("ok", "partial"):
+        return f"Restore not done ({ack.get('ack_status')}: {ack.get('ack_detail') or ''}). Saved: {where}."
+    if rest:
+        more = await _h("_enqueue")("queue", {"track_ids": rest})
+        if not isinstance(more, dict):
+            return f"Restored paused: {where}, but the rest didn't queue: {more}"
+    return f"Restored, paused, in the app: {where}. He presses play to go on."
 
 
 async def dj_untag(track_ids: list[int], tags: list[str] | None = None) -> str:

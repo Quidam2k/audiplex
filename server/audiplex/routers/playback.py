@@ -209,6 +209,25 @@ def post_state(
     return state
 
 
+@router.get("/resume")
+def get_resume(
+    device_id: str | None = Query(None),
+    user: User = Depends(get_current_user),
+):
+    """The last real music queue a renderer reported, persisted (#3601).
+
+    The queue otherwise lives only in the phone's RAM: after a pause plus an
+    app kill it was gone, and a 1,300-track DJ mix can't be rebuilt by hand.
+    dj_resume and the app's own restore read this. 404 when nothing saved.
+    """
+    from audiplex.playback_bus import read_last_queues
+
+    snap = read_last_queues().get(device_id or LEGACY_DEVICE_ID)
+    if not snap:
+        raise HTTPException(status_code=404, detail="No saved queue for that device.")
+    return {**snap, "age_seconds": round(time.time() - float(snap.get("at") or 0), 1)}
+
+
 @router.get("/state")
 def get_state(
     device_id: str | None = Query(None),

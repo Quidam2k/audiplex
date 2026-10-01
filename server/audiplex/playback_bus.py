@@ -119,6 +119,14 @@ DIAG_LOG_PATH = Path(
     os.environ.get("AUDIPLEX_DIAG_LOG")
     or Path(__file__).resolve().parent.parent / "data" / "playback-diag.jsonl"
 )
+# #3601: the last real music queue each renderer reported, so a queue the DJ
+# built survives the phone app being killed (it lives only in phone RAM) and a
+# server restart. One small JSON doc, written atomically.
+LAST_QUEUE_PATH = Path(
+    os.environ.get("AUDIPLEX_LAST_QUEUE")
+    or Path(__file__).resolve().parent.parent / "data" / "last_queue.json"
+)
+LAST_QUEUE_REFRESH_SECONDS = 30.0  # #3601: keep position fresh while playing
 DIAG_LOG_MAX_BYTES = 5 * 1024 * 1024
 DIAG_LOG_BACKUPS = 3
 
@@ -184,6 +192,7 @@ class DeviceRecord:
 class PlaybackBus:
     def __init__(self, seq_start: Optional[int] = None) -> None:
         self._commands: "OrderedDict[int, PlaybackCommandRecord]" = OrderedDict()
+        self._saved_queue_at: dict[str, tuple] = {}  # #3601
         self._arrival: Optional[asyncio.Event] = None
         # Command ids start at wall-clock ms, not 0 (#2843). They live only in
         # memory, so a counter from 0 hands out 1, 2, ... again after every
@@ -577,10 +586,29 @@ class PlaybackBus:
                 "queue_length": state.get("queue_length"),
             })
 
+        self._maybe_save_queue(state, device_key)  # #3601
+
         # Hook: top_up the DJ pool if it's running (#5495, item 1)
         self._maybe_top_up_pool(state, device_key)
         # Same place: DJ trigger cues at track boundaries (#5480 #5515)
         self._maybe_run_triggers(state, device_key)
+
+    def _maybe_save_queue(self, state: dict[str, Any], device_key: str) -> None:
+        """Persist a resume snapshot on a track/index/play change, or every
+        LAST_QUEUE_REFRESH_SECONDS while playing (#3601). Never overwrites a
+        real queue with an empty one: a relaunched app reports nothing, and
+        that report is exactly when the snapshot is needed."""
+        snap = queue_snapshot(state)
+        if snap is None:
+            return
+        now = time.time()
+        last = self._saved_queue_at.get(device_key)
+        if last and last[0] == _state_key(state) and (
+            not state.get("playing") or now - last[1] < LAST_QUEUE_REFRESH_SECONDS
+        ):
+            return
+        self._saved_queue_at[device_key] = (_state_key(state), now)
+        _save_last_queue(device_key, {**snap, "device": device_key, "at": now})
 
     def _renderer_id(self) -> str:
         """The device whose now-playing counts: the live active one, else the phone."""
@@ -756,6 +784,59 @@ def read_link_history(limit: int = 50) -> list[dict[str, Any]]:
         except ValueError:
             continue
     return out
+
+
+def queue_snapshot(state: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """What it takes to put this music queue back (#3601), or None when there
+    is nothing replayable (empty, a book, only clips/streams).
+
+    Real tracks only (voice clips and streams report non-positive ids). If the
+    current item is a clip, resume at the next real track from its start.
+    """
+    queue = sorted(
+        (q for q in state.get("queue") or [] if isinstance(q, dict)),
+        key=lambda q: q.get("index") or 0,
+    )
+    real = [q for q in queue if isinstance(q.get("id"), int) and q["id"] > 0]
+    if not real or state.get("book"):
+        return None
+    qi = state.get("queue_index") or 0
+    track = state.get("track") or {}
+    current = track.get("id") if isinstance(track, dict) else None
+    at = next((n for n, q in enumerate(real) if (q.get("index") or 0) >= qi), len(real) - 1)
+    on_current = (real[at].get("index") or 0) == qi and real[at]["id"] == current
+    return {
+        "track_ids": [q["id"] for q in real],
+        "index": at,
+        "track_id": real[at]["id"],
+        "title": real[at].get("title"),
+        "artist": real[at].get("artist"),
+        "position_ms": int(state.get("position_ms") or 0) if on_current else 0,
+        "playing": bool(state.get("playing")),
+        "origin": state.get("queue_origin"),
+    }
+
+
+def _save_last_queue(device_key: str, snap: dict[str, Any]) -> None:
+    """Atomic write (temp + rename): a restart mid-write can't corrupt it (#3601)."""
+    try:
+        data = read_last_queues()
+        data[device_key] = snap
+        LAST_QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = LAST_QUEUE_PATH.with_name(LAST_QUEUE_PATH.name + ".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, LAST_QUEUE_PATH)
+    except OSError:
+        pass
+
+
+def read_last_queues() -> dict[str, Any]:
+    """{device: snapshot} as last persisted; {} when none or unreadable (#3601)."""
+    try:
+        data = json.loads(LAST_QUEUE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _state_key(state: dict[str, Any]) -> tuple:
