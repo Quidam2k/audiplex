@@ -37,6 +37,8 @@ import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException  // #3601
+import kotlinx.coroutines.flow.first  // #3601
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -109,7 +111,11 @@ data class MusicQueueState(
     val albumId: Int?,
     val playlistId: Int?,
     val title: String,
-    val currentIndex: Int = 0
+    val currentIndex: Int = 0,
+    // #3601: who built this queue (ORIGIN_DJ / ORIGIN_MANUAL); null when
+    // adopted from a session that predates the stamp. Only DJ queues come
+    // back on their own after an app kill.
+    val origin: String? = ORIGIN_MANUAL
 )
 
 @Singleton
@@ -498,7 +504,15 @@ class PlaybackManager @Inject constructor(
      */
     fun refreshFromController() {
         ensureController { ctrl ->
+            // #3601: a session released while we were away (app swiped while
+            // paused) leaves our music state pointing at nothing. Drop it so the
+            // UI isn't a dead row, then let the restore below bring it back.
+            if (ctrl.mediaItemCount == 0 && _playerKind.value == PlayerKind.Music && !ctrl.isPlaying) {
+                _currentMusic.value = null
+                _playerKind.value = null
+            }
             hydrateFromController(ctrl)
+            restoreLastQueueIfIdle(ctrl)  // #3601
             if (ctrl.mediaItemCount == 0) {
                 _controllerMetadata.value = null
             } else {
@@ -543,7 +557,19 @@ class PlaybackManager @Inject constructor(
         controller?.let { onReady(it); return }
 
         val token = SessionToken(context, ComponentName(context, PlaybackService::class.java))
-        val future = MediaController.Builder(context, token).buildAsync()
+        val future = MediaController.Builder(context, token)
+            .setListener(object : MediaController.Listener {
+                // #3601: the session was released (service stopped). Forget the
+                // dead controller so the next call builds a live one and
+                // re-hydrates, instead of sending play/pause into nothing.
+                override fun onDisconnected(controller: MediaController) {
+                    if (this@PlaybackManager.controller === controller) {
+                        this@PlaybackManager.controller = null
+                        controllerFuture = null
+                    }
+                }
+            })
+            .buildAsync()
         controllerFuture = future
         future.addListener({
             val ctrl = future.get()
@@ -586,10 +612,15 @@ class PlaybackManager @Inject constructor(
         if (_playerKind.value != null || _currentMusic.value != null || _currentBook.value != null) return
         val count = ctrl.mediaItemCount
         if (count == 0) return
-        val items = (0 until count).mapNotNull { i ->
+        // #3601: DJ clips stay in as placeholders. Dropping them shifted every
+        // later index, so the wrong song showed as current after a clip.
+        var origin: String? = null
+        val items = (0 until count).map { i ->
             val mi = ctrl.getMediaItemAt(i)
-            val trackId = mi.mediaId.removePrefix("track:").toIntOrNull() ?: return@mapNotNull null
             val md = mi.mediaMetadata
+            val trackId = mi.mediaId.removePrefix("track:").toIntOrNull()
+                ?: return@map placeholderItem(md.title?.toString() ?: "DJ break")
+            if (origin == null) origin = md.extras?.getString(EXTRA_QUEUE_ORIGIN)
             val extras = md.extras
             val albumId = extras?.getInt("albumId") ?: 0
             MusicQueueItem(
@@ -608,7 +639,7 @@ class PlaybackManager @Inject constructor(
                 albumHasCover = extras?.getBoolean("albumHasCover") ?: false,
             )
         }
-        if (items.isEmpty()) return  // not a music timeline — leave it be
+        if (items.none { it.track.id > 0 }) return  // not a music timeline — leave it be (#3601)
         val idx = ctrl.currentMediaItemIndex.coerceIn(0, items.lastIndex)
         _currentMusic.value = MusicQueueState(
             items = items,
@@ -616,6 +647,7 @@ class PlaybackManager @Inject constructor(
             playlistId = null,
             title = "Now playing",
             currentIndex = idx,
+            origin = origin,  // #3601
         )
         _playerKind.value = PlayerKind.Music
         _isPlaying.value = ctrl.isPlaying
@@ -633,6 +665,78 @@ class PlaybackManager @Inject constructor(
         )
     }
 
+    /** A queue row for a DJ clip/stream item, so indices match the session (#3601). */
+    private fun placeholderItem(title: String) = MusicQueueItem(
+        track = TrackSchema(
+            id = nextSyntheticTrackId--, title = title, albumId = -1, artistId = -1,
+            artistName = "DJ", discNumber = 0, trackNumber = 0, durationSeconds = 0.0,
+        ),
+        albumId = -1,
+        albumTitle = "DJ break",
+        albumHasCover = false,
+    )
+
+    private var restoreTried = false  // #3601: once per process
+
+    /**
+     * Put the last DJ-built queue back, PAUSED, when the app comes up with
+     * nothing loaded and no live session (#3601).
+     *
+     * The queue lives only in this process's memory: pause, then the app gets
+     * closed, and a 1,300-track DJ mix was gone with no way to rebuild it. The
+     * server keeps the last queue the phone reported; this reloads it at the
+     * same song and spot without making a sound. Todd's own queues come back
+     * only if he turned that on in Settings, so by default they behave as before.
+     */
+    private fun restoreLastQueueIfIdle(ctrl: MediaController) {
+        if (restoreTried) return
+        if (_playerKind.value != null || _currentMusic.value != null || _currentBook.value != null) return
+        if (ctrl.mediaItemCount > 0) return
+        restoreTried = true
+        scope.launch {
+            try {
+                val api = apiHolder.api ?: return@launch
+                val snap = api.getResume()
+                val allowManual = settingsStore.restoreManualQueues.first()
+                val ids = idsToRestore(snap, allowManual)
+                if (ids.isEmpty()) return@launch
+                val head = resolveConcurrently(ids.take(RESTORE_HEAD)) { api.getTrack(it) }
+                if (head.isEmpty()) return@launch
+                // Something started while we were fetching: it wins.
+                if (_playerKind.value != null || (controller?.mediaItemCount ?: 0) > 0) return@launch
+                val origin = snap.origin ?: ORIGIN_DJ
+                val startMs = if (head.first().id == ids.first()) snap.positionMs else 0L
+                playTracks(
+                    tracks = head,
+                    baseUrl = apiHolder.baseUrl,
+                    title = if (origin == ORIGIN_DJ) "DJ Queue" else "Now playing",
+                    albumLookup = emptyMap(),
+                    startPositionMs = startMs,
+                    origin = origin,
+                    play = false,
+                )
+                clientLog.report(
+                    level = "info",
+                    event = "queue_restored",
+                    message = "restored ${ids.size} track(s) paused at ${head.first().id}",
+                    detail = mapOf("origin" to origin, "position_ms" to startMs.toString()),
+                )
+                val rest = ids.drop(RESTORE_HEAD)
+                if (rest.isNotEmpty()) {
+                    val tail = resolveConcurrently(rest) { api.getTrack(it) }
+                    // Only if nothing replaced the restored queue meanwhile.
+                    if (_currentMusic.value?.title == (if (origin == ORIGIN_DJ) "DJ Queue" else "Now playing")) {
+                        enqueueTracks(tail, apiHolder.baseUrl)
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 404 = nothing saved; anything else just means no restore.
+            }
+        }
+    }
+
     private fun buildMediaItem(uri: String, book: BookDetail, displayTitle: String): MediaItem {
         val coverUrl = if (book.hasCover) AudiplexApi.coverUrl(currentBaseUrl, book.id) else null
         return MediaItem.Builder()
@@ -648,7 +752,7 @@ class PlaybackManager @Inject constructor(
             .build()
     }
 
-    private fun buildMusicMediaItem(item: MusicQueueItem): MediaItem {
+    private fun buildMusicMediaItem(item: MusicQueueItem, origin: String? = null): MediaItem {
         val uri = AudiplexApi.musicStreamUrl(currentBaseUrl, item.track.id)
         val coverUrl = if (item.albumHasCover)
             AudiplexApi.musicCoverUrl(currentBaseUrl, item.albumId)
@@ -659,6 +763,7 @@ class PlaybackManager @Inject constructor(
         // queue (correct albumId → artwork, duration) after a process/Activity
         // restart — not a lossy title-only placeholder (#3105/#993).
         val extras = android.os.Bundle().apply {
+            if (origin != null) putString(EXTRA_QUEUE_ORIGIN, origin)  // #3601
             putInt("albumId", item.albumId)
             putBoolean("albumHasCover", item.albumHasCover)
             putString("albumTitle", item.albumTitle)
@@ -818,7 +923,10 @@ class PlaybackManager @Inject constructor(
         albumLookup: Map<Int, Pair<String, Boolean>>,
         shuffle: Boolean = false,
         // Transfer handoff (#2021): resume the first track mid-way.
-        startPositionMs: Long = 0L
+        startPositionMs: Long = 0L,
+        // #3601: only the DJ calls this; play=false loads the queue paused.
+        origin: String = ORIGIN_DJ,
+        play: Boolean = true
     ) {
         val items = tracks.map { track ->
             val (albumTitle, hasCover) = albumLookup[track.albumId] ?: ("Unknown" to false)
@@ -837,7 +945,9 @@ class PlaybackManager @Inject constructor(
             title = title,
             startIndex = 0,
             shuffle = shuffle,
-            startPositionMs = startPositionMs
+            startPositionMs = startPositionMs,
+            origin = origin,  // #3601
+            play = play
         )
     }
 
@@ -1032,7 +1142,9 @@ class PlaybackManager @Inject constructor(
         title: String,
         startIndex: Int,
         shuffle: Boolean = false,
-        startPositionMs: Long = 0L
+        startPositionMs: Long = 0L,
+        origin: String = ORIGIN_MANUAL,  // #3601
+        play: Boolean = true  // #3601: false = load paused (restore after a kill)
     ) {
         if (items.isEmpty()) return
         // Clear audiobook state, post final stop for any prior music
@@ -1048,19 +1160,24 @@ class PlaybackManager @Inject constructor(
             albumId = albumId,
             playlistId = playlistId,
             title = title,
-            currentIndex = safeIndex
+            currentIndex = safeIndex,
+            origin = origin  // #3601
         )
         _playerKind.value = PlayerKind.Music
         lastReportedTrackIndex = -1
 
         ensureController { ctrl ->
             applyAudioAttributesFor(ctrl, PlayerKind.Music) // #3099/#991: agent speech ducks music
-            val mediaItems = items.map { buildMusicMediaItem(it) }
+            val mediaItems = items.map { buildMusicMediaItem(it, origin) }  // #3601
             // Stage the start index in the timeline setup; setting shuffle
             // before play() ensures the first-track pick is shuffled too.
             ctrl.setMediaItems(mediaItems, safeIndex, startPositionMs)
             ctrl.shuffleModeEnabled = shuffle
             ctrl.prepare()
+            if (!play) {  // #3601: restored paused; nothing started, so no start stat
+                _isPlaying.value = false
+                return@ensureController
+            }
             ctrl.play()
             // Manually fire start for the initial track since onMediaItemTransition
             // may have already fired for the same index before we updated state.

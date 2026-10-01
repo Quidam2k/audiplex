@@ -54,6 +54,7 @@ fun SettingsScreen(
     val updateState by viewModel.updateState.collectAsState()
     val downloadOnCellular by viewModel.downloadOnCellular.collectAsState()
     val djLinkEnabled by viewModel.djLinkEnabled.collectAsState()
+    val restoreManualQueues by viewModel.restoreManualQueues.collectAsState()  // #3601
     val musicVolume by viewModel.musicVolume.collectAsState()
     val audiobookVolume by viewModel.audiobookVolume.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -214,6 +215,30 @@ fun SettingsScreen(
                 Switch(
                     checked = djLinkEnabled,
                     onCheckedChange = { viewModel.toggleDjLink(context) }
+                )
+            }
+
+            // #3601: DJ queues always come back after the app is closed; this
+            // extends that to queues Todd started himself.
+            Spacer(Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Bring back my own queues too", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "When the app was closed, a DJ's queue comes back paused where " +
+                            "you left it. Turn this on to do the same for queues you started.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(
+                    checked = restoreManualQueues,
+                    onCheckedChange = { viewModel.toggleRestoreManualQueues() }
                 )
             }
 

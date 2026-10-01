@@ -390,5 +390,18 @@ data class PlaybackStateDto(
     val queue: List<QueueTrackDto> = emptyList(),
     val volume: Float? = null,
     @Json(name = "app_version_name") val appVersionName: String = "",
-    @Json(name = "app_version_code") val appVersionCode: Int = 0
+    @Json(name = "app_version_code") val appVersionCode: Int = 0,
+    // #3601: "dj" or "manual" — lets the server-side resume snapshot say who
+    // built the queue, so only DJ queues come back on their own after a kill.
+    @Json(name = "queue_origin") val queueOrigin: String? = null
+)
+
+/** The last music queue the server saw this phone play (#3601, GET api/playback/resume). */
+@JsonClass(generateAdapter = true)
+data class ResumeSnapshotDto(
+    @Json(name = "track_ids") val trackIds: List<Int> = emptyList(),
+    val index: Int = 0,
+    @Json(name = "position_ms") val positionMs: Long = 0L,
+    val origin: String? = null,
+    @Json(name = "age_seconds") val ageSeconds: Double = 0.0
 )

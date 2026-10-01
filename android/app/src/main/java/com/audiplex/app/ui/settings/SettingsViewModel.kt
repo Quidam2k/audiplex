@@ -96,6 +96,13 @@ class SettingsViewModel @Inject constructor(
     val djLinkEnabled: StateFlow<Boolean> = settingsStore.djLinkEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
+    val restoreManualQueues: StateFlow<Boolean> = settingsStore.restoreManualQueues  // #3601
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    fun toggleRestoreManualQueues() {  // #3601
+        viewModelScope.launch { settingsStore.setRestoreManualQueues(!restoreManualQueues.value) }
+    }
+
     // #997/#3111: per-channel playback levels. Default 1.0 (full).
     val musicVolume: StateFlow<Float> = settingsStore.musicVolume
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 1f)

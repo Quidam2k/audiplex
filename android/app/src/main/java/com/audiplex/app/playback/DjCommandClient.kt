@@ -470,8 +470,10 @@ class DjCommandClient @Inject constructor(
                         title = "DJ Queue",
                         albumLookup = emptyMap(),
                         startPositionMs = startMs,
+                        // #3601: a paused handoff/restore loads without ever
+                        // starting, rather than play-then-pause (a blip of sound).
+                        play = cmd.payload?.playing != false,
                     )
-                    if (cmd.payload?.playing == false) playbackManager.pause()
                 }
                 // A handoff that arrives paused is meant to stay silent.
                 if (cmd.payload?.playing == false) return partialOrOk(requested, tracks.map { it.id })
@@ -617,6 +619,7 @@ class DjCommandClient @Inject constructor(
             volume = playbackManager.playerVolume(),
             appVersionName = BuildConfig.VERSION_NAME,
             appVersionCode = BuildConfig.VERSION_CODE,
+            queueOrigin = music?.origin,  // #3601
         )
         // Always refresh while playing (position moves); otherwise on a
         // meaningful state change, plus a slow idle heartbeat. Without it a

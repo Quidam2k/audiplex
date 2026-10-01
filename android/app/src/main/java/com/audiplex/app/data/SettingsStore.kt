@@ -27,6 +27,7 @@ class SettingsStore @Inject constructor(
     private val usernameKey = stringPreferencesKey("username")
     private val sessionExpiredKey = booleanPreferencesKey("session_expired")
     private val djLinkEnabledKey = booleanPreferencesKey("dj_link_enabled")
+    private val restoreManualQueuesKey = booleanPreferencesKey("restore_manual_queues")  // #3601
     // v2: the v1 key was advanced by a reporter that dropped every entry it
     // "reported" (no API client existed that early in startup), so the deaths
     // it was meant to capture were marked done without ever being sent. A new
@@ -73,6 +74,18 @@ class SettingsStore @Inject constructor(
      */
     val djLinkEnabled: Flow<Boolean> = context.dataStore.data.map { prefs ->
         prefs[djLinkEnabledKey] ?: true
+    }
+
+    /**
+     * #3601: after the app is killed, a DJ-built queue comes back paused on its
+     * own. Todd's own queues stay as before (gone) unless this is on.
+     */
+    val restoreManualQueues: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[restoreManualQueuesKey] ?: false
+    }
+
+    suspend fun setRestoreManualQueues(enabled: Boolean) {  // #3601
+        context.dataStore.edit { prefs -> prefs[restoreManualQueuesKey] = enabled }
     }
 
     override val authToken: Flow<String> = context.dataStore.data.map { prefs ->

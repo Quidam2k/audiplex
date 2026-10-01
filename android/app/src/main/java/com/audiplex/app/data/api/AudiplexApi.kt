@@ -187,6 +187,10 @@ interface AudiplexApi {
     @POST("api/playback/state")
     suspend fun postPlaybackState(@Body state: PlaybackStateDto): PlaybackStateDto
 
+    /** #3601: the last music queue the server saw, to restore after an app kill. */
+    @GET("api/playback/resume")
+    suspend fun getResume(): ResumeSnapshotDto
+
     /** Ship a client-side diagnostic (playback error, process death) up. */
     @POST("api/playback/client-log")
     suspend fun postClientLog(@Body entry: ClientLogDto)
