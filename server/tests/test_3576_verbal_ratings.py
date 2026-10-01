@@ -29,10 +29,10 @@ def agent_client(client, db_session, monkeypatch):
     client.app.dependency_overrides[get_current_user] = lambda db=Depends(get_db): db.query(User).first()
 
 
-def test_floor_never_shows_a_star_he_did_not_say():
-    assert stored_stars(4.5) == 4
+def test_stored_stars_are_exact_halves():  # #6117 (was the floor under #3576)
+    assert stored_stars(4.5) == 4.5
     assert stored_stars(5) == 5
-    assert stored_stars(0.5) == 1
+    assert stored_stars(0.5) == 0.5
 
 
 def test_note_carries_persona_exact_number_and_words():
@@ -46,9 +46,9 @@ def test_agent_rates_owner_and_app_sees_it(agent_client, db_session, sample_trac
         "words": "four and a half", "persona": "Juno"})
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    assert data["stored"] == 4
+    assert data["stored"] == 4.5
     assert data["unknown"] == [99999]
-    assert data["rated"] == [{"track_id": sample_track.id, "rating": 4, "was": None}]
+    assert data["rated"] == [{"track_id": sample_track.id, "rating": 4.5, "was": None}]
 
     agent = db_session.query(User).filter(User.username == "dj-agent").first()
     assert db_session.query(TrackRating).filter(TrackRating.user_id == agent.id).count() == 0
@@ -56,7 +56,8 @@ def test_agent_rates_owner_and_app_sees_it(agent_client, db_session, sample_trac
     # The app reads per-caller as Todd: the star tap's own endpoint shows it.
     _as(agent_client, "testuser")
     rows = agent_client.get("/api/music/ratings").json()
-    assert [(r["track_id"], r["rating"]) for r in rows] == [(sample_track.id, 4)]
+    # #6117: `rating` stays the whole star for old app builds; `stars` is exact.
+    assert [(r["track_id"], r["rating"], r["stars"]) for r in rows] == [(sample_track.id, 4, 4.5)]
     assert rows[0]["note"] == "[Juno, said 4.5] four and a half"
 
 
@@ -100,10 +101,10 @@ def test_dj_star_puts_to_owner_endpoint_and_says_what_app_shows(monkeypatch):
                 "rated": [{"track_id": 3535, "rating": 4, "was": 3}]}
 
     monkeypatch.setattr(mcp, "_put", fake_put)
-    out = asyncio.run(dj_toolkit.dj_star([3535], 4.5, "wow", "Juno"))
+    out = asyncio.run(dj_toolkit.dj_star([3535], 4.5, "wow", "Juno"))  # fake replies stored=4
     assert sent == {"path": "/api/playback/ratings",
                     "body": {"track_ids": [3535], "stars": 4.5, "words": "wow", "persona": "Juno"}}
-    assert "the app shows 4 star(s)" in out and "3535 (was 3)" in out
+    assert "Rated 1 track(s) 4 stars" in out and "3535 (was 3)" in out
 
 
 def test_rated_is_a_pool_source_kind(monkeypatch):
@@ -189,5 +190,47 @@ def test_apply_writes_owner_rows(db_session, sample_track):
     report = bf.apply(db_session, owner, [{"ids": [sample_track.id, 424242], "stars": 4.5,
                                            "words": "four and a half", "line_no": None}])
     row = db_session.query(TrackRating).filter_by(user_id=owner.id, track_id=sample_track.id).one()
-    assert (row.rating, row.note) == (4, "[ride log, said 4.5] four and a half")
+    assert (row.rating, row.note) == (4.5, "[ride log, said 4.5] four and a half")
     assert any("424242: NOT IN LIBRARY" in r for r in report)
+
+
+# ----- #6117: halves end to end --------------------------------------------
+
+
+def test_app_route_takes_halves_and_old_whole_ratings(client, sample_track):
+    r = client.put(f"/api/music/tracks/{sample_track.id}/rating", json={"stars": 3.5})
+    assert r.status_code == 200 and (r.json()["rating"], r.json()["stars"]) == (3, 3.5)
+    # An app build before 1.0.51 still sends a whole `rating`.
+    r = client.put(f"/api/music/tracks/{sample_track.id}/rating", json={"rating": 2})
+    assert (r.json()["rating"], r.json()["stars"]) == (2, 2.0)
+    for bad in ({"stars": 0.3}, {"stars": 5.5}, {}, {"rating": 6}):
+        assert client.put(f"/api/music/tracks/{sample_track.id}/rating", json=bad).status_code == 422
+
+
+def test_old_int_only_client_model_still_parses_list(client, sample_track):
+    """An app build before 1.0.51 reads `rating` as Int and ignores unknown
+    keys: every row must still carry a whole-number `rating`."""
+    client.put(f"/api/music/tracks/{sample_track.id}/rating", json={"stars": 4.5})
+    row = client.get("/api/music/ratings").json()[0]
+    assert isinstance(row["rating"], int) and row["rating"] == 4
+
+
+def test_fix_halves_restores_floored_rows(db_session, sample_track):
+    owner = db_session.query(User).first()
+    db_session.add(TrackRating(user_id=owner.id, track_id=sample_track.id, rating=4,
+                               note="[ride log, said 4.5] four, four and a half"))
+    db_session.commit()
+    assert bf.fix_halves(db_session, owner, apply=False) == [f"  track {sample_track.id}: 4 -> 4.5"]
+    assert db_session.query(TrackRating).one().rating == 4
+    bf.fix_halves(db_session, owner, apply=True)
+    assert db_session.query(TrackRating).one().rating == 4.5
+    assert bf.fix_halves(db_session, owner, apply=True) == []  # idempotent
+
+
+def test_rated_source_uses_exact_stars(monkeypatch):
+    async def fake_get(path):
+        return [{"track_id": 1, "rating": 4, "stars": 4.5}, {"track_id": 2, "rating": 4, "stars": 4.0}]
+
+    monkeypatch.setattr(mcp, "_get", fake_get)
+    _, tracks = asyncio.run(mcp._resolve_source("rated", "4.5"))
+    assert [t["id"] for t in tracks] == [1]

@@ -654,7 +654,7 @@ def set_track_rating(
         .first()
     )
     if existing:
-        existing.rating = body.rating
+        existing.rating = body.value  # #6117
         # An explicit re-rate with no note keeps the old one: the note is the
         # highest-signal column in the table and changing your mind about the
         # score is not a reason to discard why you felt that way.
@@ -664,7 +664,7 @@ def set_track_rating(
         rating = existing
     else:
         rating = TrackRating(
-            user_id=user.id, track_id=track_id, rating=body.rating, note=body.note
+            user_id=user.id, track_id=track_id, rating=body.value, note=body.note  # #6117
         )
         db.add(rating)
     db.commit()

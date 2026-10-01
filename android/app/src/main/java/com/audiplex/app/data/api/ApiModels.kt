@@ -237,7 +237,9 @@ data class FavoriteCreate(
 
 @JsonClass(generateAdapter = true)
 data class TrackRatingCreate(
-    val rating: Int,
+    // #6117: send `stars` (halves). `rating` is what builds before 1.0.51 sent.
+    val rating: Int? = null,
+    val stars: Double? = null,
     val note: String = "",
 )
 
@@ -245,7 +247,8 @@ data class TrackRatingCreate(
 data class TrackRatingSchema(
     val id: Int,
     @Json(name = "track_id") val trackId: Int,
-    val rating: Int,
+    val rating: Int,  // whole star, for old builds
+    val stars: Double? = null,  // #6117: exact, halves included
     val note: String,
     @Json(name = "updated_at") val updatedAt: String,
 )

@@ -43,8 +43,9 @@ class PlayerViewModel @Inject constructor(
      * track while it is playing, and a control that waits on a round trip
      * over Tailscale before it moves does not get used.
      */
-    private val _ratings = MutableStateFlow<Map<Int, Int>>(emptyMap())
-    val ratings: StateFlow<Map<Int, Int>> = _ratings.asStateFlow()
+    // #6117: halves, so Double (4.5).
+    private val _ratings = MutableStateFlow<Map<Int, Double>>(emptyMap())
+    val ratings: StateFlow<Map<Int, Double>> = _ratings.asStateFlow()
 
     init {
         // Adopt an in-progress session's now-playing state the moment the UI
@@ -54,21 +55,24 @@ class PlayerViewModel @Inject constructor(
         viewModelScope.launch {
             val api = apiHolder.api ?: return@launch
             runCatching { api.getTrackRatings() }
-                .onSuccess { loaded -> _ratings.value = loaded.associate { it.trackId to it.rating } }
+                .onSuccess { loaded ->
+                    _ratings.value = loaded.associate { it.trackId to (it.stars ?: it.rating.toDouble()) }  // #6117
+                }
         }
     }
 
     /** Tap a star to set it; tap the star that is already set to clear. */
-    fun rateTrack(trackId: Int, stars: Int) {
-        val clearing = _ratings.value[trackId] == stars
+    fun rateTrack(trackId: Int, stars: Double) {  // #6117: halves
+        val next = nextRating(_ratings.value[trackId], stars)
+        val clearing = next == null
         _ratings.value = _ratings.value.toMutableMap().apply {
-            if (clearing) remove(trackId) else put(trackId, stars)
+            if (next == null) remove(trackId) else put(trackId, next)
         }
         viewModelScope.launch {
             val api = apiHolder.api ?: return@launch
             runCatching {
                 if (clearing) api.clearTrackRating(trackId)
-                else api.setTrackRating(trackId, TrackRatingCreate(rating = stars))
+                else api.setTrackRating(trackId, TrackRatingCreate(stars = stars))  // #6117
             }
         }
     }

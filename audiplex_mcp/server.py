@@ -1809,7 +1809,7 @@ async def _resolve_source(kind: str, query: str, recursive: bool = True) -> tupl
             floor = float(query.strip() or 4)
         except ValueError:
             raise LookupError("A 'rated' source needs a minimum star count, e.g. '4'.") from None
-        rows = [r for r in await _get("/api/playback/ratings") if r["rating"] >= floor]
+        rows = [r for r in await _get("/api/playback/ratings") if r.get("stars", r["rating"]) >= floor]  # #6117
         if not rows:
             raise LookupError(f"Nothing rated {floor:g}+ stars yet. dj_star() sets them.")
         label, tracks = f"rated {floor:g}+ stars", [{"id": r["track_id"]} for r in rows]
@@ -2451,14 +2451,14 @@ async def dj_track_ratings(limit: int = 30) -> str:
     lines = ["Todd's track ratings (his own stars, best first):"]
     by_id = {r["track_id"]: r for r in ratings[:limit]}
     for track_id, r in by_id.items():
-        stars = "*" * r["rating"]
+        stars = f"{r.get('stars', r['rating']):g}*"  # #6117: halves
         label = f"track {track_id}"
         try:
             t = await _get(f"/api/music/tracks/{track_id}")
             label = f"{t.get('artist_name', '')} - {t.get('title', '')}".strip(" -") or label
         except Exception:
             pass
-        line = f"  [{stars:<5}] {label}"
+        line = f"  [{stars:<4}] {label}"  # #6117
         if r.get("note"):
             line += f'  — "{r["note"]}"'
         lines.append(line)
@@ -3253,7 +3253,7 @@ async def dj_taste(limit: int = 20) -> str:
         stars = []
     if stars:
         # #3576: the shape of his taste at a glance, then the top with names.
-        counts = {n: sum(1 for r in stars if r["rating"] == n) for n in range(5, 0, -1)}
+        counts = {n: sum(1 for r in stars if r["rating"] == n) for n in range(5, 0, -1)}  # whole-star buckets
         lines.append(
             f"Todd's rated tracks ({len(stars)}): "
             + ", ".join(f"{n}*: {c}" for n, c in counts.items() if c)
@@ -3266,7 +3266,7 @@ async def dj_taste(limit: int = 20) -> str:
                 label = f"{r['track_id']} | {t.get('artist_name', '')} - {t.get('title', '')}".strip(" -")
             except Exception:
                 pass
-            bit = f"  [{'*' * r['rating']:<5}] {label}"
+            bit = f"  [{r.get('stars', r['rating']):g}*] {label}"  # #6117: halves
             if r.get("note"):
                 bit += f'  — "{r["note"]}"'
             lines.append(bit)

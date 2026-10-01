@@ -137,12 +137,33 @@ def apply(db: Session, owner: User, todo: list[dict]) -> list[str]:
     return report
 
 
+def fix_halves(db: Session, owner: User, apply: bool) -> list[str]:
+    """#6117: ratings stored as the floor while the app had no halves get the
+    exact number back from their note ("[persona, said 4.5] ...")."""
+    out = []
+    for row in db.query(TrackRating).filter(TrackRating.user_id == owner.id):
+        m = re.search(r"said (\d(?:\.5)?)\]", row.note or "")
+        if not m:
+            continue
+        said = float(m.group(1))
+        if said != row.rating and int(said) == int(row.rating):
+            out.append(f"  track {row.track_id}: {row.rating:g} -> {said:g}")
+            row.rating = said
+    if apply:
+        db.commit()
+    else:
+        db.rollback()
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--apply", action="store_true", help="write (default: dry run)")
     ap.add_argument("--md", type=Path, default=PENDING_MD)
     ap.add_argument("--db", type=Path, default=SERVER / "audiplex.db")
     ap.add_argument("--owner", default=None, help="default: settings.dj_owner_username")
+    ap.add_argument("--fix-halves", action="store_true",
+                    help="#6117: restore halves floored before the app had them")
     args = ap.parse_args()
 
     from audiplex.config import get_settings
@@ -155,6 +176,11 @@ def main() -> int:
         if owner is None:
             print(f"Owner {owner_name!r} not found.")
             return 1
+        if args.fix_halves:
+            fixed = fix_halves(db, owner, args.apply)
+            print("\n".join(fixed) or "No floored halves.")
+            print("Applied." if args.apply and fixed else "Dry run. --apply to write." if fixed else "")
+            return 0
         todo, warnings = plan(db, rows)
         for w in warnings:
             print("WARN", w)

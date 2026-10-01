@@ -245,7 +245,9 @@ class TrackRating(Base):
     user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=True
     )
-    rating: Mapped[int] = mapped_column(Integer, nullable=False)
+    # #6117: stars in 0.5 steps. The column was declared INTEGER; SQLite's
+    # affinity keeps 4.5 as REAL there, so no table change was needed.
+    rating: Mapped[float] = mapped_column(Float, nullable=False)
     note: Mapped[str] = mapped_column(String(500), default="")
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow)
 

@@ -29,6 +29,9 @@ import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.automirrored.filled.StarHalf  // #6117
+import androidx.compose.foundation.gestures.detectTapGestures  // #6117
+import androidx.compose.ui.input.pointer.pointerInput  // #6117
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
@@ -142,7 +145,7 @@ fun PlayerScreen(
                 track?.track?.id?.let { trackId ->
                     Spacer(Modifier.height(12.dp))
                     StarRating(
-                        rating = ratings[trackId] ?: 0,
+                        rating = ratings[trackId] ?: 0.0,  // #6117
                         onRate = { stars -> viewModel.rateTrack(trackId, stars) },
                     )
                 }
@@ -451,17 +454,33 @@ private fun TitleBlock(title: String, subtitle: String?, detail: String?) {
  * does not need a second control.
  */
 @Composable
-private fun StarRating(rating: Int, onRate: (Int) -> Unit) {
+private fun StarRating(rating: Double, onRate: (Double) -> Unit) {
+    // #6117: halves. Tap the left half of a star for n - 0.5, the right half
+    // for n; tapping the value already set clears it.
     Row(
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         (1..5).forEach { star ->
-            IconButton(onClick = { onRate(star) }) {
+            val fill = starFill(star, rating)
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(48.dp)
+                    .pointerInput(star) {
+                        detectTapGestures { offset ->
+                            onRate(starValue(star, leftHalf = offset.x < size.width / 2f))
+                        }
+                    },
+            ) {
                 Icon(
-                    imageVector = if (star <= rating) Icons.Filled.Star else Icons.Filled.StarBorder,
-                    contentDescription = if (star == rating) "Clear rating" else "Rate $star stars",
-                    tint = if (star <= rating)
+                    imageVector = when (fill) {
+                        StarFill.FULL -> Icons.Filled.Star
+                        StarFill.HALF -> Icons.AutoMirrored.Filled.StarHalf
+                        StarFill.EMPTY -> Icons.Filled.StarBorder
+                    },
+                    contentDescription = "Star $star: tap left half for ${star - 0.5}, right half for $star",
+                    tint = if (fill != StarFill.EMPTY)
                         MaterialTheme.colorScheme.primary
                     else
                         MaterialTheme.colorScheme.onSurfaceVariant,

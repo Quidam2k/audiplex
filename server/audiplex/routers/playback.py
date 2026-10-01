@@ -437,9 +437,10 @@ def list_owner_ratings(
     )
 
 
-def stored_stars(stars: float) -> int:
-    """The whole star the app shows for a spoken rating (#3576): floor, min 1."""
-    return max(1, min(5, int(stars)))
+def stored_stars(stars: float) -> float:
+    """What's stored for a spoken rating: exact halves since #6117 (it was the
+    floor while the app could only show whole stars, #3576)."""
+    return max(0.5, min(5.0, float(stars)))
 
 
 def verbal_note(stars: float, words: str, persona: str) -> str:

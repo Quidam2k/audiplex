@@ -318,13 +318,13 @@ async def dj_tag(track_ids: list[int], tags: list[str], persona: str = "") -> st
 async def dj_star(track_ids: list[int], stars: float, words: str = "", persona: str = "") -> str:
     """Set Todd's star rating (1-5, halves allowed) when he says one out loud:
     "five stars", "four and a half". It lands in the SAME star field he taps in
-    the app, on his account, so he sees it there. #3576.
+    the app, on his account, so he sees it there. #3576. Halves show as halves
+    in app 1.0.51+; older app builds show the whole star below.
 
     track_ids: every copy of the song (dj_search; the same song can live twice).
     words: his own words, verbatim-ish ("one of the all-time greats") - they
         are kept with the rating and teach more than the number.
-    persona: who heard it. Halves show in the app as the whole star BELOW
-        (4.5 shows 4); the exact number is kept in the note. Re-rating replaces.
+    persona: who heard it. Re-rating replaces. (#6117: halves are stored exactly.)
     Do not use the old five-star-verbal tags for this any more."""
     if not track_ids:
         return "Give track_ids (dj_search finds them)."
@@ -339,8 +339,8 @@ async def dj_star(track_ids: list[int], stars: float, words: str = "", persona: 
     if not rated:
         return f"Nothing rated: unknown id(s) {res.get('unknown')}."
     changed = [f"{r['track_id']} (was {r['was']})" for r in rated if r.get("was") not in (None, r["rating"])]
-    out = (f"Rated {len(rated)} track(s) {stars:g} stars; the app shows "
-           f"{res['stored']} star(s). Note: {res['note']!r}.")
+    out = (f"Rated {len(rated)} track(s) {res['stored']:g} stars "  # #6117
+           f"(older app builds show {int(res['stored'])}). Note: {res['note']!r}.")
     if changed:
         out += f" Changed: {', '.join(changed)}."
     if res.get("unknown"):

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 
 class ChapterSchema(BaseModel):
@@ -203,17 +203,46 @@ class FavoriteSchema(BaseModel):
 class TrackRatingSchema(BaseModel):
     id: int
     track_id: int
+    # #6117: `rating` stays a WHOLE star (the floor) because app builds before
+    # 1.0.51 parse it as Int and would drop the whole list on a 4.5. `stars`
+    # is the exact value, halves included.
     rating: int
+    stars: float = Field(validation_alias=AliasChoices("stars", "rating"))
     note: str
     updated_at: datetime
     model_config = {"from_attributes": True}
 
+    @field_validator("rating", mode="before")
+    @classmethod
+    def _whole_star(cls, v):  # #6117
+        return int(v)
+
+
+def _half_steps(v: float) -> float:  # #6117
+    if v * 2 != int(v * 2):
+        raise ValueError("Stars go in halves: 1, 1.5 ... 5.")
+    return v
+
 
 class TrackRatingCreate(BaseModel):
     # 1-5 stars, validated at the edge so a bad client cannot poison the
-    # signal the DJ reads (#3024).
-    rating: int = Field(ge=1, le=5)
+    # signal the DJ reads (#3024). #6117: `stars` (halves) from 1.0.51 on;
+    # older builds send a whole `rating`.
+    rating: int | None = Field(default=None, ge=1, le=5)
+    stars: float | None = Field(default=None, ge=0.5, le=5)
     note: str = ""
+
+    @model_validator(mode="after")
+    def _one_value(self):  # #6117
+        if self.stars is None and self.rating is None:
+            raise ValueError("Give stars (or rating).")
+        if self.stars is not None:
+            _half_steps(self.stars)
+        return self
+
+    @property
+    def value(self) -> float:  # #6117
+        return float(self.stars if self.stars is not None else self.rating)
 
 
 class VerbalRatingRequest(BaseModel):
