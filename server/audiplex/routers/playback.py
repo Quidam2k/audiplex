@@ -95,6 +95,7 @@ from audiplex.schemas import (
     SkipSuspectSchema,
     TrackRatingSchema,
     TrackSchema,
+    VerbalRatingRequest,  # #3576
 )
 
 router = APIRouter(prefix="/api/playback", tags=["playback"])
@@ -415,6 +416,87 @@ def list_owner_ratings(
         .order_by(TrackRating.rating.desc(), TrackRating.updated_at.desc())
         .all()
     )
+
+
+def stored_stars(stars: float) -> int:
+    """The whole star the app shows for a spoken rating (#3576): floor, min 1."""
+    return max(1, min(5, int(stars)))
+
+
+def verbal_note(stars: float, words: str, persona: str) -> str:
+    """'[Juno, said 4.5] one of the all-time greats' — who relayed it, the exact
+    number he said, and his own words, which carry the most signal."""
+    head = f"[{persona.strip() or 'DJ'}, said {stars:g}]"
+    words = " ".join(words.split())
+    return (f"{head} {words}" if words else head)[:500]
+
+
+@router.put("/ratings")
+def set_owner_ratings(
+    body: VerbalRatingRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Set the OWNER's star rating on tracks — the same track_ratings row the
+    app's star tap writes (#3576).
+
+    Owner-scoped like the reads above: personas authenticate as dj-agent, and
+    /api/music/tracks/{id}/rating would rate as dj-agent, which Todd never
+    sees. One short transaction for every id (busy_timeout covers a scan lock).
+    """
+    if body.stars * 2 != int(body.stars * 2):
+        raise HTTPException(status_code=422, detail="Stars go in halves: 1, 1.5 ... 5.")
+    from datetime import datetime, timezone
+
+    from audiplex.models import Track
+
+    owner = _resolve_owner(db)
+    ids = sorted({int(i) for i in body.track_ids})
+    known = {r[0] for r in db.query(Track.id).filter(Track.id.in_(ids)).all()}
+    stored = stored_stars(body.stars)
+    note = verbal_note(body.stars, body.words, body.persona)
+    existing = {
+        r.track_id: r
+        for r in db.query(TrackRating).filter(
+            TrackRating.user_id == owner.id, TrackRating.track_id.in_(known)
+        )
+    }
+    now = datetime.now(timezone.utc)
+    rated = []
+    for tid in sorted(known):
+        row = existing.get(tid)
+        was = row.rating if row else None
+        if row:
+            row.rating, row.note, row.updated_at = stored, note, now
+        else:
+            db.add(TrackRating(user_id=owner.id, track_id=tid, rating=stored, note=note))
+        rated.append({"track_id": tid, "rating": stored, "was": was})
+    db.commit()
+    return {
+        "stars": body.stars,
+        "stored": stored,
+        "note": note,
+        "rated": rated,
+        "unknown": [i for i in ids if i not in known],
+    }
+
+
+@router.delete("/ratings")
+def clear_owner_ratings(
+    body: dict, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """body: {track_ids}. Clear the owner's stars — "never mind, take that back"."""
+    ids = {int(i) for i in body.get("track_ids") or []}
+    if not ids:
+        return {"deleted": 0}
+    owner = _resolve_owner(db)
+    deleted = (
+        db.query(TrackRating)
+        .filter(TrackRating.user_id == owner.id, TrackRating.track_id.in_(ids))
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return {"deleted": deleted}
 
 
 @router.get("/most-played", response_model=list[TrackSchema])

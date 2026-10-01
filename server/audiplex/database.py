@@ -24,6 +24,10 @@ def _enable_foreign_keys(engine) -> None:
     def _set_pragma(dbapi_connection, _connection_record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
+        # #3576 / failure #573: a roots rescan held the write lock long past
+        # sqlite3's 5s default, so short writes (a star rating) failed with
+        # 'database is locked'. Wait longer before giving up.
+        cursor.execute("PRAGMA busy_timeout=15000")
         cursor.close()
 
 

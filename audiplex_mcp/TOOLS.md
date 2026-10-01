@@ -28,6 +28,7 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_upcoming` — the upcoming queue in order, with each track's `#index` and mix source.
 - `dj_remove` / `dj_insert` / `dj_swap` — edit what's still to come by `#index` (from dj_upcoming) or track id; one replace_upcoming, the current song is never touched.
 - `dj_ban` / `dj_unban` / `dj_bans` — never pick a track again (every copy of the recording) in mixes and the pool; reversible; lists who banned what and why.
+- `dj_star` — when Todd says a rating out loud ("five stars", "four and a half"), set it: his own star field in the app, with his words + who heard it. Halves show as the star below. Replaces the old `five-star-verbal` tags; `{"kind": "rated", "query": "4"}` is a mix/pool source of his 4+ star tracks. (#3576)
 - `dj_tag` / `dj_untag` / `dj_tags` — mood/vibe tags you apply by ear (never inferred); a tag is also a mix/pool source: `{"kind": "tag", "query": "chill"}`. (#2806)
 - `dj_energy_set` — a set ordered by MEASURED energy (0-100): arc rise / peak / wind_down / steady, optional minutes, tags, energy window. Replaces what's after the current song. Unmeasured tracks are left out and counted. (#2806)
 - `dj_harmonic_set` — a set where each hand-off is in a compatible KEY near the same TEMPO (measured BPM + Camelot key; half/double time counts), optional minutes, start track, bpm_tolerance, energy arc. Replaces what's after the current song. Unanalysed tracks are left out and counted. (#1002)

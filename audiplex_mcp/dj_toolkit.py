@@ -18,7 +18,7 @@ def register(mcp, ns: dict) -> None:
     _NS = ns
     for fn in (dj_upcoming, dj_remove, dj_insert, dj_swap, dj_pool_lane,
                dj_ban, dj_unban, dj_bans, dj_tag, dj_untag, dj_tags, dj_energy_set,
-               dj_harmonic_set, dj_crossfade):
+               dj_harmonic_set, dj_crossfade, dj_star):  # #3576 dj_star
         mcp.tool()(fn)
 
 
@@ -310,6 +310,39 @@ async def dj_tag(track_ids: list[int], tags: list[str], persona: str = "") -> st
     except Exception as e:
         return await _say_http_error(e)
     out = f"Tagged {len(res.get('tracks') or [])} track(s) {', '.join(res.get('tags') or [])} ({res.get('added', 0)} new)."
+    if res.get("unknown"):
+        out += f" Unknown id(s) {res['unknown']}."
+    return out
+
+
+async def dj_star(track_ids: list[int], stars: float, words: str = "", persona: str = "") -> str:
+    """Set Todd's star rating (1-5, halves allowed) when he says one out loud:
+    "five stars", "four and a half". It lands in the SAME star field he taps in
+    the app, on his account, so he sees it there. #3576.
+
+    track_ids: every copy of the song (dj_search; the same song can live twice).
+    words: his own words, verbatim-ish ("one of the all-time greats") - they
+        are kept with the rating and teach more than the number.
+    persona: who heard it. Halves show in the app as the whole star BELOW
+        (4.5 shows 4); the exact number is kept in the note. Re-rating replaces.
+    Do not use the old five-star-verbal tags for this any more."""
+    if not track_ids:
+        return "Give track_ids (dj_search finds them)."
+    try:
+        res = await _h("_put")("/api/playback/ratings", {
+            "track_ids": track_ids, "stars": stars, "words": words, "persona": persona})
+    except PermissionError as e:
+        return str(e)
+    except Exception as e:
+        return await _say_http_error(e)
+    rated = res.get("rated") or []
+    if not rated:
+        return f"Nothing rated: unknown id(s) {res.get('unknown')}."
+    changed = [f"{r['track_id']} (was {r['was']})" for r in rated if r.get("was") not in (None, r["rating"])]
+    out = (f"Rated {len(rated)} track(s) {stars:g} stars; the app shows "
+           f"{res['stored']} star(s). Note: {res['note']!r}.")
+    if changed:
+        out += f" Changed: {', '.join(changed)}."
     if res.get("unknown"):
         out += f" Unknown id(s) {res['unknown']}."
     return out

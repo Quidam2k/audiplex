@@ -216,6 +216,20 @@ class TrackRatingCreate(BaseModel):
     note: str = ""
 
 
+class VerbalRatingRequest(BaseModel):
+    """A star rating Todd said out loud, relayed by a persona (#3576).
+
+    stars may be a half (4.5) — he says those — but the app's star field is a
+    whole Int, so the server stores the floor and keeps the exact number in
+    the note. Never show him a 5 he didn't say.
+    """
+
+    track_ids: list[int] = Field(min_length=1)
+    stars: float = Field(ge=0.5, le=5)
+    words: str = ""
+    persona: str = ""
+
+
 class PlaylistAppend(BaseModel):
     track_ids: list[int]
 

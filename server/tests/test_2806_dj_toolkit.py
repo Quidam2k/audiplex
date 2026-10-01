@@ -308,7 +308,7 @@ def test_search_and_tracks_source_kinds(monkeypatch):
 def test_unknown_kind_lists_valid_kinds_in_pool_refusal():
     lanes, empty = run(mcp._resolve_lanes([{"kind": "vibes", "query": "x", "label": "V"}]))
     assert lanes == {"V": []}
-    assert "'search', 'tag', or 'tracks'" in empty[0]  # #2806
+    assert "'search', 'tag', 'rated', or 'tracks'" in empty[0]  # #2806  # #3576
 
 
 # ----- MCP: S3 crossfade (PC renderer only) -------------------------------  # #2806

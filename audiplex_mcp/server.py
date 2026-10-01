@@ -1804,6 +1804,15 @@ async def _resolve_source(kind: str, query: str, recursive: bool = True) -> tupl
         if not rows:
             raise LookupError(f"No tracks tagged '{query}'. dj_tags() lists the tags.")
         label, tracks = f"tag '{query}'", [{"id": r["track_id"]} for r in rows]
+    elif kind == "rated":  # #3576: Todd's own stars, at least N (default 4)
+        try:
+            floor = float(query.strip() or 4)
+        except ValueError:
+            raise LookupError("A 'rated' source needs a minimum star count, e.g. '4'.") from None
+        rows = [r for r in await _get("/api/playback/ratings") if r["rating"] >= floor]
+        if not rows:
+            raise LookupError(f"Nothing rated {floor:g}+ stars yet. dj_star() sets them.")
+        label, tracks = f"rated {floor:g}+ stars", [{"id": r["track_id"]} for r in rows]
     elif kind == "tracks":  # #2806: explicit ids, "12, 34 56"
         ids = [int(x) for x in re.findall(r"\d+", query)]
         if not ids:
@@ -1812,7 +1821,7 @@ async def _resolve_source(kind: str, query: str, recursive: bool = True) -> tupl
     else:
         raise LookupError(
             f"Unknown kind '{kind}'. Use 'artist', 'album', 'genre', 'folder', "  # #5473 #5518 #2806
-            "'folder_match', 'playlist', 'favorites', 'bucket', 'search', 'tag', or 'tracks'."
+            "'folder_match', 'playlist', 'favorites', 'bucket', 'search', 'tag', 'rated', or 'tracks'."  # #3576
         )
     return label, tracks
 
@@ -3243,9 +3252,21 @@ async def dj_taste(limit: int = 20) -> str:
     except Exception:
         stars = []
     if stars:
-        lines.append(f"Todd's rated tracks ({len(stars)}) — dj_track_ratings() for the list:")
-        for r in stars[:5]:
-            bit = f"  [{'*' * r['rating']}] track {r['track_id']}"
+        # #3576: the shape of his taste at a glance, then the top with names.
+        counts = {n: sum(1 for r in stars if r["rating"] == n) for n in range(5, 0, -1)}
+        lines.append(
+            f"Todd's rated tracks ({len(stars)}): "
+            + ", ".join(f"{n}*: {c}" for n, c in counts.items() if c)
+            + ' — pool/mix source {"kind": "rated", "query": "4"}; dj_star() when he says one.'
+        )
+        for r in stars[:10]:
+            label = f"track {r['track_id']}"
+            try:
+                t = await _get(f"/api/music/tracks/{r['track_id']}")
+                label = f"{r['track_id']} | {t.get('artist_name', '')} - {t.get('title', '')}".strip(" -")
+            except Exception:
+                pass
+            bit = f"  [{'*' * r['rating']:<5}] {label}"
             if r.get("note"):
                 bit += f'  — "{r["note"]}"'
             lines.append(bit)
