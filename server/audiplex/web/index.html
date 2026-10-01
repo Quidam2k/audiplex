@@ -34,6 +34,7 @@
       <button data-tab="folders" class="tab">Folders</button>
       <button data-tab="playlists" class="tab">Playlists</button>
       <button data-tab="favorites" class="tab">Favorites</button>
+      <button data-tab="videos" class="tab">Videos</button>
     </nav>
     <div id="crumbs" class="crumbs"></div>
     <input id="filter" class="filter" type="search" placeholder="Filter" aria-label="Filter">
@@ -49,6 +50,31 @@
     <div id="pick-list" class="pick-list"></div>
     <label>New playlist <input id="pick-new" placeholder="Name"></label>
     <menu><button value="cancel" class="link">Cancel</button><button id="pick-create" value="create">Create and add</button></menu>
+  </form>
+</dialog>
+
+<dialog id="music-video" class="wide">
+  <form method="dialog" class="card">
+    <h2 id="mv-title">Music video</h2>
+    <label>Quality
+      <select id="mv-quality">
+        <option value="draft">Draft (fast, low-res)</option>
+        <option value="final">Final</option>
+      </select>
+    </label>
+    <p id="mv-need" class="muted"></p>
+    <label>Direction
+      <textarea id="mv-direction" rows="3" maxlength="1000" placeholder="How the singers move, what they're doing, what changes in the background…"></textarea>
+    </label>
+    <div class="actions">
+      <input id="mv-folder" placeholder="Image folder (absolute path)" aria-label="Image folder">
+      <button type="button" id="mv-open">Open</button>
+      <button type="button" id="mv-up" hidden>Up</button>
+    </div>
+    <div id="mv-subs" class="actions"></div>
+    <div id="mv-grid" class="thumbs"></div>
+    <div class="fill"><progress id="mv-fill" value="0" max="1"></progress><span id="mv-count">0 / 0 images</span></div>
+    <menu><button type="button" id="mv-cancel" class="link">Cancel</button><button type="button" id="mv-go" disabled>Go</button></menu>
   </form>
 </dialog>
 

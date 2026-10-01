@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     port: int = 8100
     cover_cache_dir: str = "./covers"
     dj_clip_dir: str = "./dj_clips"
+    # #6172 music videos: job clips, finished mp4s and the analysis cache.
+    music_video_dir: str = "./music_videos"
     scan_on_startup: bool = True
     apk_output_dir: str = "../android/app/build/outputs/apk/debug"
     jwt_secret: str = ""

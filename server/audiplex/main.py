@@ -15,6 +15,7 @@ from audiplex.routers import (
     dj_voice,
     library,
     music,
+    music_video,
     playback,
     progress,
     streaming,
@@ -59,12 +60,30 @@ async def lifespan(app: FastAPI):
     from audiplex import scheduled_stop
 
     stop_ticker = asyncio.create_task(scheduled_stop.run_ticker(bus))
+    _resume_music_video_worker(settings)
     try:
         yield
     finally:
         ticker.cancel()
         stop_ticker.cancel()
         dj_triggers.set_loop(None)
+
+
+def _resume_music_video_worker(settings):
+    """#6172: a restart mid-render picks the queue back up (finished clips are kept)."""
+    from pathlib import Path
+
+    from audiplex.database import _SessionLocal
+    from audiplex.models import MusicVideoJob
+    from audiplex.music_video import worker
+
+    db = _SessionLocal()
+    try:
+        active = db.query(MusicVideoJob).filter(MusicVideoJob.status.in_(worker.ACTIVE)).count()
+    finally:
+        db.close()
+    if active and worker.spawn_worker(Path(settings.music_video_dir).resolve()):
+        logger.info("Music-video worker restarted for %d queued job(s)", active)
 
 
 app = FastAPI(title="Audiplex", version="0.1.0", lifespan=lifespan)
@@ -84,6 +103,7 @@ app.include_router(progress.router)
 app.include_router(music.router)
 app.include_router(playback.router)
 app.include_router(dj_voice.router)
+app.include_router(music_video.router)  # #6172
 app.include_router(app_router.router)
 app.include_router(web.router)  # #2806 browser UI at /web
 

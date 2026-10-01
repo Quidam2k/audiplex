@@ -277,6 +277,7 @@ function trackRow(t, extra) {
       el("button", { class: "icon", title: "Play", "aria-label": "Play", onclick: () => sendPlay("play_now", [t.id]) }, "▶"),
       el("button", { class: "icon", title: "Queue", "aria-label": "Queue", onclick: () => sendPlay("queue", [t.id]) }, "+"),
       el("button", { class: "icon", title: "Add to playlist", "aria-label": "Add to playlist", onclick: () => pickPlaylist([t.id]) }, "≡"),
+      el("button", { class: "icon", title: "Music video", "aria-label": "Music video", onclick: () => openMusicVideo(t) }, "🎬"),
       extra || []));
 }
 
@@ -294,6 +295,7 @@ function linkRow(label, sub, go, fav) {
 
 async function withView(fn) {
   state.view = fn;
+  clearInterval(state.videoTimer);
   $("content").replaceChildren(el("p", { class: "muted" }, "Loading…"));
   await fn();
 }
@@ -460,6 +462,184 @@ async function showFavorites() {
   ]);
 }
 
+// ---- music video (#6172) ------------------------------------------------------
+
+const MV = { track: null, est: null, folder: "", selected: [], urls: [], gen: 0, badges: new Map() };
+const ACTIVE_JOB = ["queued", "analyzing", "rendering", "stitching"];
+
+function lsGet(k) { try { return localStorage.getItem(k) || ""; } catch { return ""; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch { /* storage blocked */ } }
+
+function mvResetThumbs() {
+  MV.gen++;
+  for (const u of MV.urls) URL.revokeObjectURL(u);
+  MV.urls = [];
+}
+
+function mvPaint() {
+  const n = MV.est ? MV.est.n_images : 0, k = MV.selected.length;
+  for (const [name, { btn, badge }] of MV.badges) {
+    const i = MV.selected.indexOf(name);
+    btn.classList.toggle("selected", i >= 0);
+    btn.setAttribute("aria-pressed", i >= 0 ? "true" : "false");
+    badge.hidden = i < 0;
+    badge.textContent = String(i + 1);
+  }
+  $("mv-fill").max = Math.max(n, 1);
+  $("mv-fill").value = k;
+  $("mv-count").textContent = `${k} / ${n} images`;
+  $("mv-go").disabled = !n || k !== n;
+}
+
+async function mvLoadEstimate() {
+  const est = await guard(() => get(`/api/music-video/estimate/${MV.track.id}?quality=${q($("mv-quality").value)}`));
+  if (!est) return null;
+  MV.est = est;
+  $("mv-need").textContent = `You need ${est.n_images} images (one ~${est.clip_seconds} s clip each). ` +
+    `Estimated render: ~${Math.ceil(est.est_render_seconds / 60)} min.`;
+  MV.selected = MV.selected.slice(0, est.n_images);
+  mvPaint();
+  return est;
+}
+
+// <img> can't send the auth header: fetch -> blob -> object URL, ~6 at a time.
+async function mvLoadThumbs(folder, items, gen) {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length && gen === MV.gen) {
+      const { name, img } = items[next++];
+      try {
+        const r = await fetch(`/api/music-video/thumb?folder=${q(folder)}&name=${q(name)}`,
+          { headers: { Authorization: `Bearer ${token()}` } });
+        if (!r.ok) continue;
+        const url = URL.createObjectURL(await r.blob());
+        if (gen !== MV.gen) { URL.revokeObjectURL(url); return; }
+        MV.urls.push(url);
+        img.src = url;
+      } catch { /* leave the thumb blank */ }
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
+}
+
+async function mvOpenFolder(path) {
+  path = path.trim();
+  if (!path) return toast("Enter a folder path.");
+  if (MV.selected.length && path !== MV.folder && !confirm("Changing folder clears your selected images. Continue?")) return;
+  const data = await guard(() => get(`/api/music-video/images?folder=${q(path)}`));
+  if (!data) return;
+  mvResetThumbs();
+  const gen = MV.gen;
+  MV.folder = data.folder;
+  MV.selected = [];
+  MV.badges = new Map();
+  $("mv-folder").value = data.folder;
+  $("mv-up").hidden = !data.parent;
+  $("mv-up").onclick = () => mvOpenFolder(data.parent);
+  const sep = data.folder.includes("\\") ? "\\" : "/";
+  $("mv-subs").replaceChildren(...data.subfolders.map((s) =>
+    el("button", { type: "button", onclick: () => mvOpenFolder(data.folder.replace(/[\\/]+$/, "") + sep + s) }, `📁 ${s}`)));
+  const items = data.images.map((name) => {
+    const img = el("img", { alt: name });
+    const badge = el("span", { class: "badge", hidden: true });
+    const btn = el("button", {
+      type: "button", class: "thumb", title: name, "aria-pressed": "false",
+      onclick: () => {
+        const i = MV.selected.indexOf(name);
+        if (i >= 0) MV.selected.splice(i, 1);
+        else if (MV.selected.length >= MV.est.n_images) return toast("That's enough images — deselect one to swap");
+        else MV.selected.push(name);
+        mvPaint();
+      },
+    }, img, badge);
+    MV.badges.set(name, { btn, badge });
+    return { name, img, btn };
+  });
+  $("mv-grid").replaceChildren(...(items.length ? items.map((i) => i.btn) : [el("p", { class: "muted" }, "No images in this folder.")]));
+  mvPaint();
+  mvLoadThumbs(data.folder, items, gen);
+}
+
+async function openMusicVideo(track) {
+  Object.assign(MV, { track, est: null, folder: "", selected: [], badges: new Map() });
+  mvResetThumbs();
+  $("mv-title").textContent = `Music video: ${track.title} (${fmtDuration(track.duration_seconds)})`;
+  $("mv-quality").value = "draft";
+  $("mv-need").textContent = "";
+  $("mv-grid").replaceChildren();
+  $("mv-subs").replaceChildren();
+  $("mv-up").hidden = true;
+  mvPaint();
+  $("music-video").showModal();
+  const est = await mvLoadEstimate();
+  if (!est) return;
+  $("mv-direction").value = lsGet("audiplex.mv.direction") || est.last_direction || "";
+  const folder = lsGet("audiplex.mv.folder") || est.last_folder || "";
+  $("mv-folder").value = folder;
+  if (folder) mvOpenFolder(folder);
+}
+
+$("mv-quality").addEventListener("change", mvLoadEstimate);
+$("mv-open").addEventListener("click", () => mvOpenFolder($("mv-folder").value));
+$("mv-folder").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") { ev.preventDefault(); mvOpenFolder($("mv-folder").value); }
+});
+$("mv-cancel").addEventListener("click", () => $("music-video").close());
+$("music-video").addEventListener("close", mvResetThumbs);
+$("mv-go").addEventListener("click", async () => {
+  const direction = $("mv-direction").value.trim();
+  const job = await guard(() => api("POST", "/api/music-video/jobs", {
+    track_id: MV.track.id, quality: $("mv-quality").value, folder: MV.folder,
+    images: MV.selected.slice(), direction,
+  }));
+  if (!job) return;
+  lsSet("audiplex.mv.folder", MV.folder);
+  lsSet("audiplex.mv.direction", direction);
+  $("music-video").close();
+  toast("Music video queued");
+  selectTab("videos");
+});
+
+// Videos tab: list jobs; auto-refresh every 10 s while any job is active.
+async function renderVideosView() {
+  clearInterval(state.videoTimer);
+  const jobs = await guard(() => get("/api/music-video/jobs"));
+  if (!jobs || state.view !== renderVideosView) return;
+  setCrumbs([{ label: "Videos" }]);
+  jobs.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)) || b.id - a.id);
+  const act = (path, msg) => async () => {
+    if (await guard(() => api("POST", path), msg) !== undefined) renderVideosView();
+  };
+  render(jobs.length ? el("div", {}, jobs.map((j) => {
+    const slot = el("div", {});
+    return el("div", { class: "job", "data-filter": `${j.title} ${j.status}`.toLowerCase() },
+      el("div", { class: "head" },
+        el("span", { class: "title" }, j.title),
+        el("span", { class: "sub" }, `${j.quality} · ${j.status}${j.detail ? ` · ${j.detail}` : ""}`)),
+      el("progress", { max: Math.max(j.clips_total, 1), value: j.clips_done }),
+      el("div", { class: "actions" },
+        ACTIVE_JOB.includes(j.status) ? el("button", { class: "danger", onclick: act(`/api/music-video/jobs/${j.id}/cancel`, "Cancelled") }, "Cancel") : null,
+        ["failed", "cancelled"].includes(j.status) ? el("button", { onclick: act(`/api/music-video/jobs/${j.id}/retry`, "Retrying") }, "Retry") : null,
+        j.has_video ? el("button", {
+          onclick: async (ev) => {
+            const v = await guard(() => get(`/api/music-video/jobs/${j.id}/video-url`));
+            if (!v) return;
+            ev.target.hidden = true;
+            slot.replaceChildren(
+              el("video", { controls: true, preload: "metadata", src: v.url }),
+              el("a", { href: v.url, download: "" }, "Download"));
+          },
+        }, "Play") : null),
+      slot);
+  })) : el("p", { class: "muted" }, "No music videos yet. Use 🎬 on a song."));
+  if (jobs.some((j) => ACTIVE_JOB.includes(j.status))) {
+    state.videoTimer = setInterval(() => {
+      // Don't rebuild the list under a video that is on screen.
+      if (state.view === renderVideosView && !document.hidden && !$("content").querySelector("video")) renderVideosView();
+    }, 10000);
+  }
+}
+
 // ---- tabs + boot -------------------------------------------------------------
 
 const TABS = {
@@ -467,6 +647,7 @@ const TABS = {
   folders: () => showFolder(null),
   playlists: showPlaylists,
   favorites: showFavorites,
+  videos: renderVideosView,
 };
 
 function selectTab(tab) {

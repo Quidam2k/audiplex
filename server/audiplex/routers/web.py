@@ -25,7 +25,7 @@ _FILES = {
 }
 _HEADERS = {
     "Content-Security-Policy": (
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self'; "
         "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
         "frame-ancestors 'none'"
     ),

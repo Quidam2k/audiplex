@@ -352,3 +352,30 @@ class DjTrackTag(Base):
     tag: Mapped[str] = mapped_column(String(40), primary_key=True, index=True)
     persona: Mapped[str | None] = mapped_column(String(50))
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
+class MusicVideoJob(Base):
+    """One "Music video" render (#6172): a song, the images Todd picked, a direction.
+
+    image_paths holds absolute paths, all inside image_folder (the folder he
+    chose in the UI; the router refuses anything else). The worker process
+    (music_video/worker.py) moves status queued -> analyzing -> rendering ->
+    stitching -> done | failed | cancelled.
+    """
+
+    __tablename__ = "music_video_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    track_id: Mapped[int] = mapped_column(Integer, index=True)
+    quality: Mapped[str] = mapped_column(String(10), default="draft")
+    image_folder: Mapped[str] = mapped_column(Text)
+    image_paths: Mapped[str] = mapped_column(Text)  # JSON list
+    direction: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
+    detail: Mapped[str] = mapped_column(Text, default="")
+    clips_total: Mapped[int] = mapped_column(Integer, default=0)
+    clips_done: Mapped[int] = mapped_column(Integer, default=0)
+    plan_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
