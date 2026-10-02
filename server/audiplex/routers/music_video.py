@@ -96,6 +96,14 @@ def _job_out(j: MusicVideoJob) -> dict:
 
 # ---- estimate / plan ---------------------------------------------------------
 
+@router.get("/open/{track_id}")
+def open_in_comfy_workflows(track_id: int, db: Session = Depends(get_db), _user=Depends(get_admin_user)):
+    """The 🎬 button now opens comfy_workflows' label_tool Music Video tab (the feature moved
+    there 2026-10-01); this hands the page the song's path, which the web UI doesn't carry."""
+    t = _track(db, track_id)
+    return {"song": t.file_path, "title": t.title, "port": 7890}
+
+
 @router.get("/estimate/{track_id}")
 def estimate(track_id: int, quality: str = "draft", db: Session = Depends(get_db),
              _user=Depends(get_admin_user)):

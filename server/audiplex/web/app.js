@@ -732,6 +732,17 @@ async function mvOpenFolder(path) {
 }
 
 async function openMusicVideo(track) {
+  // Moved 2026-10-01: music videos are made in comfy_workflows' label_tool (Music Video tab).
+  const where = await guard(() => get(`/api/music-video/open/${track.id}`));
+  if (where) {
+    const qs = `tab=musicvideo&song=${encodeURIComponent(where.song)}&title=${encodeURIComponent(where.title)}`;
+    window.open(`http://${location.hostname}:${where.port}/?${qs}`, "_blank");
+    return;
+  }
+  return openMusicVideoLegacy(track);
+}
+
+async function openMusicVideoLegacy(track) {
   Object.assign(MV, { track, est: null, plan: null, folder: "", selected: [], badges: new Map(), items: [] });
   mvResetThumbs();
   $("mv-title").textContent = `Music video: ${track.title} (${fmtDuration(track.duration_seconds)})`;
