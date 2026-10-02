@@ -148,7 +148,7 @@ def _plan_for(t: Track, quality: str, start: bool = True) -> dict:
     if a is not None:
         segs = planner.plan_variable(a["duration"], a["beats"], a["vocal_spans"])
         return {"status": "ready", "duration": a["duration"], "tempo": a["tempo"],
-                **planner.plan_dict(segs, quality)}
+                **planner.plan_dict(segs, quality, a["vocal_spans"])}
     with _analysis_lock:
         if t.file_path in _analysis_failed:
             return {"status": "failed", "detail": _analysis_failed[t.file_path]}

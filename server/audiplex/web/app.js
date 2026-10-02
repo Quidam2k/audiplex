@@ -527,13 +527,16 @@ function mvResetThumbs() {
 const mvNeed = () => (MV.plan && MV.plan.status === "ready" ? MV.plan.n_images : 0);
 const fmtMins = (s) => (s < 90 ? `${Math.round(s)} s` : `${Math.round(s / 60)} min`);
 
-// MV.selected: [{name, sing, prompt}] in clip order. sing = lip sync that clip to
-// the song; prompt = Direction for that clip only ("" = the overall one).
+// MV.selected: [{name, sing, prompt, singSet}] in clip order. sing = lip sync that clip
+// to the song; prompt = Direction for that clip only ("" = the overall one). Until Todd
+// touches the box (singSet), sing follows whether that clip's slot has vocals in it.
 const mvIndex = (name) => MV.selected.findIndex((c) => c.name === name);
 
 function mvPaint() {
-  const n = mvNeed(), k = MV.selected.length, sings = MV.selected.filter((c) => c.sing).length;
-  for (const [name, { btn, badge, controls, sing, promptBtn, prompt }] of MV.badges) {
+  const n = mvNeed(), segs = n ? MV.plan.segments : [];
+  MV.selected.forEach((c, i) => { if (!c.singSet && segs[i]) c.sing = segs[i].sings; });
+  const k = MV.selected.length, sings = MV.selected.filter((c) => c.sing).length;
+  for (const [name, { btn, badge, controls, sing, hint, promptBtn, prompt }] of MV.badges) {
     const i = mvIndex(name), on = i >= 0;
     btn.classList.toggle("selected", on);
     btn.setAttribute("aria-pressed", on ? "true" : "false");
@@ -542,6 +545,7 @@ function mvPaint() {
     controls.hidden = !on;
     if (on) {
       sing.checked = MV.selected[i].sing;
+      hint.textContent = segs[i] && !segs[i].sings ? "no vocals" : "";
       promptBtn.classList.toggle("on", !!MV.selected[i].prompt);
     } else {
       prompt.hidden = true;
@@ -574,6 +578,7 @@ async function mvLoadPlan(retry = false) {
       need.replaceChildren(
         `You need ${p.n_images} images: clips of ${p.clip_min}–${p.clip_max} s, cut between lyric lines` +
         (p.forced_cuts ? ` (${p.forced_cuts} cut${p.forced_cuts > 1 ? "s" : ""} had to land mid-line)` : "") + ". " +
+        `${p.vocal_clips} of the ${p.n_images} have singing; the others (intro, instrumental breaks) start with 🎤 Sings off. ` +
         `Estimated render: ~${fmtMins(p.est_render_seconds)} total, ${fmtMins(p.clip_render_min)}–${fmtMins(p.clip_render_max)} per clip.`);
       break;
     }
@@ -659,20 +664,21 @@ async function mvOpenFolder(path) {
         const i = mvIndex(name);
         if (i >= 0) MV.selected.splice(i, 1);
         else if (mvNeed() && MV.selected.length >= mvNeed()) return toast("That's enough images — deselect one to swap");
-        else { MV.selected.push({ name, sing: true, prompt: "" }); MV.badges.get(name).prompt.value = ""; }
+        else { MV.selected.push({ name, sing: true, prompt: "", singSet: false }); MV.badges.get(name).prompt.value = ""; }
         mvPaint();
       },
     }, img, badge);
     const sing = el("input", { type: "checkbox", title: "Lip sync this clip to the song",
-      onchange: () => { const i = mvIndex(name); if (i >= 0) { MV.selected[i].sing = sing.checked; mvPaint(); } } });
+      onchange: () => { const i = mvIndex(name); if (i >= 0) { Object.assign(MV.selected[i], { sing: sing.checked, singSet: true }); mvPaint(); } } });
     const prompt = el("textarea", { class: "clip-prompt", rows: 2, maxlength: 1000, hidden: true,
       placeholder: "Direction for this clip (blank = use the overall; <lora:name:0.8> adds a LoRA for this clip)",
       oninput: () => { const i = mvIndex(name); if (i >= 0) { MV.selected[i].prompt = prompt.value.trim(); mvPaint(); } } });
     const promptBtn = el("button", { type: "button", title: "Direction for this clip only",
       onclick: () => { prompt.hidden = !prompt.hidden; if (!prompt.hidden) prompt.focus(); } }, "✎");
-    const controls = el("div", { class: "controls", hidden: true }, el("label", {}, sing, "🎤 Sings"), promptBtn);
+    const hint = el("span", { class: "hint", title: "No singing in this clip's part of the song (intro, bridge…)" });
+    const controls = el("div", { class: "controls", hidden: true }, el("label", {}, sing, "🎤 Sings"), hint, promptBtn);
     const wrap = el("div", { class: "thumb-wrap" }, btn, controls, prompt);
-    MV.badges.set(name, { btn, badge, controls, sing, promptBtn, prompt });
+    MV.badges.set(name, { btn, badge, controls, sing, hint, promptBtn, prompt });
     return { name, width, height, img, wrap };
   });
   MV.items = items;

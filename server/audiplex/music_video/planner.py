@@ -221,9 +221,19 @@ def plan_variable(duration: float, beats, vocal_spans, *, min_len: float = VAR_M
     return segments
 
 
-def plan_dict(segments, quality: str) -> dict:
-    """What the UI shows before picking: image count, per-clip range, render estimate."""
+SINGS_MIN_VOCALS = 1.0  # a clip with at least this many seconds of singing defaults to lip sync
+
+
+def vocal_seconds(start: float, end: float, vocal_spans) -> float:
+    """How much of [start, end] has singing in it."""
+    return sum(max(0.0, min(end, e) - max(start, s)) for s, e in vocal_spans)
+
+
+def plan_dict(segments, quality: str, vocal_spans=()) -> dict:
+    """What the UI shows before picking: image count, per-clip range, render estimate,
+    and per clip whether anyone is singing (intro / instrumental bridge -> no)."""
     lens = [s.duration for s in segments]
+    vox = [vocal_seconds(s.start, s.end, vocal_spans) for s in segments]
     return {
         "n_images": len(segments),
         "clip_min": round(min(lens), 1), "clip_max": round(max(lens), 1),
@@ -231,6 +241,8 @@ def plan_dict(segments, quality: str) -> dict:
         "est_render_seconds": estimate_render_seconds(segments, quality),
         "clip_render_min": clip_render_seconds(min(lens), quality),
         "clip_render_max": clip_render_seconds(max(lens), quality),
-        "segments": [{"start": round(s.start, 3), "end": round(s.end, 3), "forced": s.forced}
-                     for s in segments],
+        "vocal_clips": sum(v >= SINGS_MIN_VOCALS for v in vox),
+        "segments": [{"start": round(s.start, 3), "end": round(s.end, 3), "forced": s.forced,
+                      "vocals": round(v, 1), "sings": v >= SINGS_MIN_VOCALS}
+                     for s, v in zip(segments, vox)],
     }

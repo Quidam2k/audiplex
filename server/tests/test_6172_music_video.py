@@ -235,6 +235,18 @@ def test_plan_dict_estimate_uses_frames():
     assert planner.plan_dict(segs, "draft")["est_render_seconds"] < total
 
 
+def test_plan_dict_marks_clips_with_singing():
+    # intro 0-10 s, vocals 10-30 s, instrumental 30-45 s, vocals 45-60 s
+    spans = [(10.0, 30.0), (45.0, 60.0)]
+    segs = [planner.Segment(0, 9.5), planner.Segment(9.5, 20), planner.Segment(20, 30.5),
+            planner.Segment(30.5, 44.5), planner.Segment(44.5, 60)]
+    d = planner.plan_dict(segs, "draft", spans)
+    assert [s["sings"] for s in d["segments"]] == [False, True, True, False, True]
+    assert d["segments"][1]["vocals"] == 10.0 and d["vocal_clips"] == 3
+    assert planner.vocal_seconds(29.5, 31, spans) == 0.5  # a sliver of a line isn't singing
+    assert all(s["sings"] is False for s in planner.plan_dict(segs, "draft")["segments"])
+
+
 # ---- shared DB fixtures -----------------------------------------------------
 
 

@@ -117,6 +117,7 @@ button.thumb.selected { outline: 3px solid var(--accent); outline-offset: -3px; 
   padding: 3px 6px; background: rgba(0, 0, 0, .6); color: #fff; font-size: 13px;
 }
 .thumb-wrap .controls label { display: flex; align-items: center; gap: 4px; cursor: pointer; margin: 0; }
+.thumb-wrap .controls .hint { font-size: 11px; opacity: .8; }
 .thumb-wrap .controls input[type=checkbox] { margin: 0; accent-color: var(--accent); }
 .thumb-wrap .controls button { margin-left: auto; width: auto; min-height: 0; padding: 0 6px; line-height: 22px; background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.5); }
 .thumb-wrap .controls button.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
