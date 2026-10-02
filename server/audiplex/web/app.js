@@ -659,7 +659,7 @@ async function mvOpenFolder(path) {
         const i = mvIndex(name);
         if (i >= 0) MV.selected.splice(i, 1);
         else if (mvNeed() && MV.selected.length >= mvNeed()) return toast("That's enough images — deselect one to swap");
-        else { MV.selected.push({ name, sing: false, prompt: "" }); MV.badges.get(name).prompt.value = ""; }
+        else { MV.selected.push({ name, sing: true, prompt: "" }); MV.badges.get(name).prompt.value = ""; }
         mvPaint();
       },
     }, img, badge);
