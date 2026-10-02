@@ -809,6 +809,8 @@ async function renderVideosView() {
       el("div", { class: "actions" },
         ACTIVE_JOB.includes(j.status) ? el("button", { class: "danger", onclick: act(`/api/music-video/jobs/${j.id}/cancel`, "Cancelled") }, "Cancel") : null,
         ["failed", "cancelled"].includes(j.status) ? el("button", { onclick: act(`/api/music-video/jobs/${j.id}/retry`, "Retrying") }, "Retry") : null,
+        j.quality === "draft" ? el("button", { title: "Same images, Sings ticks, directions, aspect and cuts, at Final quality; queues behind any render in progress",
+          onclick: act(`/api/music-video/jobs/${j.id}/rerender?quality=final`, "Final render queued") }, "Render as Final") : null,
         j.has_video ? el("button", {
           onclick: async (ev) => {
             const v = await guard(() => get(`/api/music-video/jobs/${j.id}/video-url`));

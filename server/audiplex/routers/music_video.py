@@ -410,6 +410,28 @@ def retry_job(job_id: int, db: Session = Depends(get_db), _user=Depends(get_admi
     return _job_out(j)
 
 
+@router.post("/jobs/{job_id}/rerender", status_code=201)
+def rerender_job(job_id: int, quality: str = "final", db: Session = Depends(get_db),
+                 _user=Depends(get_admin_user)):
+    """The same video again at another quality: same song, images, Sings ticks,
+    per-clip and overall directions, prompt, aspect and cut points. It queues
+    behind whatever is rendering."""
+    _quality(quality)
+    j = _job(db, job_id)
+    missing = [c["path"] for c in worker._clips(j.image_paths) if not Path(c["path"]).is_file()]
+    if missing:
+        raise HTTPException(409, f"{len(missing)} of its images are gone, e.g. {Path(missing[0]).name}")
+    new = MusicVideoJob(track_id=j.track_id, quality=quality, aspect=j.aspect or "16:9",
+                        image_folder=j.image_folder, image_paths=j.image_paths, direction=j.direction,
+                        prompt_template=j.prompt_template, plan_json=j.plan_json, status="queued",
+                        detail=f"Queued (re-render of #{j.id})", clips_total=j.clips_total)
+    db.add(new)
+    db.commit()
+    db.refresh(new)
+    worker.spawn_worker(_base())
+    return _job_out(new)
+
+
 # ---- video (signed URL, so <video> can stream it with range requests) -------
 
 def _sig(job_id: int, exp: int) -> str:

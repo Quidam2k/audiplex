@@ -800,6 +800,28 @@ def test_create_job_aspect(api, session, tmp_path, folder):
     assert api.get(f"/api/music-video/estimate/{t.id}", headers=api.h).json()["last_aspect"] == "9:16"
 
 
+def test_rerender_copies_everything(api, session, tmp_path, folder):
+    t = _make_track(session, tmp_path, 16.0)
+    _ready(api, t, 16.0)
+    r = api.post("/api/music-video/jobs", headers=api.h, json={
+        "track_id": t.id, "folder": str(folder), "direction": "neon <lora:z:1>", "aspect": "9:16",
+        "images": [{"name": "a.png", "sing": True}, {"name": "b.PNG", "prompt": "bow"}],
+        "prompt_template": "{direction} slowly"})
+    src = session.get(MusicVideoJob, r.json()["id"])
+    src.status = "done"
+    session.commit()
+    r = api.post(f"/api/music-video/jobs/{src.id}/rerender?quality=final", headers=api.h)
+    assert r.status_code == 201 and r.json()["quality"] == "final" and r.json()["status"] == "queued"
+    new = session.get(MusicVideoJob, r.json()["id"])
+    for f in ("track_id", "aspect", "image_folder", "image_paths", "direction", "prompt_template",
+              "plan_json", "clips_total"):
+        assert getattr(new, f) == getattr(src, f), f
+    assert len(api.spawned) == 2
+    assert api.post(f"/api/music-video/jobs/{src.id}/rerender?quality=bogus", headers=api.h).status_code == 400
+    (folder / "b.PNG").unlink()
+    assert api.post(f"/api/music-video/jobs/{src.id}/rerender", headers=api.h).status_code == 409
+
+
 def test_non_admin_forbidden(api, session, tmp_path, folder):
     t = _make_track(session, tmp_path, 10.0)
     h = api.plain_h
