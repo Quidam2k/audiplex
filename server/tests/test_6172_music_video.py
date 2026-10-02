@@ -145,6 +145,75 @@ def test_build_prompt():
     assert "lora" not in p.lower()
 
 
+def test_build_prompt_template():  # #6867
+    assert worker.build_prompt("spin", "Slow {direction}, neon.") == "Slow spin, neon."
+    assert worker.build_prompt("", "Slow {direction}, neon.") == "Slow neon."
+    assert worker.build_prompt("spin.", "") == "spin. " + worker.DEFAULT_MOTION
+    assert worker.build_prompt("spin", "No placeholder") == "spin. No placeholder"
+    assert worker.build_prompt("", "{direction}") == worker.DEFAULT_MOTION
+    assert "lora" not in worker.build_prompt("x", "<lora:a:1> {direction} go").lower()
+    assert worker.build_prompt("", worker.DEFAULT_TEMPLATE) == worker.DEFAULT_MOTION
+
+
+# ---- variable planner (#6867) -----------------------------------------------
+
+def _check_var(segs, duration):
+    assert segs[0].start == 0 and abs(segs[-1].end - duration) < 1e-6
+    for a, b in zip(segs, segs[1:]):
+        assert a.end == b.start
+    for s in segs:
+        assert planner.VAR_MIN - 1e-6 <= s.duration <= planner.VAR_MAX + 1e-6, s
+
+
+@pytest.mark.parametrize("duration", [15.0, 15.1, 20.0, 31.0, 90.0, 183.7, 412.3])
+def test_plan_variable_bounds(duration):
+    segs = planner.plan_variable(duration, _beats(duration), [])
+    _check_var(segs, duration)
+    assert not any(s.forced for s in segs)
+
+
+def test_plan_variable_short_song_is_one_clip():
+    assert len(planner.plan_variable(4.0, [], [])) == 1
+    assert len(planner.plan_variable(15.0, [], [])) == 1
+
+
+def test_plan_variable_count_follows_the_song():
+    # instrumental: no lyric reason to cut, so clips sit near the 8 s target
+    segs = planner.plan_variable(96.0, _beats(96.0), [])
+    assert 10 <= len(segs) <= 14
+    # long vocal lines push cuts into the gaps, so clips get longer and fewer
+    spans = [[g + 0.5, g + 12.5] for g in range(0, 96, 14)]
+    segs2 = planner.plan_variable(98.0, _beats(98.0), spans)
+    _check_var(segs2, 98.0)
+    assert not any(s.forced for s in segs2)
+    assert len(segs2) < len(segs)
+
+
+def test_plan_variable_no_mid_lyric_cut_when_gaps_allow():
+    spans = [[1, 9], [10.5, 19], [20.5, 33], [34.5, 44], [45.5, 58]]
+    segs = planner.plan_variable(60.0, _beats(60.0), spans)
+    _check_var(segs, 60.0)
+    for s in segs[:-1]:
+        assert not planner.in_vocals(s.end, spans), s
+
+
+def test_plan_variable_forced_only_when_a_vocal_line_outruns_max():
+    segs = planner.plan_variable(40.0, _beats(40.0), [[2, 38]])
+    _check_var(segs, 40.0)
+    assert any(s.forced for s in segs)
+
+
+def test_plan_dict_estimate_uses_frames():
+    segs = planner.plan_variable(60.0, _beats(60.0), [])
+    d = planner.plan_dict(segs, "final")
+    assert d["n_images"] == len(segs) == len(d["segments"])
+    assert d["clip_min"] >= 5 and d["clip_max"] <= 15
+    total = sum(int(planner.h3_length(s.duration) * 1.6) for s in segs)
+    assert d["est_render_seconds"] == total
+    assert d["clip_render_min"] <= d["clip_render_max"]
+    assert planner.plan_dict(segs, "draft")["est_render_seconds"] < total
+
+
 # ---- shared DB fixtures -----------------------------------------------------
 
 
@@ -309,6 +378,10 @@ def api(db_engine, tmp_path, monkeypatch):
     monkeypatch.setattr(get_settings(), "music_video_dir", str(tmp_path / "mvdir"))
     spawned = []
     monkeypatch.setattr(worker, "spawn_worker", lambda base: spawned.append(base) or True)
+    # #6867: song analysis is faked; tests mark a track analyzed via api.cache
+    cache, started = {}, []
+    monkeypatch.setattr(mv_router.analysis, "cached", lambda path, d: cache.get(str(path)))
+    monkeypatch.setattr(mv_router, "_start_analysis", lambda path, d: started.append(path))
 
     s = Sess()
     s.add(User(username="plain", password_hash=hash_password("pw"), display_name="P", is_admin=False))
@@ -323,7 +396,14 @@ def api(db_engine, tmp_path, monkeypatch):
         c.h = hdr("testuser", "testpass")
         c.plain_h = hdr("plain", "pw")
         c.spawned = spawned
+        c.cache = cache
+        c.started = started
         yield c
+
+
+def _ready(api, t, duration):
+    api.cache[t.file_path] = {"duration": duration, "tempo": 120.0,
+                              "beats": _beats(duration), "vocal_spans": []}
 
 
 @pytest.fixture
@@ -345,8 +425,9 @@ def test_estimate_has_no_default_folder(api, session, tmp_path):
     t = _make_track(session, tmp_path, 90.0)
     r = api.get(f"/api/music-video/estimate/{t.id}", headers=api.h)
     assert r.status_code == 200
-    assert r.json()["n_images"] == 18
     assert r.json()["last_folder"] is None
+    assert r.json()["last_prompt_template"] == worker.DEFAULT_TEMPLATE
+    assert r.json()["default_prompt_template"] == worker.DEFAULT_TEMPLATE
     assert api.get("/api/music-video/estimate/9999", headers=api.h).status_code == 404
     assert api.get(f"/api/music-video/estimate/{t.id}?quality=bogus", headers=api.h).status_code == 400
 
@@ -391,8 +472,47 @@ def test_create_job_rejects_bad_names(api, session, tmp_path, folder, name):
     assert api.spawned == []
 
 
+def test_plan_endpoint_states(api, session, tmp_path):
+    t = _make_track(session, tmp_path, 90.0)
+    r = api.get(f"/api/music-video/plan/{t.id}", headers=api.h).json()
+    assert r["status"] == "analyzing" and r["est_analysis_seconds"] > 0
+    assert api.started == [t.file_path]
+    api.get(f"/api/music-video/plan/{t.id}", headers=api.h)
+    assert api.started == [t.file_path]  # one analysis per song at a time
+    _ready(api, t, 90.0)
+    r = api.get(f"/api/music-video/plan/{t.id}?quality=final", headers=api.h).json()
+    assert r["status"] == "ready"
+    assert r["n_images"] == len(r["segments"]) and 6 <= r["n_images"] <= 18
+    assert 5 <= r["clip_min"] <= r["clip_max"] <= 15
+    assert r["est_render_seconds"] > 0
+    assert api.get(f"/api/music-video/plan/{t.id}?quality=bogus", headers=api.h).status_code == 400
+    mv_router._analysis_running.discard(t.file_path)
+
+
+def test_plan_endpoint_failed_and_retry(api, session, tmp_path):
+    t = _make_track(session, tmp_path, 30.0)
+    mv_router._analysis_failed[t.file_path] = "demucs failed: boom"
+    try:
+        r = api.get(f"/api/music-video/plan/{t.id}", headers=api.h).json()
+        assert r["status"] == "failed" and "boom" in r["detail"]
+        r = api.get(f"/api/music-video/plan/{t.id}?retry=1", headers=api.h).json()
+        assert r["status"] == "analyzing"
+    finally:
+        mv_router._analysis_failed.pop(t.file_path, None)
+        mv_router._analysis_running.discard(t.file_path)
+
+
+def test_create_job_needs_analysis(api, session, tmp_path, folder):
+    t = _make_track(session, tmp_path, 16.0)
+    r = api.post("/api/music-video/jobs", headers=api.h,
+                 json={"track_id": t.id, "folder": str(folder), "images": ["a.png", "b.PNG"]})
+    assert r.status_code == 409
+    assert session.query(MusicVideoJob).count() == 0
+
+
 def test_create_job_wrong_count_and_long_direction(api, session, tmp_path, folder):
-    t = _make_track(session, tmp_path, 10.0)
+    t = _make_track(session, tmp_path, 16.0)
+    _ready(api, t, 16.0)  # plans to 2 clips
     for imgs in (["a.png"], ["a.png", "b.PNG", "a.png"]):
         r = api.post("/api/music-video/jobs", headers=api.h,
                      json={"track_id": t.id, "folder": str(folder), "images": imgs})
@@ -400,18 +520,27 @@ def test_create_job_wrong_count_and_long_direction(api, session, tmp_path, folde
     r = api.post("/api/music-video/jobs", headers=api.h, json={
         "track_id": t.id, "folder": str(folder), "images": ["a.png", "b.PNG"], "direction": "x" * 1001})
     assert r.status_code == 400
+    r = api.post("/api/music-video/jobs", headers=api.h, json={
+        "track_id": t.id, "folder": str(folder), "images": ["a.png", "b.PNG"],
+        "prompt_template": "x" * 2001})
+    assert r.status_code == 400
     assert session.query(MusicVideoJob).count() == 0
 
 
 def test_create_job_valid(api, session, tmp_path, folder):
-    t = _make_track(session, tmp_path, 10.0)
+    t = _make_track(session, tmp_path, 16.0)
+    _ready(api, t, 16.0)
     r = api.post("/api/music-video/jobs", headers=api.h, json={
-        "track_id": t.id, "folder": str(folder), "images": ["a.png", "b.PNG"], "direction": "  moody  "})
+        "track_id": t.id, "folder": str(folder), "images": ["a.png", "b.PNG"], "direction": "  moody  ",
+        "prompt_template": " {direction} in slow motion "})
     assert r.status_code == 201
     assert r.json()["status"] == "queued" and r.json()["clips_total"] == 2
     assert len(api.spawned) == 1
     job = session.query(MusicVideoJob).one()
     assert job.direction == "moody"
+    assert job.prompt_template == "{direction} in slow motion"
+    plan = json.loads(job.plan_json)  # the worker renders exactly what Todd was shown
+    assert [round(s["end"] - s["start"]) for s in plan["segments"]] == [8, 8]
     paths = json.loads(job.image_paths)
     assert len(paths) == 2
     root = str(folder.resolve())
@@ -419,6 +548,7 @@ def test_create_job_valid(api, session, tmp_path, folder):
     assert all(p.startswith(root) and "sibling" not in p for p in paths)
     est = api.get(f"/api/music-video/estimate/{t.id}", headers=api.h).json()
     assert est["last_folder"] == root  # remembered from his last job, never a default
+    assert est["last_prompt_template"] == "{direction} in slow motion"
 
 
 def test_non_admin_forbidden(api, session, tmp_path, folder):

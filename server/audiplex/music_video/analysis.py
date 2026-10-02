@@ -59,17 +59,27 @@ def _separate_vocals(audio_path: Path, workdir: Path) -> Path:
     return hits[0]
 
 
+def _cache_file(audio_path: Path, cache_dir: Path) -> Path:
+    st = audio_path.stat()
+    key = hashlib.sha1(f"{str(audio_path).lower()}|{st.st_size}|{int(st.st_mtime)}".encode()).hexdigest()[:16]
+    return cache_dir / f"analysis-{key}.json"
+
+
+def cached(audio_path: str | Path, cache_dir: str | Path) -> dict | None:
+    """The cached analysis for this file, or None if it hasn't been run (#6867)."""
+    cache = _cache_file(Path(audio_path), Path(cache_dir))
+    return json.loads(cache.read_text(encoding="utf-8")) if cache.exists() else None
+
+
 def analyze(audio_path: str | Path, cache_dir: str | Path) -> dict:
     """{duration, tempo, beats, vocal_spans} for one song, cached on disk."""
     import librosa
     import numpy as np
 
     audio_path = Path(audio_path)
-    st = audio_path.stat()
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    key = hashlib.sha1(f"{str(audio_path).lower()}|{st.st_size}|{int(st.st_mtime)}".encode()).hexdigest()[:16]
-    cache = cache_dir / f"analysis-{key}.json"
+    cache = _cache_file(audio_path, cache_dir)
     if cache.exists():
         return json.loads(cache.read_text(encoding="utf-8"))
 

@@ -66,12 +66,17 @@
     <label>Direction
       <textarea id="mv-direction" rows="3" maxlength="1000" placeholder="How the singers move, what they're doing, what changes in the background…"></textarea>
     </label>
+    <label>Video prompt <span class="muted">({direction} is replaced by the Direction above)</span>
+      <textarea id="mv-prompt" rows="3" maxlength="2000"></textarea>
+    </label>
+    <button type="button" id="mv-prompt-reset" class="link">Reset to default</button>
     <div class="actions">
       <input id="mv-folder" placeholder="Image folder (absolute path)" aria-label="Image folder">
       <button type="button" id="mv-open">Open</button>
       <button type="button" id="mv-up" hidden>Up</button>
     </div>
     <div id="mv-subs" class="actions"></div>
+    <label class="mv-size">Thumbnail size <input id="mv-size" type="range" min="80" max="360" step="10"></label>
     <div id="mv-grid" class="thumbs"></div>
     <div class="mv-foot">
       <div class="fill"><progress id="mv-fill" value="0" max="1"></progress><span id="mv-count">0 / 0 images</span></div>

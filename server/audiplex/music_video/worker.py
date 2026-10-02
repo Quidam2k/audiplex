@@ -44,17 +44,30 @@ DEFAULT_MOTION = (
     "Cinematic music video shot. Natural, fluid motion with gentle camera movement; "
     "the scene comes alive."
 )
+# #6867: Todd can edit the whole prompt; {direction} is where his Direction text goes.
+DEFAULT_TEMPLATE = "{direction}. " + DEFAULT_MOTION
 _LORA = re.compile(r"<lora:[^>]*>", re.I)
 VIDEO_EXT = {".mp4", ".webm", ".mov", ".mkv"}
 
 
 # ---- prompt -----------------------------------------------------------------
 
-def build_prompt(direction: str) -> str:
-    """Todd's Direction text leads; the default motion line follows. LoRA tags
-    are stripped (the auto-LoRA path leans NSFW; this pipeline uses none)."""
-    d = " ".join(_LORA.sub("", direction or "").split())
-    return f"{d.rstrip('.')}. {DEFAULT_MOTION}" if d else DEFAULT_MOTION
+def _clean(text: str) -> str:
+    return " ".join(_LORA.sub("", text or "").split())
+
+
+def build_prompt(direction: str, template: str | None = None) -> str:
+    """Fill Todd's prompt template (default: Direction, then the motion line) with
+    his Direction text. An empty Direction drops "{direction}." cleanly. LoRA tags
+    are stripped from both (the auto-LoRA path leans NSFW; this pipeline uses none)."""
+    tpl = _clean(template) or DEFAULT_TEMPLATE
+    d = _clean(direction).rstrip(". ")
+    if "{direction}" not in tpl:
+        return f"{d}. {tpl}" if d else tpl
+    if d:
+        return tpl.replace("{direction}", d)
+    out = re.sub(r"\{direction\}[.,;:]?\s*", "", tpl).strip()
+    return out or DEFAULT_MOTION
 
 
 # ---- ComfyUI / GPU ----------------------------------------------------------
@@ -225,7 +238,7 @@ def process_job(db, job, base: Path, *, run=None, sleep=time.sleep) -> None:
         }
         save(plan_json=json.dumps(plan), clips_total=len(segs))
 
-    prompt = build_prompt(job.direction)
+    prompt = build_prompt(job.direction, job.prompt_template)
     clips = []
     for i, (seg, image) in enumerate(zip(plan["segments"], images)):
         dest = jdir / "clips" / f"clip_{i:03d}.mp4"

@@ -511,7 +511,7 @@ async function showFavorites() {
 
 // ---- music video (#6172) ------------------------------------------------------
 
-const MV = { track: null, est: null, folder: "", selected: [], urls: [], gen: 0, badges: new Map() };
+const MV = { track: null, est: null, plan: null, planGen: 0, folder: "", selected: [], urls: [], gen: 0, badges: new Map() };
 const ACTIVE_JOB = ["queued", "analyzing", "rendering", "stitching"];
 
 function lsGet(k) { try { return localStorage.getItem(k) || ""; } catch { return ""; } }
@@ -523,8 +523,12 @@ function mvResetThumbs() {
   MV.urls = [];
 }
 
+// #6867: the image count comes from the song analysis (clips 5-15 s, cut between lyric lines)
+const mvNeed = () => (MV.plan && MV.plan.status === "ready" ? MV.plan.n_images : 0);
+const fmtMins = (s) => (s < 90 ? `${Math.round(s)} s` : `${Math.round(s / 60)} min`);
+
 function mvPaint() {
-  const n = MV.est ? MV.est.n_images : 0, k = MV.selected.length;
+  const n = mvNeed(), k = MV.selected.length;
   for (const [name, { btn, badge }] of MV.badges) {
     const i = MV.selected.indexOf(name);
     btn.classList.toggle("selected", i >= 0);
@@ -534,7 +538,7 @@ function mvPaint() {
   }
   $("mv-fill").max = Math.max(n, 1);
   $("mv-fill").value = k;
-  $("mv-count").textContent = `${k} / ${n} images`;
+  $("mv-count").textContent = n ? `${k} / ${n} images` : `${k} images picked (count comes after the analysis)`;
   $("mv-go").disabled = !n || k !== n;
 }
 
@@ -542,11 +546,36 @@ async function mvLoadEstimate() {
   const est = await guard(() => get(`/api/music-video/estimate/${MV.track.id}?quality=${q($("mv-quality").value)}`));
   if (!est) return null;
   MV.est = est;
-  $("mv-need").textContent = `You need ${est.n_images} images (one ~${est.clip_seconds} s clip each). ` +
-    `Estimated render: ~${Math.ceil(est.est_render_seconds / 60)} min.`;
-  MV.selected = MV.selected.slice(0, est.n_images);
-  mvPaint();
   return est;
+}
+
+// Analysis runs on the server (~1-2 min the first time per song); poll until the plan is ready.
+async function mvLoadPlan(retry = false) {
+  const gen = ++MV.planGen;
+  const need = $("mv-need");
+  for (let first = true; gen === MV.planGen && $("music-video").open; first = false) {
+    const url = `/api/music-video/plan/${MV.track.id}?quality=${q($("mv-quality").value)}` + (retry && first ? "&retry=1" : "");
+    const p = await guard(() => get(url));
+    if (!p || gen !== MV.planGen) return;
+    MV.plan = p;
+    if (p.status === "ready") {
+      need.replaceChildren(
+        `You need ${p.n_images} images: clips of ${p.clip_min}–${p.clip_max} s, cut between lyric lines` +
+        (p.forced_cuts ? ` (${p.forced_cuts} cut${p.forced_cuts > 1 ? "s" : ""} had to land mid-line)` : "") + ". " +
+        `Estimated render: ~${fmtMins(p.est_render_seconds)} total, ${fmtMins(p.clip_render_min)}–${fmtMins(p.clip_render_max)} per clip.`);
+      break;
+    }
+    if (p.status === "failed") {
+      need.replaceChildren(`Couldn't analyze the song: ${p.detail} `,
+        el("button", { type: "button", class: "link", onclick: () => mvLoadPlan(true) }, "Try again"));
+      break;
+    }
+    need.replaceChildren(`Analyzing the song to fit the clips to the lyrics (about ${fmtMins(p.est_analysis_seconds)} the first time)… ` +
+      "You can start picking images now.");
+    mvPaint();
+    await new Promise((r) => setTimeout(r, 4000));
+  }
+  mvPaint();
 }
 
 // <img> can't send the auth header: fetch -> blob -> object URL, ~6 at a time.
@@ -594,7 +623,7 @@ async function mvOpenFolder(path) {
       onclick: () => {
         const i = MV.selected.indexOf(name);
         if (i >= 0) MV.selected.splice(i, 1);
-        else if (MV.selected.length >= MV.est.n_images) return toast("That's enough images — deselect one to swap");
+        else if (mvNeed() && MV.selected.length >= mvNeed()) return toast("That's enough images — deselect one to swap");
         else MV.selected.push(name);
         mvPaint();
       },
@@ -608,7 +637,7 @@ async function mvOpenFolder(path) {
 }
 
 async function openMusicVideo(track) {
-  Object.assign(MV, { track, est: null, folder: "", selected: [], badges: new Map() });
+  Object.assign(MV, { track, est: null, plan: null, folder: "", selected: [], badges: new Map() });
   mvResetThumbs();
   $("mv-title").textContent = `Music video: ${track.title} (${fmtDuration(track.duration_seconds)})`;
   $("mv-quality").value = "draft";
@@ -620,13 +649,21 @@ async function openMusicVideo(track) {
   openDialog($("music-video"));  // #3696
   const est = await mvLoadEstimate();
   if (!est) return;
+  mvLoadPlan();
   $("mv-direction").value = lsGet("audiplex.mv.direction") || est.last_direction || "";
+  $("mv-prompt").value = lsGet("audiplex.mv.prompt") || est.last_prompt_template || est.default_prompt_template;
   const folder = lsGet("audiplex.mv.folder") || est.last_folder || "";
   $("mv-folder").value = folder;
   if (folder) mvOpenFolder(folder);
 }
 
-$("mv-quality").addEventListener("change", mvLoadEstimate);
+$("mv-quality").addEventListener("change", () => mvLoadPlan());
+$("mv-prompt-reset").addEventListener("click", () => { if (MV.est) $("mv-prompt").value = MV.est.default_prompt_template; });
+// Thumbnail size (#6867), remembered per browser.
+function mvThumbSize(px) { $("mv-grid").style.setProperty("--mv-thumb", `${px}px`); }
+$("mv-size").value = lsGet("audiplex.mv.thumb") || "140";
+mvThumbSize($("mv-size").value);
+$("mv-size").addEventListener("input", () => { mvThumbSize($("mv-size").value); lsSet("audiplex.mv.thumb", $("mv-size").value); });
 $("mv-open").addEventListener("click", () => mvOpenFolder($("mv-folder").value));
 $("mv-folder").addEventListener("keydown", (ev) => {
   if (ev.key === "Enter") { ev.preventDefault(); mvOpenFolder($("mv-folder").value); }
@@ -635,13 +672,15 @@ $("mv-cancel").addEventListener("click", () => $("music-video").close());
 $("music-video").addEventListener("close", mvResetThumbs);
 $("mv-go").addEventListener("click", async () => {
   const direction = $("mv-direction").value.trim();
+  const promptTemplate = $("mv-prompt").value.trim();
   const job = await guard(() => api("POST", "/api/music-video/jobs", {
     track_id: MV.track.id, quality: $("mv-quality").value, folder: MV.folder,
-    images: MV.selected.slice(), direction,
+    images: MV.selected.slice(), direction, prompt_template: promptTemplate,
   }));
   if (!job) return;
   lsSet("audiplex.mv.folder", MV.folder);
   lsSet("audiplex.mv.direction", direction);
+  lsSet("audiplex.mv.prompt", promptTemplate);
   $("music-video").close();
   toast("Music video queued");
   selectTab("videos");

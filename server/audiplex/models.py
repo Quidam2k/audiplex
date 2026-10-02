@@ -371,6 +371,7 @@ class MusicVideoJob(Base):
     image_folder: Mapped[str] = mapped_column(Text)
     image_paths: Mapped[str] = mapped_column(Text)  # JSON list
     direction: Mapped[str] = mapped_column(Text, default="")
+    prompt_template: Mapped[str | None] = mapped_column(Text, nullable=True)  # #6867, None = default
     status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
     detail: Mapped[str] = mapped_column(Text, default="")
     clips_total: Mapped[int] = mapped_column(Integer, default=0)
