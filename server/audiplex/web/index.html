@@ -87,6 +87,12 @@
     <div id="mv-subs" class="actions"></div>
     <p class="muted">Pictures are cropped (not stretched) to the aspect ratio. A picked picture lip syncs to the song (<b>🎤 Sings</b>) when its part of the song has singing, and not over the intro or an instrumental break; tick or untick to override (plain clips render about 15% faster), or ✎ to give that clip its own direction (its own &lt;lora:name:0.8&gt; tags add to the overall ones).</p>
     <label class="mv-size">Thumbnail size <input id="mv-size" type="range" min="80" max="360" step="10"><span id="mv-sort-note" class="muted"></span></label>
+    <div class="mv-filter">
+      <input id="mv-tags" list="mv-tag-list" autocomplete="off" aria-label="Filter by tags"
+        placeholder="Filter by tags, e.g. solo smile -1boy (tagged images only)">
+      <datalist id="mv-tag-list"></datalist>
+      <span id="mv-match" class="muted"></span>
+    </div>
     <div id="mv-grid" class="thumbs"></div>
     <div class="mv-foot">
       <div class="fill"><progress id="mv-fill" value="0" max="1"></progress><span id="mv-count">0 / 0 images</span></div>

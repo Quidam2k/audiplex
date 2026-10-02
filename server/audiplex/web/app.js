@@ -609,6 +609,49 @@ function mvSortGrid() {
   $("mv-sort-note").textContent = MV.items.length ? `Sorted by fit to ${mvAspect()}` : "";
 }
 
+// Tag filter (WD14 sidecars from comfy_workflows' batch_wd14_tag.py): every plain tag
+// must be present, no "-tag" may be; untagged images are hidden while it's on.
+function mvFilterTerms() {
+  const terms = $("mv-tags").value.toLowerCase().split(/[\s,]+/).filter((t) => t && t !== "-");
+  return { want: terms.filter((t) => !t.startsWith("-")), not: terms.filter((t) => t.startsWith("-")).map((t) => t.slice(1)) };
+}
+
+function mvShown(item, f) {
+  if (!f.want.length && !f.not.length) return true;
+  return !!item.tags && f.want.every((t) => item.tags.has(t)) && !f.not.some((t) => item.tags.has(t));
+}
+
+function mvApplyFilter() {
+  const f = mvFilterTerms();
+  let n = 0;
+  for (const i of MV.items) { i.wrap.hidden = !mvShown(i, f); if (!i.wrap.hidden) n++; }
+  const on = f.want.length || f.not.length;
+  $("mv-match").textContent = MV.items.length && on ? `${n.toLocaleString()} of ${MV.items.length.toLocaleString()} match` : "";
+  lsSet("audiplex.mv.tags", $("mv-tags").value);
+  mvLoadVisibleThumbs();
+}
+
+// Autocomplete the last word from this folder's tags, most common first.
+function mvTagSuggest() {
+  const v = $("mv-tags").value, m = v.match(/^(.*?)(-?)([^\s,-][^\s,]*)$/);
+  const opts = [];
+  if (m && MV.tagVocab) {
+    const part = m[3].toLowerCase();
+    for (const t of MV.tagVocab) {
+      if (t !== part && t.startsWith(part)) opts.push(el("option", { value: `${m[1]}${m[2]}${t} ` }));
+      if (opts.length >= 30) break;
+    }
+  }
+  $("mv-tag-list").replaceChildren(...opts);
+}
+
+// Thumbs load only for images the filter shows; already-loaded ones are kept.
+function mvLoadVisibleThumbs() {
+  if (!MV.folder) return;
+  const gen = ++MV.gen;
+  mvLoadThumbs(MV.folder, MV.items.filter((i) => !i.wrap.hidden && !i.img.getAttribute("src")), gen);
+}
+
 function mvSetAspect() {
   $("mv-grid").style.setProperty("--mv-aspect", mvAspect().replace(":", " / "));
   lsSet("audiplex.mv.aspect", mvAspect());
@@ -616,7 +659,7 @@ function mvSetAspect() {
   mvResetThumbs();
   for (const i of MV.items) i.img.removeAttribute("src");
   mvSortGrid();
-  mvLoadThumbs(MV.folder, MV.items, MV.gen);
+  mvLoadVisibleThumbs();
 }
 
 async function mvLoadThumbs(folder, items, gen) {
@@ -645,7 +688,6 @@ async function mvOpenFolder(path) {
   const data = await guard(() => get(`/api/music-video/images?folder=${q(path)}`));
   if (!data) return;
   mvResetThumbs();
-  const gen = MV.gen;
   MV.folder = data.folder;
   MV.selected = [];
   MV.badges = new Map();
@@ -655,7 +697,8 @@ async function mvOpenFolder(path) {
   const sep = data.folder.includes("\\") ? "\\" : "/";
   $("mv-subs").replaceChildren(...data.subfolders.map((s) =>
     el("button", { type: "button", onclick: () => mvOpenFolder(data.folder.replace(/[\\/]+$/, "") + sep + s) }, `📁 ${s}`)));
-  const items = data.images.map(({ name, width, height }) => {
+  MV.tagVocab = data.tags || [];
+  const items = data.images.map(({ name, width, height, tags }) => {
     const img = el("img", { alt: name });
     const badge = el("span", { class: "badge", hidden: true });
     const btn = el("button", {
@@ -679,13 +722,13 @@ async function mvOpenFolder(path) {
     const controls = el("div", { class: "controls", hidden: true }, el("label", {}, sing, "🎤 Sings"), hint, promptBtn);
     const wrap = el("div", { class: "thumb-wrap" }, btn, controls, prompt);
     MV.badges.set(name, { btn, badge, controls, sing, hint, promptBtn, prompt });
-    return { name, width, height, img, wrap };
+    return { name, width, height, img, wrap, tags: tags && new Set(tags.map((t) => data.tags[t])) };
   });
   MV.items = items;
   if (!items.length) $("mv-grid").replaceChildren(el("p", { class: "muted" }, "No images in this folder."));
   mvSortGrid();
   mvPaint();
-  mvLoadThumbs(data.folder, items, gen);
+  mvApplyFilter();
 }
 
 async function openMusicVideo(track) {
@@ -696,6 +739,7 @@ async function openMusicVideo(track) {
   $("mv-need").textContent = "";
   $("mv-grid").replaceChildren();
   $("mv-sort-note").textContent = "";
+  $("mv-match").textContent = "";
   $("mv-subs").replaceChildren();
   $("mv-up").hidden = true;
   mvPaint();
@@ -715,6 +759,8 @@ async function openMusicVideo(track) {
 
 $("mv-quality").addEventListener("change", () => mvLoadPlan());
 $("mv-aspect").addEventListener("change", mvSetAspect);
+$("mv-tags").value = lsGet("audiplex.mv.tags");
+$("mv-tags").addEventListener("input", () => { mvTagSuggest(); clearTimeout(MV.filterTimer); MV.filterTimer = setTimeout(mvApplyFilter, 250); });
 $("mv-prompt-reset").addEventListener("click", () => { if (MV.est) $("mv-prompt").value = MV.est.default_prompt_template; });
 // Thumbnail size (#6867), remembered per browser.
 function mvThumbSize(px) { $("mv-grid").style.setProperty("--mv-thumb", `${px}px`); }

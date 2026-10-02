@@ -187,37 +187,69 @@ def _read_size(path: str) -> tuple:
         return (None, None)
 
 
-# Image sizes, cached on disk per folder by (mtime, bytes): reading 13k headers off
-# Todd's external USB disk cold takes minutes; a stat comes free with the listing.
+TAG_THRESHOLD = 0.35  # batch_wd14_tag.py's default cutoff
+TAG_SIDECAR = ".wd14cache.json"  # comfy_workflows/batch_wd14_tag.py writes <image>.wd14cache.json
+
+
+def _read_tags(path: str) -> list | None:
+    """WD14 tags at or above TAG_THRESHOLD from the image's sidecar (it holds all ~11k scores)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            conf = json.load(fh)["tag_confidences"]
+        return sorted(t for t, c in conf.items() if c >= TAG_THRESHOLD)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+# Image sizes and tags, cached on disk per folder by (mtime, bytes) of the image and
+# the mtime of its tag sidecar: reading 13k headers (and 440 KB sidecars) off Todd's
+# external USB disk cold takes minutes; a stat comes free with the listing.
+# Entry: [mtime_ns, bytes, width, height, sidecar_mtime_ns | None, tags | None].
 _sizes_lock = threading.Lock()
 
 
-def _image_sizes(folder: Path, entries: list) -> dict:
-    cache_file = _base() / "image_sizes.json"
+def _stat_key(e) -> list | None:
+    try:
+        st = e.stat()
+        return [st.st_mtime_ns, st.st_size]
+    except OSError:  # vanished or locked since the listing
+        return None
+
+
+def _image_info(folder: Path, entries: list, sidecars: dict) -> dict:
+    cache_file = _base() / "image_info.json"
     with _sizes_lock:
         try:
             cache = json.loads(cache_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             cache = {}
         old = cache.get(str(folder), {})
-        out, missing = {}, []
+        out, need_size, need_tags = {}, [], []
         for e in entries:
-            try:
-                st = e.stat()
-            except OSError:  # vanished or locked since the listing
-                out[e.name] = [0, 0, None, None]
-                continue
-            key = [st.st_mtime_ns, st.st_size]
-            hit = old.get(e.name)
-            if hit and hit[:2] == key:
-                out[e.name] = hit
+            key = _stat_key(e)
+            side = sidecars.get(e.name)
+            skey = (_stat_key(side) or [None])[0] if side is not None else None
+            hit = old.get(e.name) or []
+            if key and hit[:2] == key:
+                row = hit[:4]
             else:
-                missing.append((e, key))
-        if missing:
+                row = (key or [0, 0]) + [None, None]
+                if key:
+                    need_size.append((e.name, e.path))
+            if len(hit) == 6 and hit[4] == skey and hit[:2] == key:
+                row += hit[4:]
+            else:
+                row += [skey, None]
+                if skey is not None:
+                    need_tags.append((e.name, side.path))
+            out[e.name] = row
+        if need_size or need_tags:
             with ThreadPoolExecutor(16) as pool:
-                for (e, key), wh in zip(missing, pool.map(lambda m: _read_size(m[0].path), missing)):
-                    out[e.name] = key + list(wh)
-        if missing or len(out) != len(old):
+                for (name, _), wh in zip(need_size, pool.map(lambda m: _read_size(m[1]), need_size)):
+                    out[name][2:4] = list(wh)
+                for (name, _), tags in zip(need_tags, pool.map(lambda m: _read_tags(m[1]), need_tags)):
+                    out[name][5] = tags
+        if need_size or need_tags or out.keys() != old.keys():
             cache[str(folder)] = out
             try:
                 _base().mkdir(parents=True, exist_ok=True)
@@ -226,13 +258,13 @@ def _image_sizes(folder: Path, entries: list) -> dict:
                 tmp.replace(cache_file)
             except OSError:
                 pass
-    return {name: {"width": v[2], "height": v[3]} for name, v in out.items()}
+    return {name: {"width": v[2], "height": v[3], "tags": v[5]} for name, v in out.items()}
 
 
 @router.get("/images")
 def list_images(folder: str, _user=Depends(get_admin_user)):
     f = _folder(folder)
-    files, subfolders = [], []
+    files, subfolders, sidecars = [], [], {}
     try:
         entries = sorted(os.scandir(f), key=lambda e: e.name.lower())
     except OSError as exc:
@@ -243,12 +275,26 @@ def list_images(folder: str, _user=Depends(get_admin_user)):
                 subfolders.append(e.name)
             elif Path(e.name).suffix.lower() in IMAGE_EXT:
                 files.append(e)
+            elif e.name.endswith(TAG_SIDECAR):
+                sidecars[e.name[:-len(TAG_SIDECAR)]] = e
         except OSError:
             continue
-    sizes = _image_sizes(f, files)
-    images = [{"name": e.name, **sizes[e.name]} for e in files]
+    info = _image_info(f, files, sidecars)
+    # tags go out as indices into one vocabulary (most common first), not 8k repeated strings
+    counts: dict[str, int] = {}
+    for v in info.values():
+        for t in v["tags"] or ():
+            counts[t] = counts.get(t, 0) + 1
+    vocab = sorted(counts, key=lambda t: (-counts[t], t))
+    index = {t: i for i, t in enumerate(vocab)}
+    images = []
+    for e in files:
+        v = info[e.name]
+        tags = None if v["tags"] is None else [index[t] for t in v["tags"]]
+        images.append({"name": e.name, "width": v["width"], "height": v["height"], "tags": tags})
     parent = str(f.parent) if f.parent != f else None
-    return {"folder": str(f), "parent": parent, "subfolders": subfolders, "images": images}
+    return {"folder": str(f), "parent": parent, "subfolders": subfolders, "images": images,
+            "tags": vocab, "tag_counts": [counts[t] for t in vocab]}
 
 
 @router.get("/thumb")

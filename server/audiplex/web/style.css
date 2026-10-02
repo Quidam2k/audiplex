@@ -101,6 +101,8 @@ dialog.wide .card { max-height: 92vh; overflow: auto; padding-bottom: 0; }
 textarea { font: inherit; color: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); resize: vertical; }
 .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(var(--mv-thumb, 140px), 100%), 1fr)); gap: 6px; }
 #mv-prompt-reset { justify-self: start; align-self: start; width: auto; }
+.mv-filter { display: flex; align-items: center; gap: 8px; }
+.mv-filter input { flex: 1; max-width: 520px; }
 .mv-size { display: flex; align-items: center; gap: 8px; }
 .mv-size input { flex: 1; max-width: 260px; }
 button.thumb { position: relative; aspect-ratio: var(--mv-aspect, 16 / 9); min-height: 0; padding: 0; overflow: hidden; background: var(--bg); }

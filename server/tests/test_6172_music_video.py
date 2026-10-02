@@ -600,8 +600,9 @@ def test_list_images(api, folder):
     r = api.get("/api/music-video/images", params={"folder": str(folder)}, headers=api.h)
     assert r.status_code == 200
     body = r.json()
-    assert body["images"] == [{"name": "a.png", "width": 600, "height": 400},
-                              {"name": "b.PNG", "width": 600, "height": 400}]
+    assert body["images"] == [{"name": "a.png", "width": 600, "height": 400, "tags": None},
+                              {"name": "b.PNG", "width": 600, "height": 400, "tags": None}]
+    assert body["tags"] == []
     assert body["subfolders"] == ["sub"]
     assert api.get("/api/music-video/images", params={"folder": "pics"}, headers=api.h).status_code == 400
     assert api.get("/api/music-video/images", params={"folder": ""}, headers=api.h).status_code == 400
@@ -619,7 +620,38 @@ def test_list_images_caches_sizes(api, folder, monkeypatch):
     assert reads == []  # unchanged files come from the cache
     _png(folder / "a.png", (300, 500))
     imgs = api.get(url, params=prm, headers=api.h).json()["images"]
-    assert len(reads) == 1 and imgs[0] == {"name": "a.png", "width": 300, "height": 500}
+    assert len(reads) == 1 and imgs[0] == {"name": "a.png", "width": 300, "height": 500, "tags": None}
+
+
+def _sidecar(img, **conf):
+    (img.parent / (img.name + ".wd14cache.json")).write_text(
+        json.dumps({"cache_version": "1.1", "tag_confidences": conf}), encoding="utf-8")
+
+
+def test_list_images_wd14_tags(api, folder, monkeypatch):
+    url, prm = "/api/music-video/images", {"folder": str(folder)}
+    _sidecar(folder / "a.png", solo=0.9, smile=0.5, hat=0.2)
+    _sidecar(folder / "b.PNG", solo=0.8, outdoors=0.36)
+    body = api.get(url, params=prm, headers=api.h).json()
+    assert body["tags"] == ["solo", "outdoors", "smile"] and body["tag_counts"] == [2, 1, 1]
+    named = {i["name"]: sorted(body["tags"][t] for t in i["tags"]) for i in body["images"]}
+    assert named == {"a.png": ["smile", "solo"], "b.PNG": ["outdoors", "solo"]}  # hat < 0.35
+    # sidecars are cached; a rewritten sidecar is re-read, a removed one drops the tags
+    reads = []
+    real = mv_router._read_tags
+    monkeypatch.setattr(mv_router, "_read_tags", lambda p: reads.append(p) or real(p))
+    api.get(url, params=prm, headers=api.h)
+    assert reads == []
+    time.sleep(0.01)
+    _sidecar(folder / "a.png", hat=0.9)
+    (folder / "b.PNG.wd14cache.json").unlink()
+    body = api.get(url, params=prm, headers=api.h).json()
+    assert len(reads) == 1
+    named = {i["name"]: i["tags"] and [body["tags"][t] for t in i["tags"]] for i in body["images"]}
+    assert named == {"a.png": ["hat"], "b.PNG": None}
+    # a broken sidecar is just untagged
+    (folder / "a.png.wd14cache.json").write_text("{nope", encoding="utf-8")
+    assert all(i["tags"] is None for i in api.get(url, params=prm, headers=api.h).json()["images"])
 
 
 # "x.png" exists only in the sibling folder, never in `folder`
