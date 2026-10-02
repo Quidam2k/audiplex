@@ -1,5 +1,6 @@
 """Music video (#6172): planner, analysis, worker and router, with no ComfyUI/ffmpeg/network."""
 
+import io
 import json
 import time
 
@@ -25,6 +26,17 @@ def test_images_needed():
     assert planner.images_needed(91, 5) == 19
     assert planner.images_needed(0.5, 5) == 1
     assert planner.images_needed(0, 5) == 1
+
+
+def test_frame_size_every_aspect():
+    for q in planner.QUALITY:
+        w16, h16 = planner.frame_size(q, "16:9")
+        for a, (aw, ah) in planner.ASPECTS.items():
+            w, h = planner.frame_size(q, a)
+            assert w % 32 == 0 and h % 32 == 0, (q, a)
+            assert abs(w * h / (w16 * h16) - 1) < 0.15, (q, a)  # the render estimate still holds
+            assert abs(w / h - aw / ah) < 0.1, (q, a)
+    assert planner.frame_size("final") == (864, 480)
 
 
 def test_h3_length_grid_and_cap():
@@ -138,11 +150,20 @@ def test_vocal_spans_long_gap_splits_and_threshold_is_relative_to_peak():
 def test_build_prompt():
     assert worker.build_prompt("") == worker.DEFAULT_MOTION
     assert worker.build_prompt(None) == worker.DEFAULT_MOTION
-    assert worker.build_prompt("<lora:x:0.8>  ") == worker.DEFAULT_MOTION
-    p = worker.build_prompt("A fox  runs. <LoRA:nsfw:1> through snow.")
+    # LoRA tags (standard syntax) ride along at the end, out of the sentence
+    assert worker.build_prompt("<lora:x:0.8>  ") == worker.DEFAULT_MOTION + " <lora:x:0.8>"
+    p = worker.build_prompt("A fox  runs. <LoRA:fur:1> through snow.")
     assert p.startswith("A fox runs. through snow.")
-    assert p.endswith(worker.DEFAULT_MOTION)
-    assert "lora" not in p.lower()
+    assert p.endswith(worker.DEFAULT_MOTION + " <LoRA:fur:1>")
+
+
+def test_build_prompt_loras_job_wide_plus_per_clip():
+    job = worker.lora_tags("neon <lora:city:0.7> night")
+    assert job == ["<lora:city:0.7>"]
+    # a clip with its own direction keeps the job-wide LoRA and adds its own, no duplicates
+    p = worker.build_prompt("drummer <lora:drums:1> <lora:city:0.7>", "{direction}", job)
+    assert p == "drummer <lora:city:0.7> <lora:drums:1>"
+    assert worker.build_prompt("", None, []) == worker.DEFAULT_MOTION
 
 
 def test_build_prompt_template():  # #6867
@@ -151,7 +172,7 @@ def test_build_prompt_template():  # #6867
     assert worker.build_prompt("spin.", "") == "spin. " + worker.DEFAULT_MOTION
     assert worker.build_prompt("spin", "No placeholder") == "spin. No placeholder"
     assert worker.build_prompt("", "{direction}") == worker.DEFAULT_MOTION
-    assert "lora" not in worker.build_prompt("x", "<lora:a:1> {direction} go").lower()
+    assert worker.build_prompt("x", "<lora:a:1> {direction} go") == "x go <lora:a:1>"
     assert worker.build_prompt("", worker.DEFAULT_TEMPLATE) == worker.DEFAULT_MOTION
 
 
@@ -257,8 +278,12 @@ def pipeline(session, tmp_path, monkeypatch):
     """A 12 s song (3 clips) with every external dependency faked."""
     track = _make_track(session, tmp_path, 12.0)
     imgs = [str(_png(tmp_path / f"i{k}.png", (8, 8))) for k in range(3)]
+    # clip 1 lip syncs; clip 2 has its own direction (plain-string rows are tested separately)
+    clips = [{"path": imgs[0], "sing": False, "prompt": ""},
+             {"path": imgs[1], "sing": True, "prompt": ""},
+             {"path": imgs[2], "sing": False, "prompt": "close-up of <lora:q:1> the drummer"}]  # job LoRA z + own q
     job = MusicVideoJob(track_id=track.id, quality="draft", image_folder=str(tmp_path),
-                        image_paths=json.dumps(imgs), direction="neon <lora:z:1> city",
+                        image_paths=json.dumps(clips), direction="neon <lora:z:1> city",
                         status="queued", clips_total=3)
     session.add(job)
     session.commit()
@@ -278,6 +303,15 @@ def pipeline(session, tmp_path, monkeypatch):
         return out
 
     monkeypatch.setattr(worker, "stitch", fake_stitch)
+    slices = []
+
+    def fake_slice(song, start, end, dest):
+        slices.append((song, start, end, dest))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"wav")
+        return dest
+
+    monkeypatch.setattr(worker, "slice_song", fake_slice)
 
     calls = []
 
@@ -289,7 +323,12 @@ def pipeline(session, tmp_path, monkeypatch):
 
     p = Pipeline()
     p.job, p.imgs, p.calls, p.run, p.base = job, imgs, calls, fake_run, tmp_path / "base"
+    p.slices, p.song = slices, track.file_path
     return p
+
+
+def _frames(p):
+    return [worker.job_dir(p.base, p.job.id) / "frames" / f"frame_{i:03d}.png" for i in range(3)]
 
 
 def test_process_job_end_to_end(session, pipeline):
@@ -300,7 +339,11 @@ def test_process_job_end_to_end(session, pipeline):
     assert p.job.clips_done == 3
     assert p.job.output_path and p.job.output_path.endswith(".mp4")
     assert (p.base / "videos" / f"music_video_{p.job.id:05d}.mp4").is_file()
-    assert [c[1]["first_frame"] for c in p.calls] == p.imgs
+    # H3 gets the cropped/resized frame, never the raw image
+    assert [c[1]["first_frame"] for c in p.calls] == [str(f) for f in _frames(p)]
+    for f in _frames(p):
+        with Image.open(f) as im:
+            assert im.size == (512, 288)
     assert all(c[0] == "h3" for c in p.calls)
     assert len({c[1]["seed"] for c in p.calls}) == 3
     plan = json.loads(p.job.plan_json)
@@ -308,7 +351,44 @@ def test_process_job_end_to_end(session, pipeline):
     for (_, params, _), seg in zip(p.calls, plan["segments"]):
         assert (params["length"] - 5) % 17 == 0
         assert params["length"] >= (seg["end"] - seg["start"]) * planner.FPS
-        assert params["prompt"].startswith("neon city.")
+    # only the "sing" clip gets its slice of the song as H3's soundtrack guide
+    s1 = plan["segments"][1]
+    wav = worker.job_dir(p.base, p.job.id) / "audio" / "clip_001.wav"
+    assert p.slices == [(p.song, s1["start"], s1["end"], wav)]
+    assert [c[1].get("soundtrack") for c in p.calls] == [None, str(wav), None]
+    assert not (wav.parent / "clip_000.wav").exists()
+    # per-clip direction overrides the job's text; the job's LoRA applies everywhere, the clip's adds
+    prompts = [c[1]["prompt"] for c in p.calls]
+    assert prompts[0].startswith("neon city.") and prompts[0].endswith(" <lora:z:1>")
+    assert prompts[1] == prompts[0]
+    assert prompts[2].startswith("close-up of the drummer.") and prompts[2].endswith(" <lora:z:1> <lora:q:1>")
+
+
+def test_process_job_portrait_aspect(session, pipeline):
+    p = pipeline
+    p.job.aspect = "9:16"
+    session.commit()
+    worker.process_job(session, p.job, p.base, run=p.run, sleep=lambda s: None)
+    for f in _frames(p):
+        with Image.open(f) as im:
+            assert im.size == (288, 512)
+    assert {(c[1]["width"], c[1]["height"]) for c in p.calls} == {(288, 512)}
+
+
+def test_aspect_column_migrates_on_an_old_db(tmp_path):
+    from sqlalchemy import create_engine, inspect, text
+
+    from audiplex.database import _migrate_music_video_aspect
+
+    eng = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
+    with eng.begin() as conn:
+        conn.execute(text("CREATE TABLE music_video_jobs (id INTEGER PRIMARY KEY, quality VARCHAR(10))"))
+        conn.execute(text("INSERT INTO music_video_jobs (quality) VALUES ('draft')"))
+    _migrate_music_video_aspect(eng)
+    _migrate_music_video_aspect(eng)  # idempotent
+    assert "aspect" in {c["name"] for c in inspect(eng).get_columns("music_video_jobs")}
+    with eng.connect() as conn:
+        assert conn.execute(text("SELECT aspect FROM music_video_jobs")).scalar() == "16:9"
 
 
 def test_process_job_resumes_finished_clips(session, pipeline):
@@ -318,10 +398,78 @@ def test_process_job_resumes_finished_clips(session, pipeline):
     done.write_bytes(b"old")
     worker.process_job(session, p.job, p.base, run=p.run, sleep=lambda s: None)
     assert len(p.calls) == 2
-    assert p.calls[0][1]["first_frame"] == p.imgs[1]
+    assert p.calls[0][1]["first_frame"] == str(_frames(p)[1])
+    assert not _frames(p)[0].exists()
     assert done.read_bytes() == b"old"
     session.refresh(p.job)
     assert p.job.status == "done"
+
+
+def test_process_job_old_plain_string_images(session, pipeline):
+    """Jobs queued before lip sync hold plain path strings; they still render, no sing."""
+    p = pipeline
+    p.job.image_paths = json.dumps(p.imgs)
+    session.commit()
+    worker.process_job(session, p.job, p.base, run=p.run, sleep=lambda s: None)
+    session.refresh(p.job)
+    assert p.job.status == "done"
+    assert len(p.calls) == 3 and p.slices == []
+    assert all("soundtrack" not in c[1] for c in p.calls)
+
+
+def test_clips_normalises():
+    assert worker._clips(json.dumps(["a", {"path": "b", "sing": 1}, {"path": "c", "prompt": None}])) == [
+        {"path": "a", "sing": False, "prompt": ""}, {"path": "b", "sing": True, "prompt": ""},
+        {"path": "c", "sing": False, "prompt": ""}]
+
+
+@pytest.mark.parametrize("size,expect", [((8, 16), (8, 4)), ((32, 9), (16, 9)), ((16, 9), (16, 9)), ((100, 100), (100, 56))])
+def test_crop_to_aspect(size, expect):
+    im = worker.crop_to_aspect(Image.new("RGB", size), 16 / 9)
+    assert im.size == expect
+
+
+def test_prepare_frame_crops_centre_no_stretch(tmp_path):
+    """Portrait 8x16: top quarter red, middle half green, bottom quarter blue ->
+    the 16:9 frame is the green middle, resized to 512x288 (not squashed)."""
+    src = Image.new("RGB", (8, 16), (0, 255, 0))
+    for y in range(4):
+        for x in range(8):
+            src.putpixel((x, y), (255, 0, 0))
+            src.putpixel((x, 15 - y), (0, 0, 255))
+    src.save(tmp_path / "p.png")
+    out = worker.prepare_frame(str(tmp_path / "p.png"), 512, 288, tmp_path / "f" / "frame.png")
+    with Image.open(out) as im:
+        assert im.size == (512, 288)
+        assert im.getpixel((256, 144)) == (0, 255, 0)
+        assert im.getpixel((256, 2))[1] > 200 and im.getpixel((256, 285))[1] > 200  # no red/blue bands
+
+
+def test_slice_song_ffmpeg_args(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(worker, "_ffmpeg", lambda *a: seen.append(a))
+    out = worker.slice_song("s.mp3", 1.5, 7.25, tmp_path / "a" / "clip.wav")
+    assert out == tmp_path / "a" / "clip.wav" and out.parent.is_dir()
+    (args,) = seen
+    assert args[:4] == ("-ss", "1.500", "-to", "7.250") and "s.mp3" in args and args[-1] == str(out)
+
+
+def test_render_clip_soundtrack_param(tmp_path, monkeypatch):
+    comfy_out = tmp_path / "out"
+    (comfy_out / "x").mkdir(parents=True)
+    (comfy_out / "x" / "v.mp4").write_bytes(b"v")
+    monkeypatch.setattr(worker, "COMFY_OUTPUT", comfy_out)
+    seen = []
+
+    def run(name, params, **kw):
+        seen.append(params)
+        return {"outputs": [{"filename": "v.mp4", "subfolder": "x"}]}
+
+    kw = dict(image="i.png", seconds=5, quality="draft", prompt="p", port=1, prefix="x", run=run)
+    worker.render_clip(dest=tmp_path / "c0.mp4", **kw)
+    worker.render_clip(dest=tmp_path / "c1.mp4", soundtrack=tmp_path / "a.wav", **kw)
+    assert "soundtrack" not in seen[0]
+    assert seen[1]["soundtrack"] == str(tmp_path / "a.wav") and seen[1]["first_frame"] == "i.png"
 
 
 def test_process_job_waits_for_gpu(session, pipeline, monkeypatch):
@@ -401,6 +549,10 @@ def api(db_engine, tmp_path, monkeypatch):
         yield c
 
 
+def _imgs(*names):
+    return [{"name": n} for n in names]
+
+
 def _ready(api, t, duration):
     api.cache[t.file_path] = {"duration": duration, "tempo": 120.0,
                               "beats": _beats(duration), "vocal_spans": []}
@@ -436,12 +588,26 @@ def test_list_images(api, folder):
     r = api.get("/api/music-video/images", params={"folder": str(folder)}, headers=api.h)
     assert r.status_code == 200
     body = r.json()
-    assert body["images"] == ["a.png", "b.PNG"]
+    assert body["images"] == [{"name": "a.png", "width": 600, "height": 400},
+                              {"name": "b.PNG", "width": 600, "height": 400}]
     assert body["subfolders"] == ["sub"]
     assert api.get("/api/music-video/images", params={"folder": "pics"}, headers=api.h).status_code == 400
     assert api.get("/api/music-video/images", params={"folder": ""}, headers=api.h).status_code == 400
     missing = str(folder / "nope")
     assert api.get("/api/music-video/images", params={"folder": missing}, headers=api.h).status_code == 404
+
+
+def test_list_images_caches_sizes(api, folder, monkeypatch):
+    url, prm = "/api/music-video/images", {"folder": str(folder)}
+    api.get(url, params=prm, headers=api.h)
+    reads = []
+    real = mv_router._read_size
+    monkeypatch.setattr(mv_router, "_read_size", lambda p: reads.append(p) or real(p))
+    assert api.get(url, params=prm, headers=api.h).json()["images"][0]["width"] == 600
+    assert reads == []  # unchanged files come from the cache
+    _png(folder / "a.png", (300, 500))
+    imgs = api.get(url, params=prm, headers=api.h).json()["images"]
+    assert len(reads) == 1 and imgs[0] == {"name": "a.png", "width": 300, "height": 500}
 
 
 # "x.png" exists only in the sibling folder, never in `folder`
@@ -460,12 +626,25 @@ def test_thumb_returns_jpeg(api, folder):
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/jpeg"
     assert r.content[:2] == b"\xff\xd8"
+    with Image.open(io.BytesIO(r.content)) as im:  # 600x400 source -> the 16:9 crop H3 will get
+        assert im.size[1] == 270 and abs(im.size[0] / im.size[1] - 16 / 9) < 0.02
+
+
+def test_thumb_aspect(api, folder):
+    r = api.get("/api/music-video/thumb", headers=api.h,
+                params={"folder": str(folder), "name": "a.png", "aspect": "9:16"})
+    assert r.status_code == 200
+    with Image.open(io.BytesIO(r.content)) as im:
+        assert abs(im.size[0] / im.size[1] - 9 / 16) < 0.02
+    r = api.get("/api/music-video/thumb", headers=api.h,
+                params={"folder": str(folder), "name": "a.png", "aspect": "2:1"})
+    assert r.status_code == 400
 
 
 @pytest.mark.parametrize("name", BAD_NAMES)
 def test_create_job_rejects_bad_names(api, session, tmp_path, folder, name):
     t = _make_track(session, tmp_path, 10.0)  # needs 2 images
-    body = {"track_id": t.id, "folder": str(folder), "images": ["a.png", name]}
+    body = {"track_id": t.id, "folder": str(folder), "images": _imgs("a.png", name)}
     r = api.post("/api/music-video/jobs", json=body, headers=api.h)
     assert r.status_code in (400, 404), (name, r.status_code)
     assert session.query(MusicVideoJob).count() == 0
@@ -505,7 +684,7 @@ def test_plan_endpoint_failed_and_retry(api, session, tmp_path):
 def test_create_job_needs_analysis(api, session, tmp_path, folder):
     t = _make_track(session, tmp_path, 16.0)
     r = api.post("/api/music-video/jobs", headers=api.h,
-                 json={"track_id": t.id, "folder": str(folder), "images": ["a.png", "b.PNG"]})
+                 json={"track_id": t.id, "folder": str(folder), "images": _imgs("a.png", "b.PNG")})
     assert r.status_code == 409
     assert session.query(MusicVideoJob).count() == 0
 
@@ -513,17 +692,24 @@ def test_create_job_needs_analysis(api, session, tmp_path, folder):
 def test_create_job_wrong_count_and_long_direction(api, session, tmp_path, folder):
     t = _make_track(session, tmp_path, 16.0)
     _ready(api, t, 16.0)  # plans to 2 clips
-    for imgs in (["a.png"], ["a.png", "b.PNG", "a.png"]):
+    for imgs in (_imgs("a.png"), _imgs("a.png", "b.PNG", "a.png")):
         r = api.post("/api/music-video/jobs", headers=api.h,
                      json={"track_id": t.id, "folder": str(folder), "images": imgs})
         assert r.status_code == 400
     r = api.post("/api/music-video/jobs", headers=api.h, json={
-        "track_id": t.id, "folder": str(folder), "images": ["a.png", "b.PNG"], "direction": "x" * 1001})
+        "track_id": t.id, "folder": str(folder), "images": _imgs("a.png", "b.PNG"), "direction": "x" * 1001})
     assert r.status_code == 400
     r = api.post("/api/music-video/jobs", headers=api.h, json={
-        "track_id": t.id, "folder": str(folder), "images": ["a.png", "b.PNG"],
+        "track_id": t.id, "folder": str(folder), "images": _imgs("a.png", "b.PNG"),
         "prompt_template": "x" * 2001})
     assert r.status_code == 400
+    r = api.post("/api/music-video/jobs", headers=api.h, json={  # per-clip direction has the same cap
+        "track_id": t.id, "folder": str(folder),
+        "images": [{"name": "a.png", "prompt": "x" * 1001}, {"name": "b.PNG"}]})
+    assert r.status_code == 400
+    r = api.post("/api/music-video/jobs", headers=api.h, json={  # the old plain-string form is gone
+        "track_id": t.id, "folder": str(folder), "images": ["a.png", "b.PNG"]})
+    assert r.status_code == 422
     assert session.query(MusicVideoJob).count() == 0
 
 
@@ -531,24 +717,41 @@ def test_create_job_valid(api, session, tmp_path, folder):
     t = _make_track(session, tmp_path, 16.0)
     _ready(api, t, 16.0)
     r = api.post("/api/music-video/jobs", headers=api.h, json={
-        "track_id": t.id, "folder": str(folder), "images": ["a.png", "b.PNG"], "direction": "  moody  ",
+        "track_id": t.id, "folder": str(folder), "direction": "  moody  ",
+        "images": [{"name": "a.png", "sing": True}, {"name": "b.PNG", "prompt": " the band bows "}],
         "prompt_template": " {direction} in slow motion "})
     assert r.status_code == 201
     assert r.json()["status"] == "queued" and r.json()["clips_total"] == 2
+    assert r.json()["sing_count"] == 1
     assert len(api.spawned) == 1
     job = session.query(MusicVideoJob).one()
     assert job.direction == "moody"
     assert job.prompt_template == "{direction} in slow motion"
     plan = json.loads(job.plan_json)  # the worker renders exactly what Todd was shown
     assert [round(s["end"] - s["start"]) for s in plan["segments"]] == [8, 8]
-    paths = json.loads(job.image_paths)
-    assert len(paths) == 2
+    clips = json.loads(job.image_paths)
+    assert [(c["sing"], c["prompt"]) for c in clips] == [(True, ""), (False, "the band bows")]
+    paths = [c["path"] for c in clips]
     root = str(folder.resolve())
     assert job.image_folder == root
     assert all(p.startswith(root) and "sibling" not in p for p in paths)
+    assert api.get("/api/music-video/jobs", headers=api.h).json()[0]["sing_count"] == 1
     est = api.get(f"/api/music-video/estimate/{t.id}", headers=api.h).json()
     assert est["last_folder"] == root  # remembered from his last job, never a default
     assert est["last_prompt_template"] == "{direction} in slow motion"
+    assert est["aspects"] == list(planner.ASPECTS) and est["last_aspect"] == "16:9"
+
+
+def test_create_job_aspect(api, session, tmp_path, folder):
+    t = _make_track(session, tmp_path, 16.0)
+    _ready(api, t, 16.0)
+    body = {"track_id": t.id, "folder": str(folder), "images": _imgs("a.png", "b.PNG"), "aspect": "2:1"}
+    assert api.post("/api/music-video/jobs", headers=api.h, json=body).status_code == 400
+    body["aspect"] = "9:16"
+    r = api.post("/api/music-video/jobs", headers=api.h, json=body)
+    assert r.status_code == 201 and r.json()["aspect"] == "9:16"
+    assert session.query(MusicVideoJob).one().aspect == "9:16"
+    assert api.get(f"/api/music-video/estimate/{t.id}", headers=api.h).json()["last_aspect"] == "9:16"
 
 
 def test_non_admin_forbidden(api, session, tmp_path, folder):

@@ -9,6 +9,9 @@ crash or restart resumes at the next clip.
 
 Rendering goes through comfy_workflows' agent_gen library (the owning project's
 entry point: `run("h3", params)`), MiniMax H3 image-to-video, one clip per image.
+A clip marked "sing" also gets its slice of the song as H3's `soundtrack` guide,
+so the singer in the picture lip syncs to the lyrics; the others stay plain i2v.
+Every image is centre-cropped (never stretched) to the job's aspect ratio first.
 
 GPU manners (Pantheon rules, comfy_workflows README):
   - never starts ComfyUI; waits until one answers on 8188 / 8000 / 8189
@@ -56,18 +59,75 @@ def _clean(text: str) -> str:
     return " ".join(_LORA.sub("", text or "").split())
 
 
-def build_prompt(direction: str, template: str | None = None) -> str:
+def lora_tags(*texts: str | None) -> list[str]:
+    """Every <lora:name:weight> tag in the texts, in order, without duplicates."""
+    out: list[str] = []
+    for t in texts:
+        for tag in _LORA.findall(t or ""):
+            if tag not in out:
+                out.append(tag)
+    return out
+
+
+def build_prompt(direction: str, template: str | None = None, loras: list[str] | None = None) -> str:
     """Fill Todd's prompt template (default: Direction, then the motion line) with
-    his Direction text. An empty Direction drops "{direction}." cleanly. LoRA tags
-    are stripped from both (the auto-LoRA path leans NSFW; this pipeline uses none)."""
+    his Direction text. An empty Direction drops "{direction}." cleanly.
+
+    <lora:name:weight> tags (standard syntax) are lifted out of the text and put
+    back at the end, plus any in `loras` (the job-wide ones, so a clip with its
+    own direction still gets them). agent_gen's H3 loads them via LoraTagLoader."""
+    tags = lora_tags(*(loras or []), direction, template)
     tpl = _clean(template) or DEFAULT_TEMPLATE
     d = _clean(direction).rstrip(". ")
     if "{direction}" not in tpl:
-        return f"{d}. {tpl}" if d else tpl
-    if d:
-        return tpl.replace("{direction}", d)
-    out = re.sub(r"\{direction\}[.,;:]?\s*", "", tpl).strip()
-    return out or DEFAULT_MOTION
+        text = f"{d}. {tpl}" if d else tpl
+    elif d:
+        text = tpl.replace("{direction}", d)
+    else:
+        text = re.sub(r"\{direction\}[.,;:]?\s*", "", tpl).strip() or DEFAULT_MOTION
+    return " ".join([text, *tags])
+
+
+# ---- frames / audio ---------------------------------------------------------
+
+def crop_to_aspect(im, aspect: float):
+    """Centre-crop a PIL image to width:height = aspect, never stretching."""
+    w, h = im.size
+    if w / h > aspect:
+        nw = max(1, round(h * aspect))
+        x = (w - nw) // 2
+        return im.crop((x, 0, x + nw, h))
+    nh = max(1, round(w / aspect))
+    y = (h - nh) // 2
+    return im.crop((0, y, w, y + nh))
+
+
+def prepare_frame(src: str, w: int, h: int, dest: Path) -> Path:
+    """The first frame H3 gets: the image cropped to w:h and resized to exactly w x h."""
+    from PIL import Image
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(src) as im:
+        im = crop_to_aspect(im.convert("RGB"), w / h).resize((w, h), Image.LANCZOS)
+        im.save(dest, "PNG")
+    return dest
+
+
+def slice_song(song: str, start: float, end: float, dest: Path) -> Path:
+    """The clip's slice of the song (full mix) as 48 kHz stereo WAV, for H3's soundtrack guide."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _ffmpeg("-ss", f"{start:.3f}", "-to", f"{end:.3f}", "-i", song, "-vn", "-ac", "2", "-ar", "48000", str(dest))
+    return dest
+
+
+def _clips(image_paths: str) -> list[dict]:
+    """Normalise image_paths: plain strings (pre lip-sync jobs) -> clip dicts."""
+    out = []
+    for c in json.loads(image_paths):
+        if isinstance(c, str):
+            c = {"path": c}
+        out.append({"path": c["path"], "sing": bool(c.get("sing")), "prompt": c.get("prompt") or ""})
+    return out
 
 
 # ---- ComfyUI / GPU ----------------------------------------------------------
@@ -134,20 +194,23 @@ def _video_output(outputs) -> Path:
 
 
 def render_clip(*, image: str, seconds: float, quality: str, prompt: str,
-                port: int, prefix: str, dest: Path, run=None) -> Path:
-    from audiplex.music_video.planner import QUALITY, h3_length
+                port: int, prefix: str, dest: Path, run=None, soundtrack: Path | None = None,
+                aspect: str = "16:9") -> Path:
+    from audiplex.music_video.planner import QUALITY, frame_size, h3_length
 
-    q = QUALITY[quality]
+    w, h = frame_size(quality, aspect)
     params = {
         "prompt": prompt,
-        "width": q["width"],
-        "height": q["height"],
-        "steps": q["steps"],
+        "width": w,
+        "height": h,
+        "steps": QUALITY[quality]["steps"],
         "length": h3_length(seconds),
         "seed": random.randint(0, 2**31 - 1),  # a fresh seed per clip (batch-seed-reuse lesson)
         "first_frame": image,
         "filename_prefix": prefix,
     }
+    if soundtrack is not None:  # H3 flips to guided mode; first_frame is still honoured
+        params["soundtrack"] = str(soundtrack)
     run = run or _agent_gen_run()
     result = run("h3", params, host=COMFY_HOST, port=port, timeout=CLIP_TIMEOUT, wait_for_idle=True)
     src = _video_output(result["outputs"])
@@ -223,7 +286,7 @@ def process_job(db, job, base: Path, *, run=None, sleep=time.sleep) -> None:
     track = db.get(Track, job.track_id)
     if track is None:
         raise RuntimeError(f"track {job.track_id} no longer exists")
-    images = json.loads(job.image_paths)
+    images = _clips(job.image_paths)
     jdir = job_dir(base, job.id)
 
     if job.plan_json:
@@ -238,13 +301,20 @@ def process_job(db, job, base: Path, *, run=None, sleep=time.sleep) -> None:
         }
         save(plan_json=json.dumps(plan), clips_total=len(segs))
 
-    prompt = build_prompt(job.direction, job.prompt_template)
+    aspect = job.aspect or "16:9"
+    w, h = planner.frame_size(job.quality, aspect)
+    job_loras = lora_tags(job.direction)  # apply to every clip, even ones with their own direction
     clips = []
-    for i, (seg, image) in enumerate(zip(plan["segments"], images)):
+    for i, (seg, clip) in enumerate(zip(plan["segments"], images)):
         dest = jdir / "clips" / f"clip_{i:03d}.mp4"
         clips.append(dest)
         if dest.exists():
             continue
+        prompt = build_prompt(clip["prompt"] or job.direction, job.prompt_template, job_loras)
+        frame = prepare_frame(clip["path"], w, h, jdir / "frames" / f"frame_{i:03d}.png")
+        soundtrack = None
+        if clip["sing"]:
+            soundtrack = slice_song(track.file_path, seg["start"], seg["end"], jdir / "audio" / f"clip_{i:03d}.wav")
         while True:
             port = probe_comfy_port()
             reason = gpu_wait_reason(port)
@@ -255,9 +325,9 @@ def process_job(db, job, base: Path, *, run=None, sleep=time.sleep) -> None:
         logger.info("job %s clip %d/%d on Comfy :%s", job.id, i + 1, len(images), port)
         save(status="rendering", detail=f"Rendering clip {i + 1} of {len(images)} (ComfyUI :{port})",
              clips_done=i)
-        render_clip(image=image, seconds=seg["end"] - seg["start"], quality=job.quality,
+        render_clip(image=str(frame), seconds=seg["end"] - seg["start"], quality=job.quality,
                     prompt=prompt, port=port, prefix=f"audiplex_mv/job_{job.id:05d}/clip_{i:03d}",
-                    dest=dest, run=run)
+                    dest=dest, run=run, soundtrack=soundtrack, aspect=aspect)
 
     save(status="stitching", detail="Joining the clips and laying the song over them",
          clips_done=len(clips))

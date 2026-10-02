@@ -23,9 +23,22 @@ H3_MAX_FRAMES = 362   # top of the trained range (17*21+5)
 # (comfy_workflows memory project_h3_progress_eta: ~1.6 s/frame at 480p/20 steps,
 # measured over 32 runs; draft 512x288/12 steps ~0.65 s/frame).
 QUALITY = {
-    "draft": {"width": 512, "height": 288, "steps": 12, "clip_seconds": 5.0, "sec_per_frame": 0.65},
-    "final": {"width": 864, "height": 480, "steps": 20, "clip_seconds": 5.0, "sec_per_frame": 1.6},
+    "draft": {"steps": 12, "clip_seconds": 5.0, "sec_per_frame": 0.65},
+    "final": {"steps": 20, "clip_seconds": 5.0, "sec_per_frame": 1.6},
 }
+
+# Frame size per (quality, aspect). H3 wants multiples of 32; every aspect keeps
+# roughly the 16:9 pixel count, so sec_per_frame (and the estimate) still holds.
+ASPECTS = {"16:9": (16, 9), "9:16": (9, 16), "1:1": (1, 1), "4:3": (4, 3), "3:4": (3, 4)}
+FRAME_SIZES = {
+    "draft": {"16:9": (512, 288), "9:16": (288, 512), "1:1": (384, 384), "4:3": (448, 320), "3:4": (320, 448)},
+    "final": {"16:9": (864, 480), "9:16": (480, 864), "1:1": (640, 640), "4:3": (736, 544), "3:4": (544, 736)},
+}
+
+
+def frame_size(quality: str, aspect: str = "16:9") -> tuple[int, int]:
+    """(width, height) of the H3 frame for this quality and aspect ratio."""
+    return FRAME_SIZES[quality][aspect]
 
 VAR_MIN = 5.0         # #6867: H3's trained range is 124-362 frames = 5.2-15.1 s
 VAR_MAX = 15.0

@@ -357,8 +357,10 @@ class DjTrackTag(Base):
 class MusicVideoJob(Base):
     """One "Music video" render (#6172): a song, the images Todd picked, a direction.
 
-    image_paths holds absolute paths, all inside image_folder (the folder he
-    chose in the UI; the router refuses anything else). The worker process
+    image_paths is a JSON list of clips {"path", "sing", "prompt"}: an absolute
+    path inside image_folder (the folder he chose in the UI; the router refuses
+    anything else), whether that clip lip syncs to the song, and a per-clip
+    Direction override. Older rows hold plain path strings; the worker reads both. The worker process
     (music_video/worker.py) moves status queued -> analyzing -> rendering ->
     stitching -> done | failed | cancelled.
     """
@@ -368,6 +370,7 @@ class MusicVideoJob(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     track_id: Mapped[int] = mapped_column(Integer, index=True)
     quality: Mapped[str] = mapped_column(String(10), default="draft")
+    aspect: Mapped[str] = mapped_column(String(8), default="16:9")  # planner.ASPECTS key
     image_folder: Mapped[str] = mapped_column(Text)
     image_paths: Mapped[str] = mapped_column(Text)  # JSON list
     direction: Mapped[str] = mapped_column(Text, default="")

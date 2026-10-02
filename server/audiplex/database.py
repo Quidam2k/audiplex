@@ -330,6 +330,17 @@ def _migrate_music_video_prompt_template(engine):  # #6867
         conn.execute(text("ALTER TABLE music_video_jobs ADD COLUMN prompt_template TEXT"))
 
 
+def _migrate_music_video_aspect(engine):  # #6172
+    inspector = inspect(engine)
+    if "music_video_jobs" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("music_video_jobs")}
+    if "aspect" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE music_video_jobs ADD COLUMN aspect VARCHAR(8) DEFAULT '16:9'"))
+
+
 TEMPO_KEY_COLUMNS = (("bpm", "FLOAT"), ("bpm_conf", "FLOAT"), ("beat_offset", "FLOAT"),
                      ("musical_key", "VARCHAR(4)"), ("key_conf", "FLOAT"))
 
@@ -373,6 +384,7 @@ def init_db(database_url: str | None = None):
     _migrate_track_energy(_engine)  # #2806 (dj_track_tags comes from create_all)
     _migrate_track_tempo_key(_engine)  # #1002
     _migrate_music_video_prompt_template(_engine)  # #6867
+    _migrate_music_video_aspect(_engine)  # #6172
     Base.metadata.create_all(bind=_engine)
     return _engine
 

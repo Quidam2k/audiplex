@@ -511,7 +511,7 @@ async function showFavorites() {
 
 // ---- music video (#6172) ------------------------------------------------------
 
-const MV = { track: null, est: null, plan: null, planGen: 0, folder: "", selected: [], urls: [], gen: 0, badges: new Map() };
+const MV = { track: null, est: null, plan: null, planGen: 0, folder: "", selected: [], urls: [], gen: 0, badges: new Map(), items: [] };
 const ACTIVE_JOB = ["queued", "analyzing", "rendering", "stitching"];
 
 function lsGet(k) { try { return localStorage.getItem(k) || ""; } catch { return ""; } }
@@ -527,18 +527,30 @@ function mvResetThumbs() {
 const mvNeed = () => (MV.plan && MV.plan.status === "ready" ? MV.plan.n_images : 0);
 const fmtMins = (s) => (s < 90 ? `${Math.round(s)} s` : `${Math.round(s / 60)} min`);
 
+// MV.selected: [{name, sing, prompt}] in clip order. sing = lip sync that clip to
+// the song; prompt = Direction for that clip only ("" = the overall one).
+const mvIndex = (name) => MV.selected.findIndex((c) => c.name === name);
+
 function mvPaint() {
-  const n = mvNeed(), k = MV.selected.length;
-  for (const [name, { btn, badge }] of MV.badges) {
-    const i = MV.selected.indexOf(name);
-    btn.classList.toggle("selected", i >= 0);
-    btn.setAttribute("aria-pressed", i >= 0 ? "true" : "false");
-    badge.hidden = i < 0;
+  const n = mvNeed(), k = MV.selected.length, sings = MV.selected.filter((c) => c.sing).length;
+  for (const [name, { btn, badge, controls, sing, promptBtn, prompt }] of MV.badges) {
+    const i = mvIndex(name), on = i >= 0;
+    btn.classList.toggle("selected", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    badge.hidden = !on;
     badge.textContent = String(i + 1);
+    controls.hidden = !on;
+    if (on) {
+      sing.checked = MV.selected[i].sing;
+      promptBtn.classList.toggle("on", !!MV.selected[i].prompt);
+    } else {
+      prompt.hidden = true;
+    }
   }
   $("mv-fill").max = Math.max(n, 1);
   $("mv-fill").value = k;
-  $("mv-count").textContent = n ? `${k} / ${n} images` : `${k} images picked (count comes after the analysis)`;
+  const sung = sings ? ` · ${sings} sing` : "";
+  $("mv-count").textContent = n ? `${k} / ${n} images${sung}` : `${k} images picked (count comes after the analysis)${sung}`;
   $("mv-go").disabled = !n || k !== n;
 }
 
@@ -579,13 +591,36 @@ async function mvLoadPlan(retry = false) {
 }
 
 // <img> can't send the auth header: fetch -> blob -> object URL, ~6 at a time.
+// Aspect ratio: thumbs are cropped to it and the grid is sorted by how well each
+// picture already fits it (|ln(ratio / target)|), so the least-cropped come first.
+const mvAspect = () => $("mv-aspect").value;
+
+function mvSortGrid() {
+  const [aw, ah] = mvAspect().split(":").map(Number);
+  const target = aw / ah;
+  const miss = (i) => (i.width && i.height ? Math.abs(Math.log(i.width / i.height / target)) : Infinity);
+  MV.items.sort((a, b) => miss(a) - miss(b) || a.name.localeCompare(b.name));
+  if (MV.items.length) $("mv-grid").replaceChildren(...MV.items.map((i) => i.wrap));
+  $("mv-sort-note").textContent = MV.items.length ? `Sorted by fit to ${mvAspect()}` : "";
+}
+
+function mvSetAspect() {
+  $("mv-grid").style.setProperty("--mv-aspect", mvAspect().replace(":", " / "));
+  lsSet("audiplex.mv.aspect", mvAspect());
+  if (!MV.folder) return;
+  mvResetThumbs();
+  for (const i of MV.items) i.img.removeAttribute("src");
+  mvSortGrid();
+  mvLoadThumbs(MV.folder, MV.items, MV.gen);
+}
+
 async function mvLoadThumbs(folder, items, gen) {
   let next = 0;
   const worker = async () => {
     while (next < items.length && gen === MV.gen) {
       const { name, img } = items[next++];
       try {
-        const r = await fetch(`/api/music-video/thumb?folder=${q(folder)}&name=${q(name)}`,
+        const r = await fetch(`/api/music-video/thumb?folder=${q(folder)}&name=${q(name)}&aspect=${q(mvAspect())}`,
           { headers: { Authorization: `Bearer ${token()}` } });
         if (!r.ok) continue;
         const url = URL.createObjectURL(await r.blob());
@@ -615,34 +650,46 @@ async function mvOpenFolder(path) {
   const sep = data.folder.includes("\\") ? "\\" : "/";
   $("mv-subs").replaceChildren(...data.subfolders.map((s) =>
     el("button", { type: "button", onclick: () => mvOpenFolder(data.folder.replace(/[\\/]+$/, "") + sep + s) }, `📁 ${s}`)));
-  const items = data.images.map((name) => {
+  const items = data.images.map(({ name, width, height }) => {
     const img = el("img", { alt: name });
     const badge = el("span", { class: "badge", hidden: true });
     const btn = el("button", {
-      type: "button", class: "thumb", title: name, "aria-pressed": "false",
+      type: "button", class: "thumb", title: width ? `${name} · ${width}×${height}` : name, "aria-pressed": "false",
       onclick: () => {
-        const i = MV.selected.indexOf(name);
+        const i = mvIndex(name);
         if (i >= 0) MV.selected.splice(i, 1);
         else if (mvNeed() && MV.selected.length >= mvNeed()) return toast("That's enough images — deselect one to swap");
-        else MV.selected.push(name);
+        else { MV.selected.push({ name, sing: false, prompt: "" }); MV.badges.get(name).prompt.value = ""; }
         mvPaint();
       },
     }, img, badge);
-    MV.badges.set(name, { btn, badge });
-    return { name, img, btn };
+    const sing = el("input", { type: "checkbox", title: "Lip sync this clip to the song",
+      onchange: () => { const i = mvIndex(name); if (i >= 0) { MV.selected[i].sing = sing.checked; mvPaint(); } } });
+    const prompt = el("textarea", { class: "clip-prompt", rows: 2, maxlength: 1000, hidden: true,
+      placeholder: "Direction for this clip (blank = use the overall; <lora:name:0.8> adds a LoRA for this clip)",
+      oninput: () => { const i = mvIndex(name); if (i >= 0) { MV.selected[i].prompt = prompt.value.trim(); mvPaint(); } } });
+    const promptBtn = el("button", { type: "button", title: "Direction for this clip only",
+      onclick: () => { prompt.hidden = !prompt.hidden; if (!prompt.hidden) prompt.focus(); } }, "✎");
+    const controls = el("div", { class: "controls", hidden: true }, el("label", {}, sing, "🎤 Sings"), promptBtn);
+    const wrap = el("div", { class: "thumb-wrap" }, btn, controls, prompt);
+    MV.badges.set(name, { btn, badge, controls, sing, promptBtn, prompt });
+    return { name, width, height, img, wrap };
   });
-  $("mv-grid").replaceChildren(...(items.length ? items.map((i) => i.btn) : [el("p", { class: "muted" }, "No images in this folder.")]));
+  MV.items = items;
+  if (!items.length) $("mv-grid").replaceChildren(el("p", { class: "muted" }, "No images in this folder."));
+  mvSortGrid();
   mvPaint();
   mvLoadThumbs(data.folder, items, gen);
 }
 
 async function openMusicVideo(track) {
-  Object.assign(MV, { track, est: null, plan: null, folder: "", selected: [], badges: new Map() });
+  Object.assign(MV, { track, est: null, plan: null, folder: "", selected: [], badges: new Map(), items: [] });
   mvResetThumbs();
   $("mv-title").textContent = `Music video: ${track.title} (${fmtDuration(track.duration_seconds)})`;
   $("mv-quality").value = "draft";
   $("mv-need").textContent = "";
   $("mv-grid").replaceChildren();
+  $("mv-sort-note").textContent = "";
   $("mv-subs").replaceChildren();
   $("mv-up").hidden = true;
   mvPaint();
@@ -652,12 +699,16 @@ async function openMusicVideo(track) {
   mvLoadPlan();
   $("mv-direction").value = lsGet("audiplex.mv.direction") || est.last_direction || "";
   $("mv-prompt").value = lsGet("audiplex.mv.prompt") || est.last_prompt_template || est.default_prompt_template;
+  const aspect = lsGet("audiplex.mv.aspect") || est.last_aspect || "16:9";
+  $("mv-aspect").value = (est.aspects || []).includes(aspect) ? aspect : "16:9";
+  mvSetAspect();
   const folder = lsGet("audiplex.mv.folder") || est.last_folder || "";
   $("mv-folder").value = folder;
   if (folder) mvOpenFolder(folder);
 }
 
 $("mv-quality").addEventListener("change", () => mvLoadPlan());
+$("mv-aspect").addEventListener("change", mvSetAspect);
 $("mv-prompt-reset").addEventListener("click", () => { if (MV.est) $("mv-prompt").value = MV.est.default_prompt_template; });
 // Thumbnail size (#6867), remembered per browser.
 function mvThumbSize(px) { $("mv-grid").style.setProperty("--mv-thumb", `${px}px`); }
@@ -674,8 +725,8 @@ $("mv-go").addEventListener("click", async () => {
   const direction = $("mv-direction").value.trim();
   const promptTemplate = $("mv-prompt").value.trim();
   const job = await guard(() => api("POST", "/api/music-video/jobs", {
-    track_id: MV.track.id, quality: $("mv-quality").value, folder: MV.folder,
-    images: MV.selected.slice(), direction, prompt_template: promptTemplate,
+    track_id: MV.track.id, quality: $("mv-quality").value, aspect: mvAspect(), folder: MV.folder,
+    images: MV.selected.map((c) => ({ name: c.name, sing: c.sing, prompt: c.prompt })), direction, prompt_template: promptTemplate,
   }));
   if (!job) return;
   lsSet("audiplex.mv.folder", MV.folder);
@@ -701,7 +752,7 @@ async function renderVideosView() {
     return el("div", { class: "job", "data-filter": `${j.title} ${j.status}`.toLowerCase() },
       el("div", { class: "head" },
         el("span", { class: "title" }, j.title),
-        el("span", { class: "sub" }, `${j.quality} · ${j.status}${j.detail ? ` · ${j.detail}` : ""}`)),
+        el("span", { class: "sub" }, `${j.quality} · ${j.aspect || "16:9"} · ${j.clips_total} clips${j.sing_count ? ` · ${j.sing_count} lip-synced` : ""} · ${j.status}${j.detail ? ` · ${j.detail}` : ""}`)),
       el("progress", { max: Math.max(j.clips_total, 1), value: j.clips_done }),
       el("div", { class: "actions" },
         ACTIVE_JOB.includes(j.status) ? el("button", { class: "danger", onclick: act(`/api/music-video/jobs/${j.id}/cancel`, "Cancelled") }, "Cancel") : null,

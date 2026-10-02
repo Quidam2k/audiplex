@@ -13,8 +13,10 @@ import hashlib
 import hmac
 import io
 import json
+import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -73,12 +75,20 @@ def _quality(q: str) -> dict:
     return planner.QUALITY[q]
 
 
+def _aspect(a: str) -> str:
+    if a not in planner.ASPECTS:
+        raise HTTPException(400, f"aspect must be one of {list(planner.ASPECTS)}")
+    return a
+
+
 def _job_out(j: MusicVideoJob) -> dict:
     return {
-        "id": j.id, "track_id": j.track_id, "quality": j.quality, "status": j.status,
+        "id": j.id, "track_id": j.track_id, "quality": j.quality,
+        "aspect": j.aspect or "16:9", "status": j.status,
         "detail": j.detail, "clips_total": j.clips_total, "clips_done": j.clips_done,
         "image_folder": j.image_folder, "direction": j.direction,
         "prompt_template": j.prompt_template,
+        "sing_count": sum(1 for c in worker._clips(j.image_paths) if c["sing"]),
         "has_video": bool(j.status == "done" and j.output_path),
         "created_at": j.created_at.isoformat() if j.created_at else None,
     }
@@ -101,6 +111,8 @@ def estimate(track_id: int, quality: str = "draft", db: Session = Depends(get_db
         "last_direction": last.direction if last else "",
         "last_prompt_template": (last.prompt_template if last else None) or worker.DEFAULT_TEMPLATE,
         "default_prompt_template": worker.DEFAULT_TEMPLATE,
+        "aspects": list(planner.ASPECTS),
+        "last_aspect": (last.aspect if last else None) or "16:9",
     }
 
 
@@ -164,34 +176,91 @@ def plan(track_id: int, quality: str = "draft", retry: bool = False,
 
 # ---- folder browsing --------------------------------------------------------
 
+def _read_size(path: str) -> tuple:
+    """Pixel size from the image header (PIL doesn't decode the pixels here)."""
+    from PIL import Image
+
+    try:
+        with Image.open(path) as im:
+            return im.size
+    except Exception:
+        return (None, None)
+
+
+# Image sizes, cached on disk per folder by (mtime, bytes): reading 13k headers off
+# Todd's external USB disk cold takes minutes; a stat comes free with the listing.
+_sizes_lock = threading.Lock()
+
+
+def _image_sizes(folder: Path, entries: list) -> dict:
+    cache_file = _base() / "image_sizes.json"
+    with _sizes_lock:
+        try:
+            cache = json.loads(cache_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cache = {}
+        old = cache.get(str(folder), {})
+        out, missing = {}, []
+        for e in entries:
+            try:
+                st = e.stat()
+            except OSError:  # vanished or locked since the listing
+                out[e.name] = [0, 0, None, None]
+                continue
+            key = [st.st_mtime_ns, st.st_size]
+            hit = old.get(e.name)
+            if hit and hit[:2] == key:
+                out[e.name] = hit
+            else:
+                missing.append((e, key))
+        if missing:
+            with ThreadPoolExecutor(16) as pool:
+                for (e, key), wh in zip(missing, pool.map(lambda m: _read_size(m[0].path), missing)):
+                    out[e.name] = key + list(wh)
+        if missing or len(out) != len(old):
+            cache[str(folder)] = out
+            try:
+                _base().mkdir(parents=True, exist_ok=True)
+                tmp = cache_file.with_suffix(".tmp")
+                tmp.write_text(json.dumps(cache), encoding="utf-8")
+                tmp.replace(cache_file)
+            except OSError:
+                pass
+    return {name: {"width": v[2], "height": v[3]} for name, v in out.items()}
+
+
 @router.get("/images")
 def list_images(folder: str, _user=Depends(get_admin_user)):
     f = _folder(folder)
-    images, subfolders = [], []
+    files, subfolders = [], []
     try:
-        entries = sorted(f.iterdir(), key=lambda p: p.name.lower())
+        entries = sorted(os.scandir(f), key=lambda e: e.name.lower())
     except OSError as exc:
         raise HTTPException(403, f"Can't read folder: {exc.strerror}")
-    for p in entries:
+    for e in entries:
         try:
-            if p.is_dir():
-                subfolders.append(p.name)
-            elif p.suffix.lower() in IMAGE_EXT:
-                images.append(p.name)
+            if e.is_dir():
+                subfolders.append(e.name)
+            elif Path(e.name).suffix.lower() in IMAGE_EXT:
+                files.append(e)
         except OSError:
             continue
+    sizes = _image_sizes(f, files)
+    images = [{"name": e.name, **sizes[e.name]} for e in files]
     parent = str(f.parent) if f.parent != f else None
     return {"folder": str(f), "parent": parent, "subfolders": subfolders, "images": images}
 
 
 @router.get("/thumb")
-def thumb(folder: str, name: str, _user=Depends(get_admin_user)):
+def thumb(folder: str, name: str, aspect: str = "16:9", _user=Depends(get_admin_user)):
     from PIL import Image
 
+    aw, ah = planner.ASPECTS[_aspect(aspect)]
     p = _image_in(_folder(folder), name)
     try:
         with Image.open(p) as im:
-            im = im.convert("RGB")
+            # the same centre crop the render gets, so the thumb is the frame
+            im = worker.crop_to_aspect(im.convert("RGB"), aw / ah)
             im.thumbnail((480, 480))
             buf = io.BytesIO()
             im.save(buf, "JPEG", quality=80)
@@ -203,11 +272,20 @@ def thumb(folder: str, name: str, _user=Depends(get_admin_user)):
 
 # ---- jobs -------------------------------------------------------------------
 
+class ImageIn(BaseModel):
+    """One picked image: `sing` = lip sync this clip to the song; `prompt` = Direction
+    for this clip only ("" = the job's)."""
+    name: str
+    sing: bool = False
+    prompt: str = ""
+
+
 class JobIn(BaseModel):
     track_id: int
     quality: str = "draft"
+    aspect: str = "16:9"
     folder: str
-    images: list[str] = Field(min_length=1)
+    images: list[ImageIn] = Field(min_length=1)
     direction: str = ""
     prompt_template: str = ""
 
@@ -215,9 +293,14 @@ class JobIn(BaseModel):
 @router.post("/jobs", status_code=201)
 def create_job(body: JobIn, db: Session = Depends(get_db), _user=Depends(get_admin_user)):
     _quality(body.quality)
+    _aspect(body.aspect)
     t = _track(db, body.track_id)
     f = _folder(body.folder)
-    paths = [str(_image_in(f, n)) for n in body.images]
+    clips = []
+    for im in body.images:
+        if len(im.prompt) > MAX_DIRECTION:
+            raise HTTPException(400, f"A clip's direction is limited to {MAX_DIRECTION} characters")
+        clips.append({"path": str(_image_in(f, im.name)), "sing": im.sing, "prompt": im.prompt.strip()})
     if len(body.direction) > MAX_DIRECTION:
         raise HTTPException(400, f"Direction is limited to {MAX_DIRECTION} characters")
     if len(body.prompt_template) > MAX_TEMPLATE:
@@ -226,12 +309,13 @@ def create_job(body: JobIn, db: Session = Depends(get_db), _user=Depends(get_adm
     if p["status"] != "ready":
         raise HTTPException(409, "The song hasn't been analyzed yet")
     need = p["n_images"]
-    if len(paths) != need:
-        raise HTTPException(400, f"This song needs exactly {need} images; got {len(paths)}")
+    if len(clips) != need:
+        raise HTTPException(400, f"This song needs exactly {need} images; got {len(clips)}")
     tpl = body.prompt_template.strip()
     plan_json = json.dumps({"duration": p["duration"], "tempo": p["tempo"], "segments": p["segments"]})
-    job = MusicVideoJob(track_id=t.id, quality=body.quality, image_folder=str(f),
-                        image_paths=json.dumps(paths), direction=body.direction.strip(),
+    job = MusicVideoJob(track_id=t.id, quality=body.quality, aspect=body.aspect,
+                        image_folder=str(f),
+                        image_paths=json.dumps(clips), direction=body.direction.strip(),
                         prompt_template=None if tpl in ("", worker.DEFAULT_TEMPLATE) else tpl,
                         plan_json=plan_json, status="queued", detail="Queued", clips_total=need)
     db.add(job)

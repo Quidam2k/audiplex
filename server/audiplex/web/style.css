@@ -94,7 +94,7 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; pad
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
 /* music video (#6172) */
-dialog.wide { width: min(96vw, 900px); }
+dialog.wide { width: 96vw; max-width: 96vw; }
 dialog.wide .card { max-height: 92vh; overflow: auto; padding-bottom: 0; }
 /* the fill bar and GO stay in view however long the thumbnail grid gets */
 .mv-foot { position: sticky; bottom: 0; display: grid; gap: 8px; padding: 10px 0 16px; background: var(--surface); border-top: 1px solid var(--line); }
@@ -103,13 +103,24 @@ textarea { font: inherit; color: inherit; padding: 8px 10px; border-radius: 8px;
 #mv-prompt-reset { justify-self: start; align-self: start; width: auto; }
 .mv-size { display: flex; align-items: center; gap: 8px; }
 .mv-size input { flex: 1; max-width: 260px; }
-button.thumb { position: relative; aspect-ratio: 1; min-height: 0; padding: 0; overflow: hidden; background: var(--bg); }
+button.thumb { position: relative; aspect-ratio: var(--mv-aspect, 16 / 9); min-height: 0; padding: 0; overflow: hidden; background: var(--bg); }
 button.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 button.thumb.selected { outline: 3px solid var(--accent); outline-offset: -3px; }
 .thumb .badge {
   position: absolute; top: 4px; right: 4px; min-width: 24px; padding: 0 6px; border-radius: 12px;
   background: var(--accent); color: var(--accent-text); font-size: 13px; font-weight: 600; line-height: 24px;
 }
+/* a selected thumb: Sings toggle + per-clip direction, over the bottom edge */
+.thumb-wrap { position: relative; display: grid; }
+.thumb-wrap .controls {
+  position: absolute; left: 0; right: 0; bottom: 0; display: flex; align-items: center; gap: 6px;
+  padding: 3px 6px; background: rgba(0, 0, 0, .6); color: #fff; font-size: 13px;
+}
+.thumb-wrap .controls label { display: flex; align-items: center; gap: 4px; cursor: pointer; margin: 0; }
+.thumb-wrap .controls input[type=checkbox] { margin: 0; accent-color: var(--accent); }
+.thumb-wrap .controls button { margin-left: auto; width: auto; min-height: 0; padding: 0 6px; line-height: 22px; background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.5); }
+.thumb-wrap .controls button.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.thumb-wrap .clip-prompt { grid-column: 1; width: 100%; box-sizing: border-box; margin-top: 4px; font-size: 13px; }
 .fill { display: flex; align-items: center; gap: 10px; }
 .fill progress, .job progress { flex: 1; height: 12px; accent-color: var(--accent); }
 .job { padding: 10px 0; border-bottom: 1px solid var(--line); display: grid; gap: 6px; }
