@@ -363,17 +363,19 @@ def test_process_job_end_to_end(session, pipeline):
     for (_, params, _), seg in zip(p.calls, plan["segments"]):
         assert (params["length"] - 5) % 17 == 0
         assert params["length"] >= (seg["end"] - seg["start"]) * planner.FPS
-    # only the "sing" clip gets its slice of the song as H3's soundtrack guide
-    s1 = plan["segments"][1]
-    wav = worker.job_dir(p.base, p.job.id) / "audio" / "clip_001.wav"
-    assert p.slices == [(p.song, s1["start"], s1["end"], wav)]
-    assert [c[1].get("soundtrack") for c in p.calls] == [None, str(wav), None]
-    assert not (wav.parent / "clip_000.wav").exists()
-    # per-clip direction overrides the job's text; the job's LoRA applies everywhere, the clip's adds
+    # every clip is driven by its slice of the real song (plain i2v would invent its own audio)
+    adir = worker.job_dir(p.base, p.job.id) / "audio"
+    wavs = [adir / f"clip_{i:03d}.wav" for i in range(3)]
+    assert p.slices == [(p.song, s["start"], s["end"], w) for s, w in zip(plan["segments"], wavs)]
+    assert [c[1]["soundtrack"] for c in p.calls] == [str(w) for w in wavs]
+    # per-clip direction overrides the job's text; the job's LoRA applies everywhere, the clip's adds;
+    # clips that don't sing are told so (only clip 1 sings)
     prompts = [c[1]["prompt"] for c in p.calls]
-    assert prompts[0].startswith("neon city.") and prompts[0].endswith(" <lora:z:1>")
-    assert prompts[1] == prompts[0]
-    assert prompts[2].startswith("close-up of the drummer.") and prompts[2].endswith(" <lora:z:1> <lora:q:1>")
+    assert prompts[1].startswith("neon city.") and prompts[1].endswith(" <lora:z:1>")
+    assert worker.NO_SING not in prompts[1]
+    assert prompts[0].startswith("neon city.") and prompts[0].endswith(worker.NO_SING)
+    assert prompts[2].startswith("close-up of the drummer.") and worker.NO_SING in prompts[2]
+    assert "<lora:z:1> <lora:q:1>" in prompts[2]
 
 
 def test_process_job_portrait_aspect(session, pipeline):
@@ -425,8 +427,8 @@ def test_process_job_old_plain_string_images(session, pipeline):
     worker.process_job(session, p.job, p.base, run=p.run, sleep=lambda s: None)
     session.refresh(p.job)
     assert p.job.status == "done"
-    assert len(p.calls) == 3 and p.slices == []
-    assert all("soundtrack" not in c[1] for c in p.calls)
+    assert len(p.calls) == 3 and len(p.slices) == 3
+    assert all(c[1]["prompt"].endswith(worker.NO_SING) for c in p.calls)
 
 
 def test_clips_normalises():

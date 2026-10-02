@@ -9,8 +9,10 @@ crash or restart resumes at the next clip.
 
 Rendering goes through comfy_workflows' agent_gen library (the owning project's
 entry point: `run("h3", params)`), MiniMax H3 image-to-video, one clip per image.
-A clip marked "sing" also gets its slice of the song as H3's `soundtrack` guide,
-so the singer in the picture lip syncs to the lyrics; the others stay plain i2v.
+Every clip gets its slice of the song as H3's `soundtrack` guide, so the motion
+follows the real music (plain i2v would invent its own audio, singing included).
+A clip not marked "sing" also gets NO_SING in its prompt, so over an intro or an
+instrumental break nobody mouths words.
 Every image is centre-cropped (never stretched) to the job's aspect ratio first.
 
 GPU manners (Pantheon rules, comfy_workflows README):
@@ -49,6 +51,7 @@ DEFAULT_MOTION = (
 )
 # #6867: Todd can edit the whole prompt; {direction} is where his Direction text goes.
 DEFAULT_TEMPLATE = "{direction}. " + DEFAULT_MOTION
+NO_SING = "Instrumental section: nobody sings in this shot; mouths stay closed, moving to the music."
 _LORA = re.compile(r"<lora:[^>]*>", re.I)
 VIDEO_EXT = {".mp4", ".webm", ".mov", ".mkv"}
 
@@ -312,9 +315,9 @@ def process_job(db, job, base: Path, *, run=None, sleep=time.sleep) -> None:
             continue
         prompt = build_prompt(clip["prompt"] or job.direction, job.prompt_template, job_loras)
         frame = prepare_frame(clip["path"], w, h, jdir / "frames" / f"frame_{i:03d}.png")
-        soundtrack = None
-        if clip["sing"]:
-            soundtrack = slice_song(track.file_path, seg["start"], seg["end"], jdir / "audio" / f"clip_{i:03d}.wav")
+        if not clip["sing"]:
+            prompt = f"{prompt} {NO_SING}"
+        soundtrack = slice_song(track.file_path, seg["start"], seg["end"], jdir / "audio" / f"clip_{i:03d}.wav")
         while True:
             port = probe_comfy_port()
             reason = gpu_wait_reason(port)
