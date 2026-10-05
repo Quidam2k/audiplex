@@ -151,9 +151,11 @@ class AudioFocusManager(
                 cancelRamp()  // #3597
                 wasPlaying = player.isPlaying
                 pausedByFocus = true
+                PlayerHooks.notePause("audio_focus")  // #3552
                 player.pause()
             }
             FocusPolicy.FocusAction.PauseAndAbandon -> {
+                PlayerHooks.notePause("audio_focus_lost")  // #3552
                 player.pause()
                 abandonFocus()
             }

@@ -98,7 +98,7 @@ class PlayerViewModel @Inject constructor(
 
     fun togglePlayPause() {
         if (isPlaying.value) {
-            playbackManager.pause()
+            playbackManager.pause("app_ui")  // #3552
         } else {
             playbackManager.resume()
         }

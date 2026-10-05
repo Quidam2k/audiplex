@@ -286,6 +286,7 @@ class PlaybackManager @Inject constructor(
          * false with AUDIO_FOCUS_LOSS when the request is refused.
          */
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            if (!playWhenReady) reportPauseSource(reason)  // #3552
             val focusRelated = reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS
             clientLog.report(
                 level = if (focusRelated) "error" else "info",
@@ -1147,6 +1148,7 @@ class PlaybackManager @Inject constructor(
         play: Boolean = true  // #3601: false = load paused (restore after a kill)
     ) {
         if (items.isEmpty()) return
+        PlayerHooks.cancelStopAfterCurrent()  // #3505: a new queue is a fresh start
         // Clear audiobook state, post final stop for any prior music
         finalizeMusicIfActive()
         _currentBook.value = null
@@ -1305,6 +1307,7 @@ class PlaybackManager @Inject constructor(
                 if (bed != null) bedPlayer?.volume = bed
                 delay(stepDelayMs)
             }
+            PlayerHooks.notePause("sleep_timer")  // #3552
             controller?.pause()
         }
     }
@@ -1316,9 +1319,41 @@ class PlaybackManager @Inject constructor(
         applyVolumeForCurrentKind()
     }
 
-    fun pause() {
+    /** [source] says who asked (#3552): it rides the pause_source client log. */
+    fun pause(source: String = "app") {
+        PlayerHooks.notePause(source)
         controller?.pause()
     }
+
+    /**
+     * #3552: one `pause_source` line per pause. Whoever paused noted why in
+     * [PlayerHooks]; otherwise the Media3 reason says it (headphones out, the
+     * notification / lock screen / a Bluetooth remote).
+     */
+    private fun reportPauseSource(reason: Int) {
+        val source = PlayerHooks.takePauseSource() ?: when (reason) {
+            Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY -> "headphones_disconnected"
+            Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS -> "audio_focus"
+            Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM -> "stop_after_current"
+            Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST -> "media_session"
+            else -> playWhenReadyReasonName(reason)
+        }
+        clientLog.report(
+            level = "info",
+            event = "pause_source",
+            message = "paused by $source",
+            detail = buildMap {
+                put("source", source)
+                put("reason", playWhenReadyReasonName(reason))
+                currentTrackId()?.let { put("trackId", it.toString()) }
+            },
+        )
+    }
+
+    /** #3505: the DJ's exact stop at the end of the current song. */
+    fun stopAfterCurrent(): Boolean = PlayerHooks.stopAfterCurrent()
+
+    fun cancelStopAfterCurrent() = PlayerHooks.cancelStopAfterCurrent()
 
     fun resume() {
         controller?.play()

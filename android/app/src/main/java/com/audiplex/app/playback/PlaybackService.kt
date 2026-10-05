@@ -70,12 +70,19 @@ class PlaybackService : MediaSessionService() {
 
         val focusManager = AudioFocusManager(this, player)
         audioFocusManager = focusManager
+        PlayerHooks.exoPlayer = player  // #6913
         player.addListener(object : Player.Listener {
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                 if (playWhenReady) {
                     // Every play re-requests (idempotent); denied focus means we
                     // must not start over a call or another exclusive holder.
-                    if (!focusManager.requestFocus()) player.pause()
+                    if (!focusManager.requestFocus()) {
+                        PlayerHooks.notePause("audio_focus_denied")  // #3552
+                        player.pause()
+                    }
+                } else if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM) {
+                    // #3505: the DJ's stop-after-this-song fired; it is one-shot.
+                    player.pauseAtEndOfMediaItems = false
                 } else if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST) {
                     focusManager.onUserPause()
                 }
@@ -115,6 +122,7 @@ class PlaybackService : MediaSessionService() {
         audioFocusManager?.abandonFocus()
         audioFocusManager = null
         mediaSession?.run {
+            if (PlayerHooks.exoPlayer === player) PlayerHooks.exoPlayer = null  // #6913
             player.release()
             release()
         }

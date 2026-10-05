@@ -105,6 +105,9 @@ internal fun badPayload(field: String) =
 /** How many recent command ids to remember for dedupe. */
 private const val EXECUTED_MEMORY = 64
 
+/** #6913: commands after which the phone logs queue_synced. */
+private val QUEUE_CMDS = setOf("play_now", "replace_upcoming", "queue", "play_next", "activate", "reorder")
+
 /** How long a play_now gets to produce sound before its ack says it failed. */
 private const val START_TIMEOUT_MS = 8_000L
 
@@ -335,6 +338,7 @@ class DjCommandClient @Inject constructor(
         }
         executed[cmd.id] = result
         ack(cmd.id, result.status, result.detail)
+        if (cmd.type in QUEUE_CMDS && result.status == "ok") reportQueueSynced(cmd)
         // Tell the DJ what the command did right away rather than on the next
         // tick; best-effort, like the loop.
         runCatching { reportOnce(force = true) }
@@ -450,7 +454,7 @@ class DjCommandClient @Inject constructor(
             // the server hands off to the new device when we ack. activate: we
             // are the new device, so resume the old one's queue at its spot.
             "deactivate" -> {
-                withContext(Dispatchers.Main) { playbackManager.pause() }
+                withContext(Dispatchers.Main) { playbackManager.pause("transfer #${cmd.id}") }
                 runCatching { reportOnce(force = true) }
             }
             "activate" -> {
@@ -486,7 +490,13 @@ class DjCommandClient @Inject constructor(
                     playbackManager.skipForward()
                 }
             }
-            "pause" -> withContext(Dispatchers.Main) { playbackManager.pause() }
+            "pause" -> withContext(Dispatchers.Main) { playbackManager.pause("dj_command #${cmd.id}") }
+            // #3505: pause exactly when the current song ends (one-shot).
+            "stop_after_current" -> {
+                val armed = withContext(Dispatchers.Main) { playbackManager.stopAfterCurrent() }
+                if (!armed) return DispatchResult("failed", "no player")
+            }
+            "cancel_stop_after_current" -> withContext(Dispatchers.Main) { playbackManager.cancelStopAfterCurrent() }
             "resume" -> withContext(Dispatchers.Main) { playbackManager.resume() }
             "previous" -> withContext(Dispatchers.Main) { playbackManager.skipBack() }
             "seek" -> {
@@ -550,6 +560,29 @@ class DjCommandClient @Inject constructor(
             else -> return DispatchResult("unknown_type", cmd.type)
         }
         return DispatchResult("ok")
+    }
+
+    /**
+     * #6913: after a DJ queue command lands, say what the phone's queue now is,
+     * so the DJ's view (dj_queue) can be checked against what Todd sees.
+     */
+    private fun reportQueueSynced(cmd: DjCommandDto) {
+        val music = playbackManager.currentMusic.value ?: return
+        val next = music.items.drop(music.currentIndex + 1).take(5).map { it.track.id }
+        clientLog.report(
+            level = "info",
+            event = "queue_synced",
+            message = "${cmd.type} #${cmd.id}: ${music.items.size} in queue, at ${music.currentIndex}",
+            detail = mapOf(
+                "command_id" to cmd.id.toString(),
+                "type" to cmd.type,
+                "length" to music.items.size.toString(),
+                "current_index" to music.currentIndex.toString(),
+                "current_id" to (music.items.getOrNull(music.currentIndex)?.track?.id?.toString() ?: ""),
+                "next_ids" to next.joinToString(","),
+                "origin" to (music.origin ?: ""),
+            ),
+        )
     }
 
     /** Resolve DJ track IDs to full track metadata via the catalog API. */

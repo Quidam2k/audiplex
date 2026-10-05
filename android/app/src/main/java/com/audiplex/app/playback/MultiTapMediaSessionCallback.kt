@@ -54,7 +54,12 @@ class MultiTapMediaSessionCallback(
     private fun dispatch(taps: Int) {
         Log.d(TAG, "dispatch taps=$taps")
         when (taps) {
-            1 -> if (player.isPlaying) player.pause() else player.play()
+            1 -> if (player.isPlaying) {
+                PlayerHooks.notePause("media_button")  // #3552
+                player.pause()
+            } else {
+                player.play()
+            }
             // #3100 / #992: double-tap = skip to next track (standard media-remote
             // semantics). Was rewind-30s; repurposed per Todd's ask. A manual
             // (non-AUTO) transition, so PlaybackManager.onMediaItemTransition already
