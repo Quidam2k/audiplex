@@ -142,6 +142,12 @@ STATUS_FAILED = "failed"
 TERMINAL_STATUSES = (STATUS_ACKED, STATUS_FAILED)
 
 
+QUEUE_CHUNK = 40  # #3644: same as the MCP's #3249 chunk
+
+# #3552: commands that leave the player paused, for pause_observed attribution.
+PAUSE_CMDS = {"pause", "deactivate", "stop_after_current", "replace_upcoming", "sleep_timer"}
+
+
 @dataclass
 class PlaybackCommandRecord:
     id: int
@@ -157,6 +163,9 @@ class PlaybackCommandRecord:
     # Set for a command meant for one device regardless of which is active —
     # the transfer handshake's deactivate/activate. None follows the active device.
     target_device_id: Optional[str] = None
+    # #3552: who sent it ("<user>/<persona>:<tool>", "scheduled_stop", ...),
+    # so a pause nobody admits to can be traced to its caller.
+    source: str = "server"
 
     def summary(self) -> dict[str, Any]:
         """What the DJ tools render — the whole point of the registry."""
@@ -171,6 +180,7 @@ class PlaybackCommandRecord:
             "ack_status": self.ack_status,
             "ack_detail": self.ack_detail,
             "target_device_id": self.target_device_id,
+            "source": self.source,  # #3552
         }
 
 
@@ -236,11 +246,17 @@ class PlaybackBus:
             self._arrival = asyncio.Event()
         return self._arrival
 
-    async def enqueue(self, type: str, payload: dict[str, Any]) -> PlaybackCommandRecord:
-        return self._enqueue(type, payload)
+    async def enqueue(
+        self, type: str, payload: dict[str, Any], source: str = "server"
+    ) -> PlaybackCommandRecord:
+        return self._enqueue(type, payload, source=source)
 
     def _enqueue(
-        self, type: str, payload: dict[str, Any], target_device_id: Optional[str] = None
+        self,
+        type: str,
+        payload: dict[str, Any],
+        target_device_id: Optional[str] = None,
+        source: str = "server",
     ) -> PlaybackCommandRecord:
         self._seq += 1
         rec = PlaybackCommandRecord(
@@ -249,6 +265,7 @@ class PlaybackBus:
             payload=payload,
             created_at=time.time(),
             target_device_id=target_device_id,
+            source=source,
         )
         self._commands[rec.id] = rec
         while len(self._commands) > COMMAND_HISTORY_CAPACITY:
@@ -512,6 +529,7 @@ class PlaybackBus:
                 "deactivate",
                 {"handoff_to": device_id, "was_playing": was_playing},
                 target_device_id=prev,
+                source="transfer",
             )
         else:
             self._send_handoff(prev, device_id, was_playing)
@@ -542,7 +560,7 @@ class PlaybackBus:
             # #2680: an audiobook follows too. A phone that predates this sees
             # empty track_ids and just becomes the target, as before.
             payload.update(book_id=book["book_id"], position_ms=book["position_ms"], playing=was_playing)
-        self._enqueue("activate", payload, target_device_id=to_id)
+        self._enqueue("activate", payload, target_device_id=to_id, source="transfer")
 
     @property
     def active_device_id(self) -> Optional[str]:
@@ -585,6 +603,9 @@ class PlaybackBus:
                 "queue_index": state.get("queue_index"),
                 "queue_length": state.get("queue_length"),
             })
+            if prev is not None and prev[0].get("playing") and not state.get("playing"):
+                _append_diag("pause_observed", self._pause_cause(device_key))  # #3552
+
 
         self._maybe_save_queue(state, device_key)  # #3601
 
@@ -592,6 +613,19 @@ class PlaybackBus:
         self._maybe_top_up_pool(state, device_key)
         # Same place: DJ trigger cues at track boundaries (#5480 #5515)
         self._maybe_run_triggers(state, device_key)
+
+    def _pause_cause(self, device_key: str) -> dict[str, Any]:
+        """The newest pause-type command sent in the last 15 s, if any (#3552).
+        None means the phone paused itself (focus, headphones, a tap); its own
+        pause_source client-log line says which."""
+        now = time.time()
+        for rec in reversed(self._commands.values()):
+            if now - rec.created_at > 15:
+                break
+            if rec.type in PAUSE_CMDS:
+                return {"device": device_key, "command_id": rec.id, "type": rec.type,
+                        "source": rec.source, "age_s": round(now - rec.created_at, 1)}
+        return {"device": device_key, "command_id": None, "source": "device"}
 
     def _maybe_save_queue(self, state: dict[str, Any], device_key: str) -> None:
         """Persist a resume snapshot on a track/index/play change, or every
@@ -701,10 +735,57 @@ class PlaybackBus:
             finally:
                 if db is not None:
                     db.close()
-            if result.get("picks"):
-                self._enqueue("queue", {"track_ids": list(result["picks"])})
+            cue_ids = list(result.get("cue_picks") or [])
+            if cue_ids:  # #3644: a cue's track plays next, not after a deep queue
+                self._enqueue("play_next", {"track_ids": cue_ids}, source="dj_pool:cue")
+            fill = [t for t in result.get("picks") or [] if t not in cue_ids]
+            if fill:
+                self.send_tracks("queue", fill, source="dj_pool:top_up")
         except Exception as e:  # never let the pool break a state report
             print(f"[dj_pool] top-up skipped: {e}", flush=True)
+
+    def send_tracks(self, first_type: str, ids: list[int], source: str = "server") -> list[int]:
+        """`first_type` with the first QUEUE_CHUNK ids, then `queue` chunks in
+        order (#3644, same chunking as the MCP's #3249): the phone resolves a
+        list one lookup batch at a time, so a 300-track list must not arrive as
+        one command. Returns the command ids."""
+        sent = [self._enqueue(first_type, {"track_ids": list(ids[:QUEUE_CHUNK])}, source=source).id]
+        for i in range(QUEUE_CHUNK, len(ids), QUEUE_CHUNK):
+            sent.append(self._enqueue("queue", {"track_ids": list(ids[i:i + QUEUE_CHUNK])},
+                                      source=source).id)
+        return sent
+
+    def replan_pool(self, source: str) -> dict[str, Any]:
+        """Re-pick the renderer's queue after the current song from the pool's
+        lanes as they are now, and replace it (#3644). Used after a lane pause/
+        remove or a spec edit, which a deep queue would otherwise hide for hours."""
+        from audiplex.dj_pool import get_pool
+        from audiplex.scheduled_stop import controller as stop_controller
+
+        pool = get_pool()
+        state = self.get_state() or {}
+        track = state.get("track") or {}
+        current = track.get("id") if isinstance(track, dict) else None
+        if not pool.is_active() or current is None or current < 0:
+            return {"replanned": False, "reason": "no pool or nothing playing"}
+        if stop_controller.latch_active(time.time()):
+            return {"replanned": False, "reason": "a stop is latched"}
+        idx = state.get("queue_index") or 0
+        queue = [q for q in state.get("queue") or [] if isinstance(q, dict)]
+        after = [q.get("id") for q in queue if (q.get("index") or 0) > idx and isinstance(q.get("id"), int)]
+        before = [q.get("id") for q in queue if (q.get("index") or 0) < idx and isinstance(q.get("id"), int)]
+        db = _pool_session()
+        try:
+            picks = pool.replan(current, after, before, db=db)
+        finally:
+            if db is not None:
+                db.close()
+        pool.state["last_topup_current_track_id"] = current
+        pool._persist()
+        if not picks:  # never empty the queue just because nothing is eligible
+            return {"replanned": False, "reason": "no eligible picks; queue left as it is"}
+        ids = self.send_tracks("replace_upcoming", picks, source=source)
+        return {"replanned": True, "count": len(picks), "command_ids": ids}
 
     def _maybe_run_triggers(self, state: dict[str, Any], device_key: str) -> None:
         """Feed the renderer's report to the DJ trigger engine (#5480 #5515).
@@ -854,7 +935,7 @@ def _cmd_diag(rec: PlaybackCommandRecord) -> dict[str, Any]:
         payload["track_ids"] = ids[:5]
         payload["track_count"] = len(ids)
     return {"id": rec.id, "type": rec.type, "payload": payload,
-            "target": rec.target_device_id}
+            "target": rec.target_device_id, "source": rec.source}
 
 
 def _append_diag(kind: str, record: dict[str, Any]) -> None:

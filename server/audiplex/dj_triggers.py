@@ -401,14 +401,19 @@ def execute_actions(cue: dict, bus, now: float) -> list[int]:
     """Send a cue's actions to the phone; returns the command ids."""
     actions = cue_actions(cue)
     ids: list[int] = []
+    from audiplex.scheduled_stop import controller as stop_controller
+
+    # #6913: a stop Todd asked for also holds against cue refills.
+    latched = stop_controller.latch_active(time.time())
     for a in actions:
-        if a.get("type") == "queue_track":
-            ids.append(bus._enqueue("play_next", {"track_ids": [int(a["track_id"])]}).id)
+        if a.get("type") == "queue_track" and not latched:
+            ids.append(bus._enqueue("play_next", {"track_ids": [int(a["track_id"])]},
+                                    source="dj_triggers:cue").id)
     # After play_next so the clip (also inserted right after the current item) plays first.
     for a in actions:
-        if a.get("type") == "insert_clip":
+        if a.get("type") == "insert_clip" and not latched:
             payload = _announce_payload(a["clip_id"], cue.get("clip_title"), cue.get("clip_duration"))
-            ids.append(bus._enqueue("announce", payload).id)
+            ids.append(bus._enqueue("announce", payload, source="dj_triggers:cue").id)
     for a in actions:
         if a.get("type") == "bed_chime":
             base = chime_base_url()
@@ -496,7 +501,7 @@ def on_state(state: dict, bus, pool=None, now: Optional[float] = None) -> dict:
             if decision == "dropped" and c.get("outro"):
                 # The ride is still over: skip the words, keep the stop. A song
                 # has only just started, so this is a boundary pause, not a cut.
-                bus._enqueue("pause", {})
+                bus._enqueue("pause", {}, source="dj_triggers:outro_dropped")  # #3552
                 c["pause_state"] = "paused_no_outro"
                 logger.warning("outro dropped (%s): paused without it", c.get("drop_reason"))
     pool._persist()
@@ -525,7 +530,7 @@ def _check_pause_watch(state: dict, bus, pool, now: float) -> None:
         elif cur > 0 and cur != (c.get("trigger") or {}).get("track_id"):
             # A real track started and our pause never went out (report lag, or the
             # clip never showed): stop now, a second into the song, not at its end.
-            bus._enqueue("pause", {})
+            bus._enqueue("pause", {}, source="dj_triggers:outro_late")  # #3552
             c["pause_state"] = "paused_late" if c.get("clip_seen") else "paused_fallback"
             logger.warning("cue %s: pause sent late (%s)", c.get("id"), c["pause_state"])
 
@@ -535,7 +540,7 @@ def _send_pause(cue: dict, bus, pool) -> None:
         live = cue is pool.state.get("outro") or any(cue is c for c in pool.state.get("pending_cues") or [])
         if cue.get("pause_state") != "pausing" or not live:
             return
-        bus._enqueue("pause", {})
+        bus._enqueue("pause", {}, source="dj_triggers:outro")  # #3552
         cue["pause_state"] = "paused"
         pool._persist()
         logger.info("cue %s: paused after its clip", cue.get("id"))

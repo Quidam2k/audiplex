@@ -47,7 +47,8 @@ class TestAfterCurrent:
         c = StopController()
         t0 = _state(pos_ms=170_000)
         r = c.arm_after_current(bus, t0)
-        assert r["ok"] and _types() == ["replace_upcoming"]
+        # #6913: the trim, then the exact end-of-song stop for 1.0.52+ phones.
+        assert r["ok"] and _types() == ["replace_upcoming", "stop_after_current"]
         assert c.latch_active(t0)
         bus.ack(_last("replace_upcoming")["id"], "ok")
         c.tick(bus, t0 + 1)

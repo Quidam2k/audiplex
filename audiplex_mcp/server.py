@@ -733,12 +733,30 @@ async def _device_lacks_replace_upcoming() -> bool:  # #3249
     return bool(latest) and latest[-1].get("ack_status") == "unknown_type"
 
 
+def _caller_source() -> str:  # #3552
+    """"<persona>:<tool>" for the server's command log: the outermost dj_* tool
+    on the stack, else the outermost function of this package (a background
+    task such as the boundary swap)."""
+    tool = fallback = None
+    f = sys._getframe(1)
+    while f is not None:
+        if "audiplex_mcp" in f.f_code.co_filename:
+            name = f.f_code.co_name
+            if name.startswith("dj_"):
+                tool = name
+            elif not name.startswith("<"):
+                fallback = name
+        f = f.f_back
+    persona = os.environ.get("DJ_PERSONA_NAME") or "mcp"
+    return f"{persona}:{tool or fallback or 'unknown'}"
+
+
 async def _enqueue_raw(cmd_type: str, payload: dict) -> str:  # #3249: pre-gate send
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
             f"{AUDIPLEX_URL}/api/playback/command",
             headers=_headers(),
-            json={"type": cmd_type, "payload": payload},
+            json={"type": cmd_type, "payload": payload, "source": _caller_source()},  # #3552
         )
     if resp.status_code == 401:
         return "Auth failed (401). Check AUDIPLEX_TOKEN."
@@ -1872,6 +1890,50 @@ async def dj_queue_by(
 
 
 
+_TAIL: dict = {"task": None, "status": "none", "detail": ""}  # #6913
+
+
+async def _send_tail_after_ack(command_id: int, tail: list[int], wait_s: float = 600.0) -> None:  # #6913
+    """Append a mix/pool tail once its replace_upcoming is acked ok. Before this
+    a slow ack (>12 s) meant the tail was never sent at all."""
+    ack = await _await_ack(command_id, timeout=wait_s)
+    if ack is None:
+        _TAIL.update(status="aborted", detail=f"no ack for #{command_id} in {wait_s:g}s; {len(tail)} not sent")
+    elif ack.get("ack_status") != "ok":
+        _TAIL.update(status="aborted", detail=f"#{command_id} acked {ack.get('ack_status')}; {len(tail)} not sent")
+    else:
+        more = await _enqueue("queue", {"track_ids": tail})
+        if isinstance(more, str):
+            _TAIL.update(status="failed", detail=more)
+        else:
+            _TAIL.update(status="sent", detail=f"{_sent_count(more, len(tail))} track(s) appended after #{command_id}")
+    print(f"[tail] {_TAIL['status']}: {_TAIL['detail']}", file=sys.stderr, flush=True)
+
+
+async def _replace_upcoming_chunked(ids: list[int]) -> tuple[dict | str, dict | None, str]:  # #6913
+    """replace_upcoming with the first chunk; the rest is appended once the
+    phone says ok (an unknown_type must not leave stray appends). Returns
+    (data, ack, note). A slow ack hands the tail to a background task."""
+    first, tail = ids[:QUEUE_CHUNK], ids[QUEUE_CHUNK:]
+    data = await _enqueue("replace_upcoming", {"track_ids": first})
+    if isinstance(data, str):
+        return data, None, ""
+    ack = await _await_ack(int(data["id"]))
+    if not tail:
+        return data, ack, ""
+    if ack is None:
+        old = _TAIL.get("task")
+        if old is not None and not old.done():
+            old.cancel()
+        _TAIL["task"] = asyncio.create_task(_send_tail_after_ack(int(data["id"]), tail))
+        _TAIL.update(status="pending", detail=f"{len(tail)} track(s) wait for #{data['id']}'s ack")
+        return data, ack, f" The other {len(tail)} track(s) follow automatically once the phone acks (dj_mix_status)."
+    if ack.get("ack_status") == "ok":
+        more = await _enqueue("queue", {"track_ids": tail})
+        return data, ack, (f" plus {_sent_count(more, len(tail))} appended" if isinstance(more, dict) else "")
+    return data, ack, ""
+
+
 async def _await_ack(command_id: int, timeout: float = 12.0) -> dict | None:
     """The registry row for one command once the device acks it, else None."""
     deadline = asyncio.get_running_loop().time() + timeout
@@ -1989,6 +2051,8 @@ async def _boundary_swap(ids: list[int], start_id: int, max_wait_s: float) -> No
             if failures >= 30:
                 return _swap_set("aborted", f"lost the player state ({e})")
             continue
+        if (state.get("stop") or {}).get("latched"):  # #6913: Todd asked it to stop
+            return _swap_set("aborted", "a stop is latched; nothing sent")
         track = state.get("track") or {}
         cur = track.get("id")
         if cur is None:
@@ -2022,7 +2086,8 @@ async def dj_mix_status() -> str:
     task = _SWAP.get("task")
     live = task is not None and not task.done()
     return (f"Swap {_SWAP['status']}{' (waiting for the song to end)' if live else ''}: "
-            f"{_SWAP['detail'] or 'nothing scheduled'}. {len(_SWAP['ids'])} track(s) in the planned mix.")
+            f"{_SWAP['detail'] or 'nothing scheduled'}. {len(_SWAP['ids'])} track(s) in the planned mix."
+            f" Tail {_TAIL['status']}: {_TAIL['detail'] or 'nothing pending'}.")  # #6913
 
 
 @mcp.tool()
@@ -2196,24 +2261,20 @@ async def dj_mix(
     if not await _device_lacks_replace_upcoming():  # #3249: don't re-send a known failure
         # Only the first chunk rides replace_upcoming; the rest is appended once
         # the phone has said yes (an unknown_type must not leave stray appends).
-        first, tail = upcoming[:QUEUE_CHUNK], upcoming[QUEUE_CHUNK:]  # #3249
-        data = await _enqueue("replace_upcoming", {"track_ids": first})
+        first = upcoming[:QUEUE_CHUNK]  # #3249
+        data, ack, tail_note = await _replace_upcoming_chunked(upcoming)  # #6913
         if isinstance(data, str):
             return _held_result(data)  # #ride0928
-        ack = await _await_ack(int(data["id"]))
         titles = json.dumps(await _titles(list(data.get("dropped_missing") or [])), ensure_ascii=False)  # #ride0928
         ack_txt = "none_yet" if ack is None else f"{ack.get('ack_status')}" + (f": {ack['ack_detail']}" if ack.get("ack_detail") else "")
         head = f"RESULT sent={_sent_count(data, len(first))} held=no skipped_missing={titles} phone_ack={ack_txt}\n" + head + _missing_note(data)  # #ride0928
         if ack is None:
             return head + (
                 f" Sent replace_upcoming (command #{data['id']}) after the current song;"
-                " no ack yet — check dj_command_status."
-                + (f" {len(tail)} more track(s) NOT sent yet; add them once it acks." if tail else "")
+                " no ack yet — check dj_command_status." + tail_note
             )
         if ack.get("ack_status") == "ok":
-            more = await _enqueue("queue", {"track_ids": tail}) if tail else None  # #3249
-            extra = f" plus {_sent_count(more, len(tail))} appended" if isinstance(more, dict) else ""
-            return head + f" Queued after the current song (command #{data['id']}){extra}."
+            return head + f" Queued after the current song (command #{data['id']}){tail_note}."
         if ack.get("ack_status") != "unknown_type":
             return head + f" The phone refused it: {ack.get('ack_status')} {ack.get('ack_detail') or ''}".rstrip()
 
@@ -3840,6 +3901,10 @@ async def dj_spec_save(
     return f"Saved spec '{name}' (id {saved.get('id')}): {_counts(lanes)}"
 
 
+POOL_DEPTH = 300  # #3644: tracks queued after the current song by a pool
+POOL_REFILL_AT = 20  # #3644
+
+
 async def _trim_to_pool(picks: list[int], state: dict) -> str:
     """One-time queue trim when a pool starts (#5495): the pool's first picks
     replace whatever was queued after the current song. Same delivery as
@@ -3854,15 +3919,15 @@ async def _trim_to_pool(picks: list[int], state: dict) -> str:
         return (f"\n{result}Nothing was loaded, so the pool's first picks were sent to start "
                 f"now (command #{data.get('id')}).")
     if not await _device_lacks_replace_upcoming():
-        data = await _enqueue("replace_upcoming", {"track_ids": picks})
+        data, ack, tail_note = await _replace_upcoming_chunked(picks)  # #6913
         if isinstance(data, str):
             return " " + data
-        ack = await _await_ack(int(data["id"]))
         if ack is None:
             return (f" Sent replace_upcoming (command #{data['id']}) after the current song;"
-                    " no ack yet - check dj_command_status.")
+                    " no ack yet - check dj_command_status." + tail_note)
         if ack.get("ack_status") == "ok":
-            return f" The queue after the current song is now the pool's (command #{data['id']})."
+            return (f" The queue after the current song is now the pool's {len(picks)} track(s)"
+                    f" (command #{data['id']}{tail_note}).")
         if ack.get("ack_status") != "unknown_type":
             return f" The phone refused the trim: {ack.get('ack_status')} {ack.get('ack_detail') or ''}".rstrip()
     old = _SWAP.get("task")
@@ -3888,13 +3953,15 @@ async def dj_pool_set(
     ahead: int | None = None,
     exclude_recent_hours: float | None = None,
     allow_empty: bool = False,
+    refill_at: int | None = None,
     starvation_picks: int | None = None,
     starvation_minutes: float | None = None,
 ) -> str:
     """Start (or replace) the rolling DJ pool from a saved spec or inline sources.
 
-    Once running, the SERVER keeps `ahead` tracks queued after the current song,
-    appending on every track change: round-robin across lanes (one lane per
+    Once running, the SERVER keeps a deep queue after the current song (#3644:
+    `ahead` tracks, default 300, refilled once fewer than `refill_at` remain),
+    so the phone's Now Playing shows the set like a loaded queue: round-robin across lanes (one lane per
     source) with a starvation rule, skipping recently-played recordings and
     anything already queued. Starting it replaces what was queued after the
     current song with the pool's first picks, once.
@@ -3902,7 +3969,9 @@ async def dj_pool_set(
     spec / spec_id:       a saved spec (by name or id); its cues are armed too
     sources:              inline sources if no spec: [{kind, query, recursive?, label}]
     balance:              "even", "proportional", or "none" (spec value, else even)
-    ahead:                how many tracks to keep queued (spec value, else 4)
+    ahead:                how many tracks to queue after the current song (default 300;
+                          a saved spec's old small value is raised to that)
+    refill_at:            top up once fewer than this many are left (default 20)
     exclude_recent_hours: skip recently-played recordings (spec value, else 12)
     allow_empty:          a source that resolves to 0 tracks REFUSES unless True
     starvation_picks / starvation_minutes: a lane unpicked this long jumps the line
@@ -3924,7 +3993,10 @@ async def dj_pool_set(
         if not sources:
             return "ERROR: no sources given and no spec named."
         balance = balance or saved.get("balance") or "even"
-        ahead = int(ahead if ahead is not None else saved.get("ahead") or 4)
+        # #3644: the pool is a visible queue now. Saved specs carry the old
+        # default of 4, so an unspecified ahead is never shallower than this.
+        ahead = int(ahead if ahead is not None else max(int(saved.get("ahead") or 0), POOL_DEPTH))
+        refill_at = int(refill_at if refill_at is not None else min(POOL_REFILL_AT, ahead))
         if exclude_recent_hours is None:
             exclude_recent_hours = saved.get("exclude_recent_hours", 12)
 
@@ -3937,6 +4009,9 @@ async def dj_pool_set(
         track = state.get("track") or {}
         cur = track.get("id")
         queue = state.get("queue") or []
+        if (state.get("stop") or {}).get("latched"):  # #6913: the server refuses it too
+            return (f"STOPPED: {(state.get('stop') or {}).get('latch_reason')}. The pool was not "
+                    "started. If Todd asks for music again, dj_play_now lifts the stop.")
         if cur is None or not queue:  # #3493: this pool would START music, so refuse before saving it
             muted = _mute_hold("play_now")
             if muted:
@@ -3946,6 +4021,7 @@ async def dj_pool_set(
             "lanes": lanes,
             "balance": balance,
             "ahead": ahead,
+            "refill_at": refill_at,
             "exclude_recent_hours": exclude_recent_hours,
             "queued_ids": [q.get("id") for q in queue if isinstance(q.get("id"), int)],
         }

@@ -75,6 +75,10 @@ def _queued():
     return [(r["type"], r["payload"]["track_ids"]) for r in _rows() if r["type"] == "queue"]
 
 
+def _cmds(cmd_type):
+    return [r["payload"]["track_ids"] for r in _rows() if r["type"] == cmd_type]
+
+
 def _rows():
     out = []
     for rec in bus._commands.values():
@@ -157,9 +161,9 @@ def test_matching_cue_play_track_goes_first_and_is_marked_done(pool_db):
     pool = _start({"a": ids[:5]}, ahead=3)
     pool.add_cue(11, "track_start", ids[0], play_track=ids[5], say="here it comes")
     bus.set_state(_state(ids[0]))
-    picks = _queued()[0][1]
-    assert picks[0] == ids[5]
-    assert len(picks) == 3
+    # #3644: the cue's track plays next (play_next); the fill goes to the end.
+    assert _cmds("play_next") == [[ids[5]]]
+    assert len(_queued()[0][1]) == 2 and ids[5] not in _queued()[0][1]
     assert pool.get_pending_cues() == []
     assert pool.state["pending_cues"][0]["done"] is True
 
@@ -171,7 +175,7 @@ def test_track_end_cue_fires_on_the_next_track(pool_db):
     bus.set_state(_state(ids[0], after=[ids[1]]))  # full; cue not yet due
     assert _queued() == []
     bus.set_state(_state(ids[1]))  # ids[0] ended
-    assert _queued()[0][1][0] == ids[5]
+    assert _cmds("play_next") == [[ids[5]]]
 
 
 def test_recent_owner_plays_and_same_recording_are_excluded(pool_db):

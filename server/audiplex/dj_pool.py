@@ -111,6 +111,7 @@ class DJPool:
             "lanes": {},  # New: {lane_name: {track_ids, played_count, last_played_at, exhausted}}
             "balance_mode": "even",
             "ahead": 4,
+            "refill_at": None,  # #3644: top up only below this many (None = ahead)
             "exclude_recent_hours": 12,
             "played_this_session": [],
             "last_topup_at": None,
@@ -138,8 +139,14 @@ class DJPool:
         ahead: int = 4,
         exclude_recent_hours: float = 12,
         played_this_session: list[int] | None = None,
+        refill_at: int | None = None,
     ) -> dict[str, Any]:
         """Update pool with new eligible tracks and configuration.
+
+        ahead: how deep the device queue is filled after the current song.
+        refill_at: top up only once fewer than this many are left (#3644: a
+            deep queue Todd can see, refilled in batches); None = ahead, i.e.
+            the old keep-it-exactly-ahead-deep behaviour.
 
         lanes: {lane_name: {track_ids: [...], played_count: 0, last_played_at: None, exhausted: False}}
         """
@@ -150,6 +157,7 @@ class DJPool:
             "source_labels": source_labels,
             "balance_mode": balance,
             "ahead": ahead,
+            "refill_at": refill_at,
             "exclude_recent_hours": exclude_recent_hours,
             "played_this_session": played_this_session or [],
             "last_topup_at": None,
@@ -228,6 +236,7 @@ class DJPool:
             "eligible_count": sum(d["remaining"] for d in lane_details),
             "balance_mode": self.state.get("balance_mode"),
             "ahead": self.state.get("ahead"),
+            "refill_at": self.state.get("refill_at"),
             "played_this_session_count": len(self.state.get("played_this_session", [])),
             "last_topup_at": self.state.get("last_topup_at"),
             "lanes": lane_details,
@@ -412,10 +421,15 @@ class DJPool:
                 if cue.get("play_track"):
                     cue_picks.append(int(cue["play_track"]))
 
-        if real_count >= ahead and not cue_picks:
+        refill_at = min(int(self.state.get("refill_at") or ahead), ahead)  # #3644
+        if real_count >= refill_at and not cue_picks:
             self.state["last_topup_current_track_id"] = current_track_id
             self._persist()
             return {"picks": [], "reason": f"already {real_count} tracks ahead", "pending_cues": pending_cues}
+        if real_count >= refill_at:
+            to_fill = 0  # #3644: only the cue's own track goes in
+        else:
+            to_fill = ahead - real_count
 
         # What must not be picked: this session's picks, whatever is already in
         # the device queue, and (by recording identity) recent plays.
@@ -459,7 +473,7 @@ class DJPool:
             return rec is None or rec not in skip_recordings
 
         picks: list[int] = list(cue_picks)
-        to_pick = ahead - real_count
+        to_pick = max(len(cue_picks), to_fill)
 
         # Round-robin + starvation; filtered lazily so a pick blocks its own
         # recording's other copies within the same top-up.
@@ -486,7 +500,8 @@ class DJPool:
         self.state["last_topup_current_track_id"] = current_track_id
         if not picks:
             self._persist()
-            return {"picks": [], "reason": "no eligible candidates", "pending_cues": pending_cues}
+            return {"picks": [], "reason": "no eligible candidates", "pending_cues": pending_cues,
+                    "cue_picks": []}
 
         # Record picks as played
         self.state.setdefault("played_this_session", []).extend(picks)
@@ -505,6 +520,7 @@ class DJPool:
 
         return {
             "picks": picks,
+            "cue_picks": list(cue_picks),  # #3644: these go in next, not at the end
             "reason": f"topped up to {ahead} ahead",
             "per_lane_details": lane_details,
             "pending_cues": pending_cues,
@@ -534,6 +550,34 @@ class DJPool:
         self.state.setdefault("pending_cues", []).append(cue)
         self._persist()
         return cue
+
+    def replan(
+        self,
+        current_track_id: int,
+        upcoming_track_ids: list[int],
+        played_track_ids: list[int],
+        db: Optional[Any] = None,
+    ) -> list[int]:
+        """Re-pick everything after the current song under the pool's current
+        lanes (#3644). With a deep queue a lane pause or a spec edit would
+        otherwise only show up hours later. The queued-but-unplayed picks are
+        forgotten so they can be picked again; already-played ones stay out."""
+        if not self.is_active() or current_track_id is None or current_track_id < 0:
+            return []
+        dropped = set(upcoming_track_ids)
+        self.state["played_this_session"] = [
+            t for t in self.state.get("played_this_session", []) if t not in dropped]
+        for lane in self.state.get("lanes", {}).values():
+            if not lane.get("paused"):
+                lane["exhausted"] = False  # forgotten picks make it eligible again
+        result = self.top_up(
+            current_track_id=current_track_id,
+            upcoming_track_ids=[current_track_id],
+            current_played_track_ids=played_track_ids,
+            cues=[],
+            db=db,
+        )
+        return list(result.get("picks") or [])
 
     def get_pending_cues(self) -> list[dict]:
         """Get all pending cues."""

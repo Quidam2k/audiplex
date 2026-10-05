@@ -122,7 +122,9 @@ async def post_command(cmd: PlaybackCommand, user: User = Depends(get_current_us
     refusal = stop_controller.gate(cmd.type, cmd.payload or {}, time.time(), bus)
     if refusal:
         raise HTTPException(status_code=409, detail=refusal)
-    rec = await bus.enqueue(cmd.type, cmd.payload)
+    # #3552: record who sent it; the MCP adds "<persona>:<tool>".
+    source = user.username + (f"/{cmd.source}" if cmd.source else "")
+    rec = await bus.enqueue(cmd.type, cmd.payload, source=source)
     return PlaybackCommandQueued(id=rec.id, type=rec.type, pending=bus.pending())
 
 
@@ -847,10 +849,17 @@ def set_pool(
     """
     from audiplex.dj_pool import get_pool, lanes_from_ids
 
+    # #6913: a pool would refill a queue Todd asked to end.
+    if stop_controller.latch_active(time.time()):
+        raise HTTPException(status_code=409, detail=(
+            f"STOPPED: {stop_controller.latch['reason']}. The pool was not started. "
+            "If Todd asks for music again, dj_play_now lifts the stop (or dj_stop_cancel)."))
     pool = get_pool()
     spec_id = body.get("spec_id")
     balance = body.get("balance", "even")
     ahead = int(body.get("ahead", 4))
+    refill_at = body.get("refill_at")  # #3644
+    refill_at = int(refill_at) if refill_at is not None else None
     exclude_recent_hours = body.get("exclude_recent_hours", 12)
     raw_lanes = body.get("lanes")
     if raw_lanes:
@@ -867,6 +876,7 @@ def set_pool(
         result = pool.set_pool(
             spec_id, track_ids, source_labels, lanes=lanes_from_ids(lanes),
             balance=balance, ahead=ahead, exclude_recent_hours=exclude_recent_hours,
+            refill_at=refill_at,
         )
     else:
         legacy_ids = [int(t) for t in body.get("track_ids", [])]
@@ -876,6 +886,7 @@ def set_pool(
             spec_id, [t for t in legacy_ids if t not in drop],  # #2806
             body.get("source_labels", {}),
             balance=balance, ahead=ahead, exclude_recent_hours=exclude_recent_hours,
+            refill_at=refill_at,
         )
     result["skipped_long"] = sorted(long_ids)  # #3249
     if isinstance(body.get("starvation_config"), dict):
@@ -969,14 +980,20 @@ def set_pool_lane(body: dict, user: User = Depends(get_current_user)):
     """Pause, resume or remove one lane of the running pool (#2806).
 
     body: {lane: <label, case-insensitive prefix ok>, action: pause|resume|remove}.
-    Tracks already queued stay; this only changes what the next top-ups pick.
+    #3644: a pause or remove also re-picks what is queued after the current
+    song, since the pool now keeps a deep queue (a resume shows at the next
+    refill).
     """
     from audiplex.dj_pool import get_pool
 
+    action = str(body.get("action", ""))
     try:
-        return get_pool().set_lane(str(body.get("lane", "")), str(body.get("action", "")))
+        result = get_pool().set_lane(str(body.get("lane", "")), action)
     except (KeyError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e.args[0] if e.args else e))
+    if action in ("pause", "remove"):
+        result["queue"] = bus.replan_pool(f"{user.username}/pool_lane:{action}")
+    return result
 
 
 # ----- #2806: DJ bans: never pick this track again (reversible) -----
@@ -1310,6 +1327,7 @@ def update_mix_spec(
     if lanes is not None and pool.is_active() and pool.state.get("spec_id") == spec_id:
         pool.resync_lanes({str(k): [int(t) for t in v] for k, v in lanes.items()})
         resynced = True
+        bus.replan_pool(f"{user.username}/spec_edit")  # #3644: show the edit now
 
     return {"name": name, "id": spec_id, "sources": sources, "status": "updated",
             "pool_resynced": resynced}

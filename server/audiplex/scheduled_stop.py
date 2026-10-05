@@ -43,7 +43,9 @@ TICK_S = 0.5
 
 # An explicit start is a fresh request (from Todd, via a persona): it ends the stop.
 CLEARING_CMDS = {"play_now", "resume", "play_stream", "play_book", "activate"}
-# What the latch refuses: anything that grows the queue.
+# What the latch refuses: anything that grows the queue. A replace_upcoming
+# that brings tracks back (dj_mix, a pool start) is a refill too (#6913);
+# the empty one is the stop's own trim.
 REFILL_CMDS = {"queue", "play_next"}
 
 
@@ -97,7 +99,9 @@ class StopController:
         if cmd_type in CLEARING_CMDS:
             self.clear(f"explicit {cmd_type}", bus, now)
             return None
-        if cmd_type in REFILL_CMDS and self.latch_active(now):
+        refill = cmd_type in REFILL_CMDS or (
+            cmd_type == "replace_upcoming" and (payload or {}).get("track_ids"))
+        if refill and self.latch_active(now):
             left = int((self.latch["expires_at"] - now) // 60)
             return (f"STOPPED: {self.latch['reason']}. Nothing was queued. Todd asked for the "
                     f"music to stop; the stop holds for another {left} min. If Todd asks for "
@@ -114,11 +118,16 @@ class StopController:
         if (track.get("id") or 0) < 0 or not state.get("duration_ms"):
             return {"ok": False, "error": "The current item has no known end (a stream or a DJ clip). Use dj_pause."}
         self._replace_job(bus, now)
-        trim = bus._enqueue("replace_upcoming", {"track_ids": []})
+        trim = bus._enqueue("replace_upcoming", {"track_ids": []}, source="scheduled_stop")
+        # #6913: 1.0.52+ pauses exactly at the song's end (Media3
+        # pauseAtEndOfMediaItems); older builds answer unknown_type and the
+        # timed pause below still covers them.
+        exact = bus._enqueue("stop_after_current", {"track_id": track.get("id")}, source="scheduled_stop")
         self.job = {
             "mode": "after_current", "phase": "trimming", "armed_at": now,
             "track_id": track.get("id"), "track_title": track.get("title"),
-            "trim_cmd_id": trim.id, "trim": "pending", "commands": [trim.id],
+            "trim_cmd_id": trim.id, "trim": "pending", "commands": [trim.id, exact.id],
+            "exact_cmd_id": exact.id,
         }
         self._stop_pool()
         self.set_latch(f"stop after '{track.get('title')}' (armed by the DJ)", now)
@@ -166,7 +175,7 @@ class StopController:
             self._tick_verify(self.job, bus, state, now)
 
     def _send(self, job: dict, bus, cmd: str, payload: dict) -> int:
-        rec = bus._enqueue(cmd, payload)
+        rec = bus._enqueue(cmd, payload, source=f"scheduled_stop:{job['mode']}")  # #3552
         job["commands"].append(rec.id)
         return rec.id
 
@@ -251,6 +260,10 @@ class StopController:
             # Paused (or cancelled mid-fade): put the volume back so the next
             # start isn't silent.
             self._send(job, bus, "volume", {"volume": job["start_volume"]})
+        if job.get("exact_cmd_id") and bus is not None:
+            # #6913: the phone's one-shot end-of-song pause must not outlive the
+            # stop (harmless if it already fired).
+            bus._enqueue("cancel_stop_after_current", {}, source="scheduled_stop:finished")
         job.update(verdict=verdict or "CANCELLED", reason=reason, finished_at=now, phase="done")
         _diag({"event": "finished", "mode": job["mode"], "verdict": job["verdict"], "reason": reason})
         self.last, self.job = job, None

@@ -386,6 +386,8 @@ class PlaybackCommand(BaseModel):
 
     type: str
     payload: dict = {}
+    # #3552: optional caller label ("<persona>:<tool>"), logged with the user.
+    source: str | None = None
 
 
 class PlaybackCommandQueued(BaseModel):
