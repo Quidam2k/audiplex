@@ -128,7 +128,7 @@ def test_pool_that_would_start_is_refused_before_saving(wire, tmp_path, monkeypa
     st["state"] = {"playing": False, "queue": [], "track": {}}
     _mute(tmp_path, monkeypatch)
 
-    async def fake_lanes(sources):
+    async def fake_lanes(sources, **_):
         return [{"name": "a", "track_ids": [1, 2]}], []
 
     monkeypatch.setattr(mcp_server, "_resolve_lanes", fake_lanes)

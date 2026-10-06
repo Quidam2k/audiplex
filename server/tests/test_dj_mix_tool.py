@@ -315,6 +315,9 @@ def library(wire, monkeypatch):
             if p not in TREE:
                 raise mcp_server.httpx.HTTPStatusError("404", request=None, response=None)
             return TREE[p]
+        if path.startswith("/api/music/folders/match?q="):  # #3910: a pre-#3910 server
+            raise mcp_server.httpx.HTTPStatusError(
+                "404", request=None, response=mcp_server.httpx.Response(404))
         if path.startswith("/api/music/folders/tracks?path="):
             return [{"id": i} for i in FOLDER_TRACKS.get(unquote(path.split("=", 1)[1]), [])]
         if path == "/api/music/albums/90":

@@ -299,17 +299,54 @@ def get_folder_tracks(
     Ordered by folder path → disc → track so a folder turns into a
     natural playback/playlist order. Returns [] for an unknown path.
     """
-    tracks = (
+    # #3910: pick the albums first (a few thousand paths) and load only their
+    # tracks; loading all 37k tracks per call made dj_search take minutes.
+    album_ids = [aid for aid, fp in db.query(Album.id, Album.folder_path) if _is_within(fp, path)]
+    if not album_ids:
+        return []
+    selected = (
         db.query(Track)
-        .join(Album, Track.album_id == Album.id)
+        .filter(Track.album_id.in_(album_ids))
         .options(selectinload(Track.album), selectinload(Track.artist))
         .all()
     )
-    selected = [t for t in tracks if t.album and _is_within(t.album.folder_path, path)]
     selected.sort(
         key=lambda t: (_norm(t.album.folder_path), t.disc_number, t.track_number)
     )
     return [_track_schema(t) for t in selected]
+
+
+@router.get("/folders/match", response_model=list[str])
+def match_folders(
+    q: str = Query(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    music_roots: list[str] = Depends(get_music_roots),
+):
+    """Topmost browsable folders whose path contains `q`, case-insensitive (#3910).
+
+    The answer the DJ used to get by walking /folders one level at a time
+    (thousands of calls); a match's subfolders are not listed separately.
+    """
+    ql = q.strip().lower().replace("\\", "/")
+    if not ql:
+        return []
+    roots = [_norm(r) for r in music_roots]
+    found: set[str] = set()
+    for (fp,) in db.query(Album.folder_path):
+        an = _norm(fp)
+        for root in roots:
+            if not _is_within(an, root):
+                continue
+            node = root
+            segs = an[len(root) + 1:].split("/") if an != root else []
+            for seg in [None, *segs]:
+                if seg is not None:
+                    node = f"{node}/{seg}"
+                if ql in node.lower():
+                    found.add(node)
+                    break
+    return sorted(found)
 
 
 def _sorted_nodes(nodes: list[FolderNode]) -> list[FolderNode]:

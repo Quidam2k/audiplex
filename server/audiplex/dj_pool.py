@@ -16,12 +16,17 @@ Module-level singleton: _pool_instance is shared across routes and the PlaybackB
 
 import json
 import os
+import random
 import time
 from pathlib import Path
 from typing import Any, Optional
 
 from audiplex import taste
 from audiplex.identity import build_identity_map
+
+# #7108: a lane that has played all its tracks recycles them, but never one
+# picked within the last this-many picks (about two hours of songs).
+NO_REPEAT_PICKS = 30
 
 
 def _get_pool_state_path() -> Path:
@@ -51,11 +56,19 @@ def _write_json_atomic(path: Path, data: Any) -> None:
     temp.replace(path)
 
 
-def _lane(track_ids: list[int], prior: Optional[dict] = None) -> dict[str, Any]:
-    """One lane record; a zero-track lane is born exhausted (#5495)."""
+def _lane(track_ids: list[int], prior: Optional[dict] = None,
+          dropped: Optional[dict[str, int]] = None) -> dict[str, Any]:
+    """One lane record; a zero-track lane is born exhausted (#5495).
+
+    dropped (#7108): {reason: count} of resolved tracks the server filtered
+    out at set time, so a lane with nothing left can say why.
+    """
     ids = [int(t) for t in track_ids]
     prior = prior or {}
+    dropped = {k: v for k, v in (dropped or {}).items() if v}
     return {
+        "dropped": dropped,
+        "why_empty": None if ids else _why_no_tracks(dropped),  # #7108
         "track_ids": ids,
         "played_count": prior.get("played_count", 0),
         "last_played_at": prior.get("last_played_at"),
@@ -65,9 +78,18 @@ def _lane(track_ids: list[int], prior: Optional[dict] = None) -> dict[str, Any]:
     }
 
 
-def lanes_from_ids(lanes: dict[str, list[int]]) -> dict[str, dict]:
-    """{label: [track_ids]} -> full lane records (#5495)."""
-    return {label: _lane(ids) for label, ids in lanes.items()}
+def _why_no_tracks(dropped: Optional[dict[str, int]]) -> str:
+    """Why a lane has no tracks at all (#7108)."""
+    if dropped:
+        parts = ", ".join(f"{n} {why}" for why, n in dropped.items())
+        return f"all {sum(dropped.values())} resolved track(s) were filtered out ({parts})"
+    return "the source resolved 0 tracks"
+
+
+def lanes_from_ids(lanes: dict[str, list[int]],
+                   dropped: Optional[dict[str, dict[str, int]]] = None) -> dict[str, dict]:
+    """{label: [track_ids]} -> full lane records (#5495); dropped per label (#7108)."""
+    return {label: _lane(ids, dropped=(dropped or {}).get(label)) for label, ids in lanes.items()}
 
 
 def owner_user_id(db: Any) -> Optional[int]:
@@ -140,6 +162,7 @@ class DJPool:
         exclude_recent_hours: float = 12,
         played_this_session: list[int] | None = None,
         refill_at: int | None = None,
+        no_repeat_picks: int | None = None,
     ) -> dict[str, Any]:
         """Update pool with new eligible tracks and configuration.
 
@@ -147,6 +170,8 @@ class DJPool:
         refill_at: top up only once fewer than this many are left (#3644: a
             deep queue Todd can see, refilled in batches); None = ahead, i.e.
             the old keep-it-exactly-ahead-deep behaviour.
+        no_repeat_picks: a played-out lane recycles, but never a track picked
+            within this many picks (#7108); None = NO_REPEAT_PICKS.
 
         lanes: {lane_name: {track_ids: [...], played_count: 0, last_played_at: None, exhausted: False}}
         """
@@ -158,6 +183,7 @@ class DJPool:
             "balance_mode": balance,
             "ahead": ahead,
             "refill_at": refill_at,
+            "no_repeat_picks": NO_REPEAT_PICKS if no_repeat_picks is None else int(no_repeat_picks),
             "exclude_recent_hours": exclude_recent_hours,
             "played_this_session": played_this_session or [],
             "last_topup_at": None,
@@ -228,6 +254,7 @@ class DJPool:
                 "exhausted": lane_data.get("exhausted", False),
                 "zero_on_resolve": lane_data.get("zero_on_resolve", False),
                 "paused": lane_data.get("paused", False),  # #2806
+                "why_empty": lane_data.get("why_empty"),  # #7108
             })
 
         return {
@@ -237,6 +264,7 @@ class DJPool:
             "balance_mode": self.state.get("balance_mode"),
             "ahead": self.state.get("ahead"),
             "refill_at": self.state.get("refill_at"),
+            "no_repeat_picks": self.state.get("no_repeat_picks", NO_REPEAT_PICKS),  # #7108
             "played_this_session_count": len(self.state.get("played_this_session", [])),
             "last_topup_at": self.state.get("last_topup_at"),
             "lanes": lane_details,
@@ -292,7 +320,10 @@ class DJPool:
             if lane.get("exhausted") or lane.get("paused"):  # #2806
                 continue
 
-            picks_since = self.state.get("round_robin_index", 0) - lane.get("played_count", 0)
+            # #7108: picks since THIS lane's last pick. It used to be total
+            # picks minus the lane's own count, which with two lanes left the
+            # first lane "starving" for good and let it take every slot.
+            picks_since = self.state.get("round_robin_index", 0) - lane.get("last_pick_index", -1) - 1
             last_played_at = lane.get("last_played_at")
             minutes_since = None
             if last_played_at:
@@ -302,9 +333,10 @@ class DJPool:
             if picks_since >= starvation_picks or (minutes_since and minutes_since >= starvation_minutes):
                 starving.append(name)
 
-        # Prioritize starving lanes
+        # Prioritize starving lanes, the longest-waiting first (#7108)
         if starving:
-            selected = starving[0]
+            rr = self.state.get("round_robin_index", 0)
+            selected = max(starving, key=lambda n: rr - lanes[n].get("last_pick_index", -1))
         else:
             # Round-robin through non-exhausted lanes
             current_idx = self.state.get("round_robin_index", 0) % len(lane_names)
@@ -439,19 +471,23 @@ class DJPool:
         skip_ids.update(cue_picks)
         skip_recordings: set[str] = set()
         identities: dict = {}
+        banned: set[int] = set()
+        played_before: set[str] = set()  # #7108: owner plays inside exclude_recent_hours
 
         if db is not None:
             try:
                 identities = build_identity_map(db)
                 from audiplex.dj_bans import banned_ids  # #2806
 
-                skip_ids.update(banned_ids(db, identities))
+                banned = set(banned_ids(db, identities))
+                skip_ids.update(banned)
                 if owner_id is None:
                     owner_id = owner_user_id(db)
                 window_minutes = float(self.state.get("exclude_recent_hours", 12)) * 60
                 if owner_id is not None and window_minutes > 0:
                     for play in taste.recent_plays_for(db, owner_id, window_minutes, identities):
-                        skip_recordings.add(play.recording_id)
+                        played_before.add(play.recording_id)
+                skip_recordings |= played_before
             except Exception:
                 # If taste lookup fails, just skip session-played tracks
                 pass
@@ -475,48 +511,115 @@ class DJPool:
         picks: list[int] = list(cue_picks)
         to_pick = max(len(cue_picks), to_fill)
 
+        # #7108: the order picks will play in, oldest first, for the no-repeat
+        # window a recycled pick must stay out of.
+        window = int(self.state.get("no_repeat_picks", NO_REPEAT_PICKS))
+        history = list(self.state.get("played_this_session", []))
+        seen = set(history)
+        history += [t for t in [*(current_played_track_ids or []), *upcoming_track_ids]
+                    if isinstance(t, int) and t not in seen]
+
+        # A recycled pick may repeat this pool's own songs (outside the window)
+        # but not a recording Todd heard recently from somewhere else.
+        played_before -= {r for r in map(recording_of, history) if r is not None}
+
+        def recent_window() -> set[int]:
+            return set((history + picks)[-window:]) if window > 0 else set()
+
+        def recyclable(tid: Any, recent: set[int], recent_recs: set[str]) -> bool:
+            if not isinstance(tid, int) or tid <= 0 or tid in banned or tid in recent:
+                return False
+            rec = recording_of(tid)
+            return rec is None or (rec not in recent_recs and rec not in played_before)
+
+        def why_empty(lane: dict, recent: set[int]) -> str:
+            ids = lane.get("track_ids") or []
+            if not ids:
+                return _why_no_tracks(lane.get("dropped"))
+            n_banned = sum(1 for t in ids if t in banned)
+            n_recent = sum(1 for t in ids if t in recent and t not in banned)
+            n_before = sum(1 for t in ids if t not in banned and t not in recent
+                           and recording_of(t) in played_before)
+            rest = len(ids) - n_recent - n_banned - n_before
+            return (f"all {len(ids)} track(s) unavailable: {n_recent} picked within the last "
+                    f"{window} picks, {n_before} played recently outside this pool, "
+                    f"{n_banned} banned, {rest} a copy of a recently picked recording")
+
+        def others_fresh(name: str) -> bool:
+            return any(eligible(t) for other, data in self.state["lanes"].items()
+                       if other != name and not data.get("paused") for t in data.get("track_ids", []))
+
         # Round-robin + starvation; filtered lazily so a pick blocks its own
-        # recording's other copies within the same top-up.
+        # recording's other copies within the same top-up. Within a lane the
+        # pick is random (#7108: shuffled, not stored album order); a lane that
+        # has played everything recycles outside the no-repeat window while
+        # other lanes still have fresh tracks, so a small bucket keeps its turn
+        # instead of starving out. A pool with nothing fresh anywhere is done.
+        held: list[dict] = []  # lanes blocked only by the window: retried after the next pick
         while len(picks) < to_pick:
             selected_lane = self._select_next_lane()
             if not selected_lane:
                 break
             lane = self.state["lanes"][selected_lane]
-            pick = next((t for t in lane.get("track_ids", []) if eligible(t)), None)
-            if pick is None:
-                lane["exhausted"] = True
-                continue
+            ids = lane.get("track_ids", [])
+            fresh = [t for t in ids if eligible(t)]
+            if fresh:
+                pick = random.choice(fresh)
+            else:
+                recent = recent_window()
+                recent_recs = {r for r in map(recording_of, recent) if r is not None}
+                again = [t for t in ids if recyclable(t, recent, recent_recs)]
+                if not again or not others_fresh(selected_lane):
+                    lane["exhausted"] = True
+                    if not again:
+                        held.append(lane)
+                    lane["why_empty"] = why_empty(lane, recent) if not again else (
+                        f"all {len(ids)} track(s) already played or queued, and no other lane "
+                        "has fresh tracks left to recycle alongside")
+                    continue
+                pick = random.choice(again)
+            lane["why_empty"] = None
 
             picks.append(pick)
+            for blocked in held:  # #7108: the window moved on, so try them again
+                blocked["exhausted"] = False
+            held.clear()
             skip_ids.add(pick)
             rec = recording_of(pick)
             if rec is not None:
                 skip_recordings.add(rec)
 
             lane["played_count"] = lane.get("played_count", 0) + 1
+            lane["last_pick_index"] = self.state.get("round_robin_index", 0)  # #7108
             lane["last_played_at"] = time.time()
             self.state["round_robin_index"] = self.state.get("round_robin_index", 0) + 1
 
-        self.state["last_topup_current_track_id"] = current_track_id
-        if not picks:
-            self._persist()
-            return {"picks": [], "reason": "no eligible candidates", "pending_cues": pending_cues,
-                    "cue_picks": []}
-
-        # Record picks as played
-        self.state.setdefault("played_this_session", []).extend(picks)
-        self.state["last_topup_at"] = time.time()
-        self._persist()
-
+        # #7108: a lane blocked only for now (window, queue) is tried again at
+        # the next top-up; only a lane with no tracks at all stays exhausted.
+        for lane_data in self.state.get("lanes", {}).values():
+            if lane_data.get("track_ids"):
+                lane_data["exhausted"] = False
         lane_details = [
             {
                 "label": lane_name,
                 "remaining": len(lane_data.get("track_ids", [])),
                 "played_count": lane_data.get("played_count", 0),
                 "exhausted": lane_data.get("exhausted", False),
+                "why_empty": lane_data.get("why_empty"),  # #7108
             }
             for lane_name, lane_data in self.state.get("lanes", {}).items()
         ]
+
+        self.state["last_topup_current_track_id"] = current_track_id
+        if not picks:
+            self._persist()
+            return {"picks": [], "reason": "no eligible candidates", "pending_cues": pending_cues,
+                    "cue_picks": [], "per_lane_details": lane_details}
+
+        # Record picks as played
+        self.state.setdefault("played_this_session", []).extend(picks)
+        self.state["last_topup_at"] = time.time()
+        self._persist()
 
         return {
             "picks": picks,

@@ -142,7 +142,8 @@ def test_refill_at_waits_then_tops_up_in_ordered_chunks(pool_db, monkeypatch):
     assert picks == pool.state["played_this_session"][-8:]
 
 
-def test_refill_at_none_keeps_exact_ahead_behavior(pool_db):
+def test_refill_at_none_keeps_exact_ahead_behavior(pool_db, monkeypatch):
+    monkeypatch.setattr(dj_pool.random, "choice", lambda seq: seq[0])  # #7108: lanes shuffle
     ids = [_track(pool_db, f"s{i}") for i in range(6)]
     _start({"a": ids}, ahead=3, refill_at=None)
 

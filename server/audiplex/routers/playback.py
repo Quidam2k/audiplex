@@ -864,19 +864,26 @@ def set_pool(
     raw_lanes = body.get("lanes")
     if raw_lanes:
         lanes = {str(label): [int(t) for t in ids] for label, ids in raw_lanes.items()}
-        skip = non_music(db, [t for ids in lanes.values() for t in ids])  # #ride0928
+        speech = non_music(db, [t for ids in lanes.values() for t in ids])  # #ride0928
         long_ids: set[int] = set()  # #3249: per lane, so a one-track lane is kept
         for ids in lanes.values():
             long_ids |= too_long_for_mix(db, ids)
-        skip |= long_ids
-        skip |= banned_ids(db)  # #2806
+        banned = banned_ids(db)  # #2806
+        dropped = {  # #7108: so a lane left empty can say why
+            label: {"non-music": sum(t in speech for t in ids),
+                    "too long for a mix": sum(t in long_ids and t not in speech for t in ids),
+                    "banned": sum(t in banned and t not in speech | long_ids for t in ids)}
+            for label, ids in lanes.items()
+        }
+        skip = speech | long_ids | banned
         lanes = {label: [t for t in ids if t not in skip] for label, ids in lanes.items()}
         track_ids = [t for ids in lanes.values() for t in ids]
         source_labels = {t: label for label, ids in lanes.items() for t in ids}
+        no_repeat = body.get("no_repeat_picks")  # #7108
         result = pool.set_pool(
-            spec_id, track_ids, source_labels, lanes=lanes_from_ids(lanes),
+            spec_id, track_ids, source_labels, lanes=lanes_from_ids(lanes, dropped),
             balance=balance, ahead=ahead, exclude_recent_hours=exclude_recent_hours,
-            refill_at=refill_at,
+            refill_at=refill_at, no_repeat_picks=int(no_repeat) if no_repeat is not None else None,
         )
     else:
         legacy_ids = [int(t) for t in body.get("track_ids", [])]
@@ -903,6 +910,7 @@ def set_pool(
             db=db,
         )
         result["initial_picks"] = top.get("picks", [])
+        result["per_lane_details"] = top.get("per_lane_details", [])  # #7108
     return result
 
 

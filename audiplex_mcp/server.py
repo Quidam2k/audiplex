@@ -1717,6 +1717,11 @@ async def _match_folders(query: str, max_depth: int = 8) -> list[str]:  # #5473
     Walks the folder tree from the music roots; a match's subfolders are not
     listed separately (the recursive folder read already includes them).
     """
+    try:  # #3910: one server-side pass; the walk below is for a pre-#3910 server
+        return await _get(f"/api/music/folders/match?q={quote(query.strip(), safe='')}")
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 404:
+            raise
     ql = query.strip().lower().replace("\\", "/")
     found: list[str] = []
     frontier = [n["path"] for n in (await _get("/api/music/folders")).get("folders") or []]
@@ -2763,8 +2768,21 @@ def _track_line(track: dict) -> str:
     return f"{track.get('id')} | {label} | {_fmt_duration(track.get('duration_seconds'))}{flag}"
 
 
+_ALL_TRACKS_TTL_S = 300  # #3910: a library rescan shows up within 5 minutes
+_all_tracks_cache: tuple[float, list[dict]] | None = None
+
+
 async def _all_music_tracks() -> list[dict]:
-    """Every track under every music root, de-duplicated by id."""
+    """Every track under every music root, de-duplicated by id (cached, #3910)."""
+    global _all_tracks_cache
+    if _all_tracks_cache and time.monotonic() - _all_tracks_cache[0] < _ALL_TRACKS_TTL_S:
+        return _all_tracks_cache[1]
+    tracks = await _fetch_all_music_tracks()
+    _all_tracks_cache = (time.monotonic(), tracks)
+    return tracks
+
+
+async def _fetch_all_music_tracks() -> list[dict]:
     listing = await _get("/api/music/folders")
     seen: dict[int, dict] = {}
     for folder in listing.get("folders") or []:
@@ -3802,15 +3820,24 @@ async def dj_ingest(
 # same catalog walk dj_mix uses); the server only ever receives track ids.
 
 
-async def _resolve_lanes(sources: list[dict]) -> tuple[dict[str, list[int]], list[str]]:
+async def _resolve_lanes(
+    sources: list[dict],
+    budget_s: float | None = None,
+    timed_out: list[str] | None = None,
+) -> tuple[dict[str, list[int]], list[str]]:
     """Resolve spec sources into lanes {label: [track_ids]} plus the empty labels.
 
     A source may be {"kind": "tracks", "ids": [...]} (explicit ids, from
     dj_spec_add add_tracks). A no-match or an unknown folder path is an empty
     lane, never an exception; a 401 still raises PermissionError.
+
+    budget_s (#3910): total seconds for the whole resolve. A source still
+    unresolved when it runs out gets no lane at all and its label is appended
+    to `timed_out`, so the caller can start from what did resolve.
     """
     lanes: dict[str, list[int]] = {}
     empty: list[str] = []
+    deadline = time.monotonic() + budget_s if budget_s is not None else None
     for src in sources:
         kind = str(src.get("kind", "folder"))
         query = str(src.get("query", ""))
@@ -3820,7 +3847,14 @@ async def _resolve_lanes(sources: list[dict]) -> tuple[dict[str, list[int]], lis
             ids = [int(i) for i in src.get("ids") or []]
         else:
             try:
-                _, tracks = await _resolve_source(kind, query, recursive=bool(src.get("recursive", True)))
+                resolve = _resolve_source(kind, query, recursive=bool(src.get("recursive", True)))
+                if deadline is not None:  # #3910
+                    resolve = asyncio.wait_for(resolve, max(0.0, deadline - time.monotonic()))
+                _, tracks = await resolve
+            except asyncio.TimeoutError:  # #3910
+                if timed_out is not None:
+                    timed_out.append(label)
+                continue
             except LookupError as e:  # #2806
                 tracks, why = [], f" ({e})"
             except httpx.HTTPStatusError:
@@ -3903,6 +3937,15 @@ async def dj_spec_save(
 
 POOL_DEPTH = 300  # #3644: tracks queued after the current song by a pool
 POOL_REFILL_AT = 20  # #3644
+POOL_RESOLVE_BUDGET_S = 30.0  # #3910: dj_pool_set starts from what resolved by then
+
+
+def _zero_lane_note(result: dict) -> str:
+    """Why a lane ran dry in the initial picks, from the server's per-lane why_empty (#7108)."""
+    zero = [d for d in result.get("per_lane_details") or [] if d.get("why_empty")]
+    if not zero:
+        return ""
+    return " Lanes that ran dry: " + "; ".join(f"{d['label']}: {d['why_empty']}" for d in zero) + "."
 
 
 async def _trim_to_pool(picks: list[int], state: dict) -> str:
@@ -3956,6 +3999,7 @@ async def dj_pool_set(
     refill_at: int | None = None,
     starvation_picks: int | None = None,
     starvation_minutes: float | None = None,
+    no_repeat_picks: int | None = None,
 ) -> str:
     """Start (or replace) the rolling DJ pool from a saved spec or inline sources.
 
@@ -3975,6 +4019,10 @@ async def dj_pool_set(
     exclude_recent_hours: skip recently-played recordings (spec value, else 12)
     allow_empty:          a source that resolves to 0 tracks REFUSES unless True
     starvation_picks / starvation_minutes: a lane unpicked this long jumps the line
+    no_repeat_picks:      a lane that has played everything recycles its tracks,
+                          but never one picked in the last this-many picks
+                          (default 30, about two hours)
+    Picks within a lane are shuffled.
     """
     try:
         saved: dict = {}
@@ -4000,10 +4048,14 @@ async def dj_pool_set(
         if exclude_recent_hours is None:
             exclude_recent_hours = saved.get("exclude_recent_hours", 12)
 
-        lanes, empty = await _resolve_lanes(sources)
+        slow: list[str] = []  # #3910: start from what resolved rather than hang
+        lanes, empty = await _resolve_lanes(sources, budget_s=POOL_RESOLVE_BUDGET_S, timed_out=slow)
         if empty and not allow_empty:
             return (f"REFUSED, pool not started: empty source(s): {', '.join(empty)}. "
                     f"Per lane: {_counts(lanes)}. Fix the source or pass allow_empty=True.")
+        if not lanes:
+            return (f"ERROR: no source resolved within {POOL_RESOLVE_BUDGET_S:g}s "
+                    f"({', '.join(slow)}). The pool was not started.")
 
         state = await _get("/api/playback/state")
         track = state.get("track") or {}
@@ -4032,6 +4084,8 @@ async def dj_pool_set(
             starve["check_interval_minutes"] = float(starvation_minutes)
         if starve:
             body["starvation_config"] = starve
+        if no_repeat_picks is not None:  # #7108
+            body["no_repeat_picks"] = int(no_repeat_picks)
         if cur is None or not queue:
             body["prime_current_id"] = 0
         elif cur > 0:
@@ -4042,6 +4096,10 @@ async def dj_pool_set(
 
     head = (f"Pool set: {len(lanes)} lane(s) ({_counts(lanes)}), balance={balance}, "
             f"ahead={ahead}" + (f", spec '{spec}'" if spec else "") + ".")
+    if slow:  # #3910
+        head += (f" SKIPPED (still resolving after {POOL_RESOLVE_BUDGET_S:g}s): {', '.join(slow)}; "
+                 "re-run dj_pool_set to add them.")
+    head += _zero_lane_note(result)  # #7108
     if "prime_current_id" not in body:
         return head + " A live stream or DJ break is on; the pool fills in after it."
     picks = result.get("initial_picks") or []
