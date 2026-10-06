@@ -93,6 +93,9 @@ interface AudiplexApi {
     @GET("api/music/tracks/{id}")
     suspend fun getTrack(@Path("id") id: Int): TrackSchema
 
+    @GET("api/music/levels")  // #7109: get music loudness normalization settings
+    suspend fun getMusicLevels(): MusicLevelsResponse
+
     @GET("api/music/genres/{name}/tracks")
     suspend fun getGenreTracks(@Path("name") name: String): List<TrackSchema>
 

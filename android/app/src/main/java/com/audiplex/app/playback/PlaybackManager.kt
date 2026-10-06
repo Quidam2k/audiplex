@@ -23,6 +23,7 @@ import com.audiplex.app.data.api.AudiplexApi
 import com.audiplex.app.data.download.DownloadRepository
 import com.audiplex.app.data.download.MeditationStore
 import com.audiplex.app.data.api.BookDetail
+import com.audiplex.app.data.api.MusicLevelsResponse
 import com.audiplex.app.data.api.PlayStatEvent
 import com.audiplex.app.data.api.PlaylistDetail
 import com.audiplex.app.data.api.ProgressUpdate
@@ -44,6 +45,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext  // #7109
 import okhttp3.OkHttpClient
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -161,6 +163,68 @@ class PlaybackManager @Inject constructor(
         if (kind == PlayerKind.Audiobook) audiobookVolume else musicVolume
 
     /**
+     * #7109: compute the effective music volume with per-track gain applied.
+     * For non-music, returns the slider volume unchanged.
+     */
+    private fun effectiveMusicVolume(sliderVolume: Float): Float {
+        if (!isMusic()) return sliderVolume
+        return (sliderVolume * currentMusicGain).coerceIn(0f, 1f)
+    }
+
+    /**
+     * #7109: fetch music loudness normalization settings and levels from server.
+     * Called when music playback starts. Stores settings for use in gainFor() on each track change.
+     */
+    private fun fetchMusicLevels() {
+        scope.launch {
+            try {
+                val api = apiHolder.api
+                if (api != null) {
+                    musicLevels = api.getMusicLevels()
+                    withContext(Dispatchers.Main) { reapplyTrackGain() }  // the first track too
+                }
+            } catch (e: Exception) {
+                // Silently fail and use defaults (normalize_music=false, gain=1.0)
+                musicLevels = null
+            }
+        }
+    }
+
+    /**
+     * #7109: on a track change, move the player to the new track's normalized
+     * level. Only while normalization is ON (off = exactly the old behaviour),
+     * and never while the music looks ducked: the duck lives in the service's
+     * AudioFocusManager, which this side can't see, and setting the volume
+     * mid-duck would un-duck a Talk. The ducked track keeps its old gain until
+     * the next change; the restore goes back to that pre-duck level.
+     */
+    private fun reapplyTrackGain() {
+        if (musicLevels?.normalizeMusic != true) return
+        val applied = _playerVolume.value
+        val expected = effectiveMusicVolume(volumeForKind(PlayerKind.Music))
+        if (applied < expected * DUCKED_FRACTION) return
+        updateCurrentTrackGain()
+        applyVolumeForCurrentKind()
+    }
+
+    /**
+     * #7109: update the gain for the current track based on its loudness_lufs.
+     * Should be called whenever the track changes.
+     */
+    private fun updateCurrentTrackGain() {
+        val currentTrack = _currentMusic.value?.let { it.items.getOrNull(it.currentIndex)?.track }
+        if (currentTrack == null || musicLevels == null || !musicLevels!!.normalizeMusic) {
+            currentMusicGain = 1.0f
+            return
+        }
+        currentMusicGain = LoudnessGain.gainFor(
+            currentTrack.loudnessLufs,
+            musicLevels!!.targetLufs,
+            musicLevels!!.fallbackLufs
+        )
+    }
+
+    /**
      * #997: push the dial for the currently-active kind onto the controller.
      * Reuses setPlayerVolume so the _playerVolume snapshot (read by the DJ
      * report loop) stays coherent. No-op if nothing is playing yet — the next
@@ -168,7 +232,8 @@ class PlaybackManager @Inject constructor(
      */
     private fun applyVolumeForCurrentKind() {
         val kind = _playerKind.value ?: return
-        setPlayerVolume(volumeForKind(kind))
+        val sliderVolume = volumeForKind(kind)
+        setPlayerVolume(effectiveMusicVolume(sliderVolume))
     }
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var controller: MediaController? = null
@@ -226,6 +291,12 @@ class PlaybackManager @Inject constructor(
     /** Controller's current metadata when local state is null (#3505). */
     private val _controllerMetadata = MutableStateFlow<ControllerMetadata?>(null)
     val controllerMetadata: StateFlow<ControllerMetadata?> = _controllerMetadata
+
+    // #7109: per-track music loudness normalization settings and current track gain
+    private var musicLevels: MusicLevelsResponse? = null
+    private var currentMusicGain: Float = 1.0f
+    /** #7109: below this share of the expected level the player is ducked (ducks go to ~5%). */
+    private val DUCKED_FRACTION = 0.5f
 
     private var currentBaseUrl: String = ""
     private var lastReportedTrackIndex: Int = -1
@@ -469,6 +540,7 @@ class PlaybackManager @Inject constructor(
                 }
             }
             _currentMusic.value = music.copy(currentIndex = newIndex)
+            reapplyTrackGain()  // #7109
             // Report start of new track
             music.items.getOrNull(newIndex)?.let { current ->
                 postPlayStat(current.track.id, "start", 0.0)
@@ -1166,10 +1238,13 @@ class PlaybackManager @Inject constructor(
             origin = origin  // #3601
         )
         _playerKind.value = PlayerKind.Music
+        // #7109: fetch music loudness normalization settings
+        fetchMusicLevels()
         lastReportedTrackIndex = -1
 
         ensureController { ctrl ->
             applyAudioAttributesFor(ctrl, PlayerKind.Music) // #3099/#991: agent speech ducks music
+            reapplyTrackGain()  // #7109: the first track (again once the levels arrive)
             val mediaItems = items.map { buildMusicMediaItem(it, origin) }  // #3601
             // Stage the start index in the timeline setup; setting shuffle
             // before play() ensures the first-track pick is shuffled too.

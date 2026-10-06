@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     # listening data rather than guessing a different one now.
     dj_recording_cooldown_minutes: int = 20
     dj_work_cooldown_minutes: int = 20
+    # #7109: per-track gain normalization for music. If enabled, each track is
+    # attenuated (never boosted) to reach the target loudness level.
+    normalize_music: bool = False
+    music_target_lufs: float = -20.0
 
     @model_validator(mode="after")
     def _ensure_jwt_secret(self):

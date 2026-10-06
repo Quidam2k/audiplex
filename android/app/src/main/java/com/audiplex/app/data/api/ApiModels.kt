@@ -122,6 +122,15 @@ data class AppVersionResponse(
     @Json(name = "mtime") val mtime: Long
 )
 
+// ----- Music Levels (#7109) -----
+
+@JsonClass(generateAdapter = true)
+data class MusicLevelsResponse(
+    @Json(name = "normalize_music") val normalizeMusic: Boolean,
+    @Json(name = "target_lufs") val targetLufs: Double,
+    @Json(name = "fallback_lufs") val fallbackLufs: Double? = null
+)
+
 // ----- Music -----
 
 @JsonClass(generateAdapter = true)
@@ -181,7 +190,8 @@ data class TrackSchema(
     @Json(name = "artist_name") val artistName: String?,
     @Json(name = "disc_number") val discNumber: Int,
     @Json(name = "track_number") val trackNumber: Int,
-    @Json(name = "duration_seconds") val durationSeconds: Double
+    @Json(name = "duration_seconds") val durationSeconds: Double,
+    @Json(name = "loudness_lufs") val loudnessLufs: Double? = null  // #7109: EBU R128 integrated loudness for per-track gain
 )
 
 @JsonClass(generateAdapter = true)

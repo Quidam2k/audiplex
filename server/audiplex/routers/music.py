@@ -34,6 +34,7 @@ from audiplex.schemas import (
     FolderListing,
     FolderNode,
     GenreSchema,
+    MusicLevelsResponse,
     MusicRoot,
     MusicRootsResponse,
     MusicRootsUpdate,
@@ -1097,3 +1098,33 @@ def search_library(
     cached typo-tolerant pass when the exact pass finds little. Like the other
     browse endpoints it does not filter content_kind."""
     return search_music(db, q, limit)
+
+
+@router.get("/levels", response_model=MusicLevelsResponse)  # #7109
+def get_music_levels(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Return music loudness normalization settings and fallback level.
+
+    The fallback_lufs is the median EBU R128 integrated loudness of all tracks
+    with measured loudness data. This helps the client estimate per-track gain
+    when a track's loudness_lufs is null.
+    """
+    settings = get_settings()
+
+    # #7109: compute median of non-null loudness_lufs values
+    lufs_values = [val[0] for val in db.query(Track.loudness_lufs)
+                   .filter(Track.loudness_lufs.isnot(None))
+                   .all()]
+    fallback_lufs = None
+    if lufs_values:
+        lufs_values.sort()
+        n = len(lufs_values)
+        fallback_lufs = (lufs_values[n // 2 - 1] + lufs_values[n // 2]) / 2 if n % 2 == 0 else lufs_values[n // 2]
+
+    return MusicLevelsResponse(
+        normalize_music=settings.normalize_music,
+        target_lufs=settings.music_target_lufs,
+        fallback_lufs=fallback_lufs,
+    )

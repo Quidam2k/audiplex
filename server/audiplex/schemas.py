@@ -90,6 +90,7 @@ class TrackSchema(BaseModel):
     disc_number: int
     track_number: int
     duration_seconds: float
+    loudness_lufs: float | None = None  # #7109: EBU R128 integrated loudness for per-track gain
     model_config = {"from_attributes": True}
 
 
@@ -497,3 +498,15 @@ class ClientLogEntry(BaseModel):
     message: str = ""
     detail: dict = {}
     at: float | None = None
+
+
+class MusicLevelsResponse(BaseModel):
+    """#7109: music loudness normalization settings and fallback level.
+
+    normalize_music: whether per-track gain normalization is enabled.
+    target_lufs: the reference loudness level to normalize tracks to.
+    fallback_lufs: median EBU R128 loudness of all tracks (null if none measured).
+    """
+    normalize_music: bool
+    target_lufs: float
+    fallback_lufs: float | None = None
