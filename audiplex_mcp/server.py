@@ -5,7 +5,7 @@ standalone package (NOT folded into pantheon_mcp_server) so other Pantheon
 adopters can run it independently against their own Audiplex instance.
 
 Config via environment:
-  AUDIPLEX_URL    base URL of the Audiplex server (e.g. http://100.x.y.z:8000)
+  AUDIPLEX_URL    base URL of the Audiplex server (default http://localhost:8100, the production port)
   AUDIPLEX_TOKEN  service-account JWT — mint via:
                     cd server && python -m audiplex.create_service_token
                   When unset/empty, falls back to reading a `.dj_token` file
@@ -77,7 +77,7 @@ from mcp.server.fastmcp import FastMCP
 from audiplex_mcp import dj_bridge_watcher, dj_persona, tts_backend  # #2858 dj_patter
 from audiplex_mcp.mix_balance import balance_order, describe_head  # #5463
 
-AUDIPLEX_URL = os.environ.get("AUDIPLEX_URL", "http://localhost:8000").rstrip("/")
+AUDIPLEX_URL = os.environ.get("AUDIPLEX_URL", "http://localhost:8100").rstrip("/")  # #3886 prod port; :8000 was the dev default
 
 
 def _load_token() -> str:

@@ -68,7 +68,7 @@ is what makes the track browsable by artist. Needs `ffmpeg` on PATH.
    ```
 3. Run, with the server URL + token in the environment:
    ```bash
-   AUDIPLEX_URL=http://<host>:8000 AUDIPLEX_TOKEN=<token> python -m audiplex_mcp.server
+   AUDIPLEX_URL=http://<host>:8100 AUDIPLEX_TOKEN=<token> python -m audiplex_mcp.server
    ```
 
 ### Registering with an MCP client
@@ -80,7 +80,7 @@ is what makes the track browsable by artist. Needs `ffmpeg` on PATH.
       "command": "python",
       "args": ["-m", "audiplex_mcp.server"],
       "env": {
-        "AUDIPLEX_URL": "http://<host>:8000",
+        "AUDIPLEX_URL": "http://<host>:8100",
         "AUDIPLEX_TOKEN": "<service-account token>"
       }
     }
