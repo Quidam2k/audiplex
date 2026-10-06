@@ -46,14 +46,18 @@ class AudioFocusManager(
      *  remember THIS, not the half-risen volume. Null when no restore is running. */
     private var restoringTo: Float? = null
 
-    private fun rampTo(target: Float, durationMs: Long, onDone: () -> Unit = {}) {
+    private fun rampTo(
+        target: Float, durationMs: Long,
+        curve: (Int, Int, Float, Float) -> Float = DuckRamp::level,  // Pantheon #2187
+        onDone: () -> Unit = {},
+    ) {
         val token = ++rampToken  // cancels any ramp already running
         rampHandler.removeCallbacksAndMessages(null)
         val from = player.volume
         val steps = DuckRamp.steps(durationMs)
         fun step(i: Int) {
             if (token != rampToken) return
-            player.volume = DuckRamp.level(i, steps, from, target)
+            player.volume = curve(i, steps, from, target)  // Pantheon #2187
             if (i >= steps) onDone() else rampHandler.postDelayed({ step(i + 1) }, DuckRamp.STEP_MS)
         }
         step(1)
@@ -161,7 +165,7 @@ class AudioFocusManager(
             }
             is FocusPolicy.FocusAction.Restore -> {
                 restoringTo = action.volume  // #3597
-                rampTo(action.volume, DuckRamp.RESTORE_MS) { restoringTo = null }  // #3597
+                rampTo(action.volume, DuckRamp.RESTORE_MS, DuckRamp::restoreLevel) { restoringTo = null }  // #3597 Pantheon #2187
                 if (action.resume && !player.isPlaying) player.play()
                 preDuckVolume = null
                 wasPlaying = false
