@@ -44,8 +44,10 @@ class Settings(BaseSettings):
     dj_work_cooldown_minutes: int = 20
     # #7109: per-track gain normalization for music. If enabled, each track is
     # attenuated (never boosted) to reach the target loudness level.
+    # Persona TTS measures ~-20 LUFS (#7136, 40 renders, -18.5..-20.6), so music
+    # sits 4 LU under it and a DJ can talk over a song unducked.
     normalize_music: bool = False
-    music_target_lufs: float = -20.0
+    music_target_lufs: float = -24.0
 
     @model_validator(mode="after")
     def _ensure_jwt_secret(self):
