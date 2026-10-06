@@ -74,7 +74,7 @@ from urllib.parse import quote
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-from audiplex_mcp import dj_bridge_watcher, dj_persona, tts_backend  # #2858 dj_patter
+from audiplex_mcp import dj_bridge_watcher, dj_clip_bank, dj_persona, tts_backend  # #2858 dj_patter, #3917 bank
 from audiplex_mcp.mix_balance import balance_order, describe_head  # #5463
 
 AUDIPLEX_URL = os.environ.get("AUDIPLEX_URL", "http://localhost:8100").rstrip("/")  # #3886 prod port; :8000 was the dev default
@@ -1499,17 +1499,34 @@ def _someone_talking() -> bool:  # #2858
     return _todd_talking() in ("talking", "unreadable")
 
 
-async def _render_clip(text: str, title: str) -> dict | str:
+async def _render_clip(
+    text: str, title: str, fallback_kind: str | None = None, fallback_key: str | None = None
+) -> dict | str:
     """Synthesize `text` in the DJ voice and upload it to /api/dj/clips.
     The one render path for dj_announce and pre-rendered cue patter (#5480).
-    Returns the upload's JSON ({clip_id, url, duration_seconds}) or an error string."""
+    Returns the upload's JSON ({clip_id, url, duration_seconds}) or an error string.
+
+    #3917: with a fallback_kind, a FAILED render (not an unconfigured one) uploads
+    the matching pre-rendered bank clip instead; the result then carries
+    "fallback": <bank clip id>. A bank miss returns today's failure string."""
     try:
         clip_path = await tts_backend.synthesize(text)
     except tts_backend.TtsNotConfigured as e:
         return f"TTS is not configured: {e}"
     except tts_backend.TtsFailed as e:
-        return f"Speech synthesis failed: {e}"
+        failure = f"Speech synthesis failed: {e}"
+        bank = dj_clip_bank.fallback_clip(fallback_kind, fallback_key) if fallback_kind else None
+        if bank is None:
+            return failure
+        clip = await _upload_clip(Path(bank[1]), title, delete=False)
+        if isinstance(clip, dict):
+            clip["fallback"] = bank[0]
+        return clip
+    return await _upload_clip(clip_path, title, delete=True)
 
+
+async def _upload_clip(clip_path: Path, title: str, delete: bool) -> dict | str:
+    """POST an audio file to /api/dj/clips. A bank clip (#3917) is never deleted."""
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             with open(clip_path, "rb") as fh:
@@ -1527,11 +1544,18 @@ async def _render_clip(text: str, title: str) -> dict | str:
     except httpx.HTTPError as e:
         return f"Clip upload failed: {e}"
     finally:
-        clip_path.unlink(missing_ok=True)
+        if delete:
+            clip_path.unlink(missing_ok=True)
 
 
 @mcp.tool()
-async def dj_announce(text: str, mode: str = "next", title: str = "DJ break") -> str:
+async def dj_announce(
+    text: str,
+    mode: str = "next",
+    title: str = "DJ break",
+    fallback_kind: str = dj_clip_bank.DEFAULT_KIND,
+    artist: str | None = None,
+) -> str:
     """Speak a DJ voice break on the device: synthesizes YOUR copy to audio,
     uploads it, and drops it into the queue.
 
@@ -1542,6 +1566,12 @@ async def dj_announce(text: str, mode: str = "next", title: str = "DJ break") ->
            how a real DJ break lands) or 'now' (interrupt and speak
            immediately).
     title: label shown in the queue (default "DJ break").
+    fallback_kind: if live TTS fails, the pre-rendered bank clip to play
+           instead (#3917): dj_next (default), dj_back, dj_station, dj_more,
+           ride_warmup / ride_climb / ride_cooldown, bucket_<slug>, or
+           that_was with artist=. Your copy is never approximated: the bank
+           clip is a stock line, and if there is none, nothing is queued.
+    artist: the artist for fallback_kind='that_was' (unknown -> generic line).
     """
     if mode not in ("next", "now"):
         return f"Unknown mode '{mode}'. Use 'next' or 'now'."
@@ -1561,7 +1591,7 @@ async def dj_announce(text: str, mode: str = "next", title: str = "DJ break") ->
     else:
         return "Todd is talking, so no break was queued. Try again in a moment."
 
-    clip = await _render_clip(text, title)
+    clip = await _render_clip(text, title, fallback_kind, artist)  # #3917: gates above run first
     if isinstance(clip, str):
         return clip
 
@@ -1583,7 +1613,8 @@ async def dj_announce(text: str, mode: str = "next", title: str = "DJ break") ->
     return (
         f"Queued a {length} voice break to play {when} "
         f"(clip #{clip['clip_id']}, command #{data.get('id')}, "
-        f"{data.get('pending')} pending)."
+        f"{data.get('pending')} pending)"
+        + (f" (pre-rendered fallback: {clip['fallback']}, Athena voice unavailable)." if clip.get("fallback") else ".")
     )
 
 
