@@ -155,7 +155,13 @@ def _run(config: Config) -> None:
     proxy = AuthProxy(config.base_url, config.token)
     proxy_base = proxy.start()
 
-    player = Player()
+    if os.environ.get("AUDIPLEX_PC_SILENT") == "1":
+        # #7149: a smoke run against the live server that can never make sound
+        # (no speakers for the main player, the bed or a crossfade).
+        logger.warning("AUDIPLEX_PC_SILENT=1: audio goes to VLC's dummy output")
+        player = Player(vlc_args=["--aout=dummy"], bed_aout=None)
+    else:
+        player = Player()
     bus = BusClient(
         config.base_url,
         config.token,

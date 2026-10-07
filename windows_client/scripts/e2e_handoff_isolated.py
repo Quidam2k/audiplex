@@ -12,8 +12,15 @@ next to a scripted fake renderer "e2e-test-device". Then checks:
   (c) transfer to the test device: the PC pauses and the test device is told to
       resume the same track at the PC's position (+-2 s);
   (d) transfer back: the test device pauses and the PC resumes at its position.
+Before (a), the phone-first leg (p) (#7149): a fake PHONE (paramless polls, exactly
+how the real phone talks to the bus) is mid-track after a seek with nothing declared
+active; transferring to the PC must pause it and start the PC on the same track,
+the same position (+-2 s) and the same queue. After (d), the book leg (k): the fake
+phone is in an audiobook (track None + a fresh progress save, as the phone reports
+it); transferring to the PC must open that book at the phone's position.
 Refuses to run on :8100, on the live DB, on a busy port, or with a device id that
-could collide with the real phone. Never touches :8100, the phone or a running PC
+could collide with a real renderer. The fake phone uses the legacy "phone" id, but
+only on the throwaway server, which the real phone never talks to. Never touches :8100, the phone or a running PC
 renderer. Exit code 0 = every check passed.
 """
 from __future__ import annotations
@@ -40,6 +47,9 @@ LIVE_PORT = 8100
 LIVE_DB = (SERVER / "audiplex.db").resolve()
 PC_ID = "e2e-pc"
 TEST_ID = "e2e-test-device"
+PHONE_USER = "e2e-phone"
+PHONE_SEEK_MS = 30_000
+BOOK_SEEK_MS = 125_000
 TOLERANCE_MS = 2000
 sys.path.insert(0, str(REPO / "windows_client"))
 sys.path.insert(0, str(SERVER))
@@ -105,7 +115,9 @@ def _ok(url: str) -> bool:
 class FakeRenderer:
     """A scripted second device: polls the bus like the phone, keeps a clock."""
 
-    def __init__(self, base: str, token: str) -> None:
+    def __init__(self, base: str, token: str, device_id: str | None = TEST_ID) -> None:
+        # device_id None = the real phone's paramless polls and reports.
+        self.device_id = device_id
         self.client = httpx.Client(base_url=base, headers={"Authorization": f"Bearer {token}"}, timeout=35)
         self.received: list[dict] = []
         self.track_ids: list[int] = []
@@ -136,7 +148,8 @@ class FakeRenderer:
         }
 
     def report(self) -> None:
-        self.client.post("/api/playback/state", params={"device_id": TEST_ID}, json=self.state())
+        params = {"device_id": self.device_id} if self.device_id else {}
+        self.client.post("/api/playback/state", params=params, json=self.state())
 
     def start(self) -> None:
         threading.Thread(target=self._poll, daemon=True).start()
@@ -144,6 +157,15 @@ class FakeRenderer:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def play(self, track_ids: list[int], position_ms: int) -> None:
+        """Start playing locally (empty track_ids = an audiobook, as the phone reports one)."""
+        with self._lock:
+            self.track_ids = list(track_ids)
+            self._pos_ms = position_ms
+            self._since = time.monotonic()
+            self.playing = True
+        self.report()
 
     def _report(self) -> None:
         while not self._stop.wait(1):
@@ -155,8 +177,9 @@ class FakeRenderer:
     def _poll(self) -> None:
         while not self._stop.is_set():
             try:
-                r = self.client.get("/api/playback/command/next", params={
-                    "device_id": TEST_ID, "device_name": "E2E Test Device", "device_type": "test"})
+                params = {"device_id": self.device_id, "device_name": "E2E Test Device",
+                          "device_type": "test"} if self.device_id else {}
+                r = self.client.get("/api/playback/command/next", params=params)
             except httpx.HTTPError:
                 continue
             if r.status_code == 204:
@@ -197,8 +220,15 @@ def main() -> int:
                         "-metadata", f"title=E2E Silence {n}", "-metadata", "artist=E2E Artist",
                         "-metadata", "album=E2E Album", "-metadata", f"track={n}",
                         str(music / f"0{n} E2E Silence {n}.m4a")], check=True)
+    book_dir = tmp / "lib" / "books" / "E2E Author" / "E2E Book"
+    book_dir.mkdir(parents=True)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                    "anullsrc=r=44100:cl=stereo", "-c:a", "aac", "-t", "600",
+                    "-metadata", "title=E2E Book", "-metadata", "artist=E2E Author",
+                    "-metadata", "album=E2E Book", str(book_dir / "E2E Book.m4b")], check=True)
     (tmp / "config.yaml").write_text(json.dumps({
-        "library_roots": [{"path": str(tmp / "lib" / "music"), "category": "music"}],
+        "library_roots": [{"path": str(tmp / "lib" / "music"), "category": "music"},
+                          {"path": str(tmp / "lib" / "books"), "category": "audiobook_clean"}],
         "database_url": f"sqlite:///{db_path.as_posix()}",
         "port": args.port,
         "cover_cache_dir": str(tmp / "covers"),
@@ -220,12 +250,13 @@ def main() -> int:
         cwd=tmp, env=env, stdout=log, stderr=subprocess.STDOUT,
     )
 
-    bus = proxy = player = fake = None
+    bus = proxy = player = fake = phone = None
     try:
         _wait(lambda: _ok(f"{base}/docs"), 60, "server up")
         dj = httpx.Client(base_url=base, headers={"Authorization": f"Bearer {_mint(tmp, env, None)}"}, timeout=30)
         pc_token = _mint(tmp, env, PC_ID)
         test_token = _mint(tmp, env, TEST_ID)
+        phone_token = _mint(tmp, env, PHONE_USER)
         dj.post("/api/library/scan")
 
         def tracks() -> list[int]:
@@ -235,7 +266,9 @@ def main() -> int:
             return ids if len(ids) >= 3 else []
 
         track_ids = sorted(_wait(tracks, 60, "tracks scanned"))[:3]
-        note(f"server :{args.port} up in {tmp} (db {db_path}); tracks {track_ids}")
+        book_id = _wait(lambda: next((b["id"] for b in dj.get("/api/library/books").json()), None),
+                        60, "book scanned")
+        note(f"server :{args.port} up in {tmp} (db {db_path}); tracks {track_ids}, book {book_id}")
 
         from audiplex_pc.bus import BusClient
         from audiplex_pc.player import Player
@@ -253,13 +286,53 @@ def main() -> int:
         bus.start()
         fake = FakeRenderer(base, test_token)
         fake.start()
-        _wait(lambda: {PC_ID, TEST_ID} <= {d["id"] for d in dj.get("/api/playback/devices").json()["devices"]},
-              30, "both devices registered")
-        check(dj.post(f"/api/playback/devices/{PC_ID}/activate").status_code == 200, "PC made the active device")
+        phone = FakeRenderer(base, phone_token, device_id=None)
+        phone.start()
+        _wait(lambda: {PC_ID, TEST_ID, LEGACY_DEVICE_ID}
+              <= {d["id"] for d in dj.get("/api/playback/devices").json()["devices"]},
+              30, "all three devices registered")
+
+        # (p) phone-first: the phone is mid-track after a seek, nothing declared active.
+        check(dj.get("/api/playback/devices").json()["active_device_id"] is None,
+              "(p) no device declared active: the phone is the default renderer")
+        phone.play(track_ids, PHONE_SEEK_MS)
+        time.sleep(2)
+        if not args.no_transfer:
+            check(dj.post(f"/api/playback/devices/{PC_ID}/activate").status_code == 200,
+                  "(p) transfer phone -> PC accepted")
+        try:
+            _wait(lambda: any(c.get("type") == "deactivate" for c in phone.received), 15, "phone deactivated")
+            _wait(lambda: player.state()["playing"] and player.state()["position_ms"] > 0, 30, "PC picked up")
+            picked_up = True
+        except TimeoutError:
+            picked_up = False
+        phone_pos = phone.position_ms()
+        st = player.state()
+        check(picked_up and not phone.playing, f"(p) phone paused at {phone_pos} ms on transfer")
+        check(picked_up and (st["track"] or {}).get("id") == track_ids[0]
+              and [q["id"] for q in st["queue"]] == track_ids,
+              f"(p) PC picked up track {(st['track'] or {}).get('id')} with queue "
+              f"{[q['id'] for q in st['queue']]} (phone had {track_ids})")
+        check(picked_up and abs(st["position_ms"] - phone_pos) <= TOLERANCE_MS,
+              f"(p) PC position {st['position_ms']} ms vs phone {phone_pos} ms")
+        check(player.volume == 0.0, "still silent after the phone handoff")
+        if args.no_transfer:  # red run: still make the PC active so (a)/(b) run as before
+            dj.post(f"/api/playback/devices/{PC_ID}/activate")
         _wait(lambda: dj.get("/api/playback/devices").json()["active_device_id"] == PC_ID, 10, "pc active")
+        phone_cmds_before_a = len(phone.received)
 
         # (a) the shared queue plays on the PC
-        dj.post("/api/playback/command", json={"type": "play_now", "payload": {"track_ids": track_ids}})
+        play_id = dj.post("/api/playback/command",
+                          json={"type": "play_now", "payload": {"track_ids": track_ids}}).json().get("id")
+
+        def acked(cid) -> bool:
+            cmds = dj.get("/api/playback/commands", params={"limit": 20}).json()
+            cmds = cmds if isinstance(cmds, list) else cmds.get("commands", [])
+            return any(c.get("id") == cid and c.get("ack_status") == "ok" for c in cmds)
+
+        # (p) left the PC already playing this queue, so wait for THIS play_now's ack.
+        check(play_id is not None and _wait(lambda: acked(play_id), 30, "play_now acked"),
+              f"(a) play_now #{play_id} acked by the PC")
         _wait(lambda: player.state()["playing"] and player.state()["position_ms"] > 3000, 30, "PC playing")
         st = player.state()
         check(st["track"]["id"] == track_ids[0] and st["queue_length"] == 3,
@@ -271,6 +344,8 @@ def main() -> int:
         # (b) no double play
         check(fake.received == [],
               "(b) test device, polling the whole time, got no commands while the PC was active")
+        check(len(phone.received) == phone_cmds_before_a,
+              "(b) phone, polling the whole time, got nothing after its deactivate")
 
         # (c) PC -> test device
         if not args.no_transfer:
@@ -307,12 +382,39 @@ def main() -> int:
               f"(d) PC resumed track {(st['track'] or {}).get('id')} at {st['position_ms']} ms (test device was {fake_pos})")
         check(player.volume == 0.0, "still silent after the handoffs")
 
+        # (k) book leg: the phone is in an audiobook, reported the way the phone does
+        # (track None, book-global position, a fresh progress save), then hands it on.
+        activates = sum(c.get("type") == "activate" for c in phone.received)
+        dj.post(f"/api/playback/devices/{LEGACY_DEVICE_ID}/activate")
+        # Wait for the handoff to land, not for playing: the PC reports every 5 s, so
+        # right after (d)'s resume its last report can still say paused.
+        _wait(lambda: sum(c.get("type") == "activate" for c in phone.received) > activates,
+              15, "phone took the music back")
+        phone.client.put(f"/api/progress/{book_id}", json={"position_seconds": BOOK_SEEK_MS / 1000})
+        phone.play([], BOOK_SEEK_MS)
+        time.sleep(2)
+        if not args.no_transfer:
+            dj.post(f"/api/playback/devices/{PC_ID}/activate")
+        try:
+            _wait(lambda: (player.state().get("book") or {}).get("id") == book_id
+                  and player.state()["playing"] and player.state()["position_ms"] > 0, 30, "PC opened the book")
+            book_ok = True
+        except TimeoutError:
+            book_ok = False
+        phone_pos = phone.position_ms()
+        st = player.state()
+        check(book_ok and not phone.playing, f"(k) phone paused in the book at {phone_pos} ms")
+        check(book_ok and abs(st["position_ms"] - phone_pos) <= TOLERANCE_MS,
+              f"(k) PC opened book {(st.get('book') or {}).get('id')} at {st['position_ms']} ms "
+              f"(phone was {phone_pos})")
+        check(player.volume == 0.0, "still silent after the book handoff")
+
         cmds = dj.get("/api/playback/commands", params={"limit": 20}).json()
         for c in reversed(cmds if isinstance(cmds, list) else cmds.get("commands", [])):
             note(f"  cmd #{c.get('id')} {c.get('type')} -> {c.get('target_device_id') or '-'} "
                  f"{c.get('status')} {c.get('ack_status') or ''} {json.dumps(c.get('payload'))[:100]}")
     finally:
-        for stop in (fake and fake.stop, bus and bus.stop, player and player.stop, proxy and proxy.stop):
+        for stop in (phone and phone.stop, fake and fake.stop, bus and bus.stop, player and player.stop, proxy and proxy.stop):
             if stop:
                 stop()
         server.terminate()
