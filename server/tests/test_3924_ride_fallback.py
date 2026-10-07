@@ -19,22 +19,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from audiplex_mcp import buckets  # noqa: E402
 
 
-def _track(db, title):
+def _track(db, title, folder="/music/ride/lp"):
+    """A track in its own album per folder, so folder sources can tell them apart."""
     art = db.query(Artist).filter(Artist.name == "Band").first()
     if art is None:
         art = Artist(name="Band")
         db.add(art)
         db.flush()
-    alb = db.query(Album).filter(Album.artist_id == art.id).first()
+    alb = db.query(Album).filter(Album.folder_path == folder).first()
     if alb is None:
-        alb = Album(title="LP", artist_id=art.id, genre="Rock",
-                    folder_path="/fake/ride")
+        alb = Album(title=folder.rsplit("/", 1)[-1], artist_id=art.id, genre="Rock",
+                    folder_path=folder)
         db.add(alb)
         db.flush()
     track = Track(
         title=title, album_id=alb.id, artist_id=art.id, disc_number=1,
         track_number=db.query(Track).count() + 1, duration_seconds=200.0,
-        file_path=f"/fake/ride/{title}.mp3",
+        file_path=f"{folder}/{title}.mp3",
     )
     db.add(track)
     db.commit()
@@ -85,15 +86,18 @@ def ride(pool_db, tmp_path, monkeypatch):
     # duration_seconds=0 still gives the route's minimum one-second delay.
     monkeypatch.setattr(ride_fallback, "START_GAP_S", 0)
 
-    a = [_track(pool_db, f"a{i}") for i in range(3)]
-    b = [_track(pool_db, f"b{i}") for i in range(3)]
-    folder_only = _track(pool_db, "folder-only")
-    buckets.save_bucket("ride-a", tracks=a)
-    buckets.save_bucket("ride-b", tracks=b)
+    # #7190: one source of each kind todd-ride-mix uses
+    from audiplex.routers import music
+    monkeypatch.setattr(music, "get_music_roots", lambda: ["/music"])
+    loose = [_track(pool_db, f"loose{i}", "/music/ride") for i in range(3)]
+    fast = [_track(pool_db, f"fast{i}", "/music/ride/faster/lp") for i in range(3)]
+    road = [_track(pool_db, f"road{i}") for i in range(3)]
+    buckets.save_bucket("on the road", tracks=road)
     sources = [
-        {"kind": "bucket", "query": "ride-a", "label": "a"},
-        {"kind": "bucket", "query": "ride-b", "label": "b"},
-        {"kind": "folder_match", "query": "/fake/ride", "label": "folder"},
+        {"kind": "folder", "query": "/music/ride", "recursive": False, "label": "loose"},
+        {"kind": "folder_match", "query": "faster", "label": "faster"},
+        {"kind": "bucket", "query": "on the road", "label": "road"},
+        {"kind": "genre", "query": "jazz", "label": "unsupported"},
     ]
     pool_db.execute(
         text("INSERT INTO dj_mix_specs (name, sources_json) "
@@ -105,7 +109,7 @@ def ride(pool_db, tmp_path, monkeypatch):
     pending = []
     monkeypatch.setattr(ride_fallback, "schedule", pending.append)
     try:
-        yield {"a": set(a), "b": set(b), "folder": folder_only,
+        yield {"loose": set(loose), "faster": set(fast), "road": set(road),
                "pending": pending}
     finally:
         for coro in pending:
@@ -121,13 +125,17 @@ def mcp_server(monkeypatch):
     return mcp_server
 
 
-def test_idle_announces_then_starts_bucket_music(client, ride):
+def test_idle_announces_then_starts_music_from_every_source(client, ride):
     response = client.post(
         "/api/playback/ride-fallback",
         json={"clip_id": 5, "duration_seconds": 0},
     )
     assert response.status_code == 200
-    assert response.json()["started"] is True
+    body = response.json()
+    assert body["started"] is True
+    # #7190: folder + folder_match + bucket each get a lane; an unsupported kind is skipped, named
+    assert body["lanes"] == {"loose": 3, "faster": 3, "road": 3}
+    assert len(body["skipped"]) == 1 and body["skipped"][0].startswith("unsupported:")
     announces = _commands("announce")
     assert len(announces) == 1
     assert announces[0].payload["mode"] == "now"
@@ -137,19 +145,13 @@ def test_idle_announces_then_starts_bucket_music(client, ride):
 
     result = asyncio.run(ride["pending"].pop())
     assert result["started"] is True
-    plays = _commands("play_now")
-    assert len(plays) == 1
-    picks = plays[0].payload["track_ids"]
-    assert len(picks) >= 2
-    assert set(picks) <= ride["a"] | ride["b"]
-    assert ride["folder"] not in picks
-    assert (
-        picks[0] in ride["a"] and picks[1] in ride["b"]
-    ) or (
-        picks[0] in ride["b"] and picks[1] in ride["a"]
-    )
+    picks = _commands("play_now")[0].payload["track_ids"]
     for rec in _commands("queue"):
-        assert set(rec.payload["track_ids"]) <= ride["a"] | ride["b"]
+        picks += rec.payload["track_ids"]
+    lane_of = {t: lane for lane in ("loose", "faster", "road") for t in ride[lane]}
+    assert set(picks) <= set(lane_of)
+    # even round-robin: the first three picks are one from each lane
+    assert {lane_of[t] for t in picks[:3]} == {"loose", "faster", "road"}
 
     status = client.get("/api/playback/ride-fallback")
     assert status.status_code == 200
@@ -158,7 +160,7 @@ def test_idle_announces_then_starts_bucket_music(client, ride):
 
 
 def test_already_playing_does_nothing(client, ride):
-    bus.set_state(_state(next(iter(ride["a"]))))
+    bus.set_state(_state(next(iter(ride["road"]))))
     response = client.post("/api/playback/ride-fallback", json={"clip_id": 5})
     assert response.status_code == 200
     assert response.json() == {"started": False, "reason": "already playing"}
@@ -166,18 +168,19 @@ def test_already_playing_does_nothing(client, ride):
     assert not ride["pending"]
 
 
-def test_spec_without_buckets_is_refused(client, ride, pool_db):
+def test_spec_with_no_resolvable_source_is_refused(client, ride, pool_db):
     pool_db.execute(
         text("UPDATE dj_mix_specs SET sources_json = :sources WHERE name = :name"),
         {"name": "todd-ride-mix", "sources": json.dumps([
-            {"kind": "folder_match", "query": "/fake/ride"},
+            {"kind": "folder_match", "query": "no-such-folder", "label": "nothing"},
         ])},
     )
     pool_db.commit()
     response = client.post("/api/playback/ride-fallback", json={"clip_id": 5})
     assert response.status_code == 409
     assert response.json()["started"] is False
-    assert "no ride buckets" in response.json()["reason"]
+    assert "no ride source" in response.json()["reason"]
+    assert "nothing: no tracks" in response.json()["reason"]
     assert not bus._commands
     assert not ride["pending"]
 
@@ -204,7 +207,7 @@ def test_music_started_during_announce_cancels_fallback(client, ride):
     assert response.json()["started"] is True
     assert len(ride["pending"]) == 1
 
-    bus.set_state(_state(next(iter(ride["a"]))))
+    bus.set_state(_state(next(iter(ride["road"]))))
     result = asyncio.run(ride["pending"].pop())
     assert result == {
         "started": False, "reason": "music started during the announce",
@@ -260,3 +263,9 @@ def test_registered_async_tools_have_deadline_wrappers(mcp_server):
         assert hasattr(fn, "__wrapped__"), fn.__name__
         checked.append(fn.__name__)
     assert checked
+
+
+def test_resolve_budget_skips_instead_of_waiting(ride, pool_db):
+    lanes, skipped = ride_fallback.ride_lanes(pool_db, budget_s=-1)  # #7190: budget already spent
+    assert lanes == {}
+    assert all(s.endswith(": out of time") for s in skipped) and len(skipped) == 4

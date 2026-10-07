@@ -981,9 +981,9 @@ async def ride_fallback_start(
 
     body: {clip_id} or {say} (the announce, rendered here like the outro),
     optional title, duration_seconds, spec (default todd-ride-mix).
-    Plays the announce now, then about 10 s later starts the pool on the
-    spec's buckets only. 200 {started: false} when music is already playing
-    or a pool runs; 409 when a stop is latched or the spec has no buckets;
+    Plays the announce now, then about 10 s later starts the pool on all the
+    spec's sources (#7190). 200 {started: false} when music is already playing
+    or a pool runs; 409 when a stop is latched or no source resolves;
     503 when {say} cannot be rendered."""
     from audiplex import dj_triggers, ride_fallback as rf
     from audiplex.dj_pool import get_pool
@@ -1001,9 +1001,10 @@ async def ride_fallback_start(
     if get_pool().is_active():
         return refuse("a DJ pool is already running")
     spec = str(body.get("spec") or rf.RIDE_SPEC)
-    lanes = rf.ride_bucket_lanes(db, spec)
+    lanes, skipped = rf.ride_lanes(db, spec)  # #7190: every source, not only buckets
     if not lanes:
-        return refuse(f"no ride buckets on spec '{spec}' (add one with dj_bucket_load)", 409)
+        return refuse(f"no ride source on spec '{spec}' resolved"
+                      + (f" ({'; '.join(skipped)})" if skipped else ""), 409)
 
     title = body.get("title") or "Ride music"
     clip_id, duration = body.get("clip_id"), body.get("duration_seconds")
@@ -1039,8 +1040,9 @@ async def ride_fallback_start(
     counts = {label: len(ids) for label, ids in lanes.items()}
     rf.last.clear()
     rf.last.update({"started": True, "phase": "announce", "announce_command_id": rec.id,
-                    "music_in_s": delay, "lanes": counts, "at": time.time()})
-    return {"started": True, "announce_command_id": rec.id, "music_in_s": delay, "lanes": counts}
+                    "music_in_s": delay, "lanes": counts, "skipped": skipped, "at": time.time()})
+    return {"started": True, "announce_command_id": rec.id, "music_in_s": delay,
+            "lanes": counts, "skipped": skipped}
 
 
 @router.get("/ride-fallback", tags=["dj_pool"])

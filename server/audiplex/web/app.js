@@ -736,7 +736,7 @@ async function openMusicVideo(track) {
   const where = await guard(() => get(`/api/music-video/open/${track.id}`));
   if (where) {
     const qs = `tab=musicvideo&song=${encodeURIComponent(where.song)}&title=${encodeURIComponent(where.title)}`;
-    window.open(`http://${location.hostname}:${where.port}/?${qs}`, "_blank");
+    window.open(`${location.protocol}//${location.hostname}:${where.port}/?${qs}`, "_blank");
     return;
   }
   return openMusicVideoLegacy(track);
