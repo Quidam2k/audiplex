@@ -915,16 +915,8 @@ async def dj_play_stream(url: str, title: str = "Live stream") -> str:
     )
 
 
-@mcp.tool()
-async def dj_play_book(book: str, position_seconds: float = -1) -> str:
-    """Play an audiobook on the active PC renderer (#2680), resuming where Todd
-    left off on ANY device (the server's saved position, which the phone also
-    reads and writes). `book` is a book id or part of its title.
-    position_seconds >= 0 starts there instead. The PC saves its position back
-    as it plays, so opening the book on the phone later picks up at the PC's
-    spot. The phone app plays books from its own UI, not by this command; use
-    dj_transfer to move a playing book between phone and PC. Talk-guarded.
-    """
+async def _match_book(book: str) -> dict | str:
+    """One book from an id or part of its title, or a message saying why not."""
     key = book.strip()
     try:
         books = await _get("/api/library/books")
@@ -942,18 +934,101 @@ async def dj_play_book(book: str, position_seconds: float = -1) -> str:
     if len(matches) > 1:
         names = "; ".join(f"{b['id']}: {b.get('title')}" for b in matches[:8])
         return f"'{book}' matches {len(matches)} books, pick one by id: {names}"
-    target = matches[0]
+    return matches[0]
+
+
+def _book_start(target: dict, position_seconds: float, from_end_seconds: float) -> float | str:
+    """#3713: the requested start in book seconds, -1 for "saved position",
+    or a refusal. from_end_seconds is Audible's "17h10m left" read-out."""
+    if position_seconds >= 0 and from_end_seconds >= 0:
+        return "Give position_seconds OR from_end_seconds, not both."
+    if from_end_seconds < 0:
+        return position_seconds if position_seconds >= 0 else -1
+    duration = float(target.get("duration_seconds") or 0)
+    if from_end_seconds > duration:
+        return (f"from_end_seconds={from_end_seconds:.0f} is longer than the book "
+                f"({duration:.0f} s).")
+    return duration - from_end_seconds
+
+
+async def _save_book_position(book_id: int, seconds: float) -> str | None:
+    """Write the server's saved position (what the phone's Continue resumes
+    from). Returns an error message, or None when it saved."""
+    body: dict = {"position_seconds": seconds}
+    try:
+        detail = await _get(f"/api/library/books/{book_id}")
+        chapters = detail.get("chapters") or []
+        idx = max((i for i, c in enumerate(chapters) if c.get("start_seconds", 0) <= seconds), default=0)
+        body["chapter_index"] = idx
+    except Exception:
+        pass  # chapter index is cosmetic; the position is what matters
+    try:
+        await _put(f"/api/progress/{book_id}", body)
+    except Exception as exc:
+        return f"Couldn't save the position: {exc!r}"[:300]
+    return None
+
+
+def _hms(seconds: float) -> str:
+    s = int(seconds)
+    return f"{s // 3600}h{s % 3600 // 60:02d}m{s % 60:02d}s"
+
+
+@mcp.tool()
+async def dj_play_book(book: str, position_seconds: float = -1, from_end_seconds: float = -1) -> str:
+    """Play an audiobook on the active renderer, phone or PC (#2680, #3713),
+    resuming where Todd left off on ANY device (the server's saved position,
+    which the phone also reads and writes). `book` is a book id or part of its
+    title. position_seconds >= 0 starts there instead; from_end_seconds >= 0
+    starts that far from the end (Audible's "17h10m left" = 61800). Never both.
+    An explicit start is also saved as the book's position first, so a phone
+    too old for this command still resumes there when Todd taps Continue.
+    Talk-guarded.
+    """
+    target = await _match_book(book)
+    if isinstance(target, str):
+        return target
+    start = _book_start(target, position_seconds, from_end_seconds)
+    if isinstance(start, str):
+        return start
     payload: dict = {"book_id": target["id"], "playing": True}
-    if position_seconds >= 0:
-        payload["position_ms"] = int(position_seconds * 1000)
+    if start >= 0:
+        err = await _save_book_position(target["id"], start)
+        if err:
+            return err
+        payload["position_ms"] = int(start * 1000)
     data = await _enqueue("play_book", payload)
     if isinstance(data, str):
         return _held_result(data)
-    return await _result(data, 1) + (
-        f"Sent '{target.get('title')}' (book {target['id']}) "
-        + ("from the saved position" if position_seconds < 0 else f"from {position_seconds:.0f} s")
-        + f" (command #{data.get('id')}). A phone renderer answers unknown_type: books only follow to the PC."
-    )
+    head = await _result(data, 1)
+    where = "from the saved position" if start < 0 else f"from {_hms(start)} ({start:.0f} s)"
+    out = head + f"Sent '{target.get('title')}' (book {target['id']}) {where} (command #{data.get('id')})."
+    if "unknown_type" in head:
+        out += (" The player's app is too old for play_book"
+                + ("; the position is saved, so Continue on the phone resumes there." if start >= 0
+                   else "; Todd can tap Continue on the phone."))
+    return out
+
+
+@mcp.tool()
+async def dj_set_book_position(book: str, position_seconds: float = -1, from_end_seconds: float = -1) -> str:
+    """Set an audiobook's saved position without playing anything (#3713), so
+    the next Continue (phone or PC) or dj_play_book resumes there. `book` is a
+    book id or part of its title. Give position_seconds, or from_end_seconds
+    (Audible's "time left" read-out), not both.
+    """
+    target = await _match_book(book)
+    if isinstance(target, str):
+        return target
+    if position_seconds < 0 and from_end_seconds < 0:
+        return "Give position_seconds or from_end_seconds."
+    start = _book_start(target, position_seconds, from_end_seconds)
+    if isinstance(start, str):
+        return start
+    err = await _save_book_position(target["id"], start)
+    if err:
+        return err
+    return f"Saved '{target.get('title')}' (book {target['id']}) at {_hms(start)} ({start:.0f} s). Nothing is playing."
 
 
 # ----- Sleep engine (#1728): a second, independent looping layer plus a -----

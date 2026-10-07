@@ -57,7 +57,8 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_command_status` — did the phone ack a command, and what did it say.
 - `dj_device_status` — is a player connected and polling right now.
 - `dj_devices` / `dj_transfer` — list renderers; hand playback to another device (talk-guarded); a playing audiobook follows too (#2680).
-- `dj_play_book` — play an audiobook on the PC renderer from the saved position (shared with the phone; talk-guarded).
+- `dj_play_book` — play an audiobook on the phone or PC from the saved position, or `position_seconds` / `from_end_seconds` (Audible's "time left"); an explicit start is saved first (#3713; talk-guarded).
+- `dj_set_book_position` — set a book's saved position without playing, so Continue lands there (#3713).
 - `dj_link_history` — when the phone's link dropped and came back (survives restarts).
 - `dj_client_log` / `dj_client_exits` — phone diagnostics: player errors, process exits.
 

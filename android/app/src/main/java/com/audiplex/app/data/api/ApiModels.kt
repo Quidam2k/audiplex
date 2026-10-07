@@ -342,7 +342,9 @@ data class DjCommandPayload(
     // (0.0-1.0) over the same fade window, so the book crossfades into the bed.
     @Json(name = "bed_fade_to") val bedFadeTo: Float? = null,
     // 'activate' (#2021 transfer handoff): resume playing, or hold paused.
-    val playing: Boolean? = null
+    val playing: Boolean? = null,
+    // 'play_book' (#3713): the audiobook to start; position_ms above is optional.
+    @Json(name = "book_id") val bookId: Int? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -414,8 +416,14 @@ data class PlaybackStateDto(
     @Json(name = "app_version_code") val appVersionCode: Int = 0,
     // #3601: "dj" or "manual" — lets the server-side resume snapshot say who
     // built the queue, so only DJ queues come back on their own after a kill.
-    @Json(name = "queue_origin") val queueOrigin: String? = null
+    @Json(name = "queue_origin") val queueOrigin: String? = null,
+    // #3713: the audiobook playing, if any, so the DJ can confirm a play_book
+    // started (the PC reports the same shape). position_ms is book-global.
+    val book: NowPlayingBookDto? = null
 )
+
+@JsonClass(generateAdapter = true)
+data class NowPlayingBookDto(val id: Int, val title: String?)
 
 /** The last music queue the server saw this phone play (#3601, GET api/playback/resume). */
 @JsonClass(generateAdapter = true)

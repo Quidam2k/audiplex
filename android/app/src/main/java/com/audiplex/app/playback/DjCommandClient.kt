@@ -7,10 +7,13 @@ import com.audiplex.app.data.ApiServiceHolder
 import com.audiplex.app.data.SettingsStore
 import com.audiplex.app.data.api.DjCommandAckDto
 import com.audiplex.app.data.api.DjCommandDto
+import com.audiplex.app.data.api.NowPlayingBookDto
 import com.audiplex.app.data.api.NowPlayingTrackDto
 import com.audiplex.app.data.api.PlaybackStateDto
 import com.audiplex.app.data.api.QueueTrackDto
 import com.audiplex.app.data.api.TrackSchema
+import com.audiplex.app.data.download.DownloadRepository
+import com.audiplex.app.data.download.PlaybackPositionRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -53,7 +56,7 @@ import kotlin.coroutines.coroutineContext
  *    see what's playing via dj_now_playing.
  *
  * Handles command types: play_now, skip, queue, play_next, reorder, pause,
- * resume, previous, seek, volume, play_stream, replace_upcoming. The reportLoop also publishes
+ * resume, previous, seek, volume, play_stream, replace_upcoming, play_book. The reportLoop also publishes
  * the full queue (with indices) and the current player volume so the agent
  * can DJ with visibility and issue index-based reorders. play_stream routes
  * an external HTTP audio stream (e.g. Radio Free Luna) to the device —
@@ -229,6 +232,8 @@ class DjCommandClient @Inject constructor(
     private val settingsStore: SettingsStore,
     private val playbackManager: PlaybackManager,
     private val clientLog: ClientLogReporter,
+    private val downloadRepository: DownloadRepository,
+    private val positionRepository: PlaybackPositionRepository,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var commandJob: Job? = null
@@ -497,6 +502,21 @@ class DjCommandClient @Inject constructor(
                 if (!armed) return DispatchResult("failed", "no player")
             }
             "cancel_stop_after_current" -> withContext(Dispatchers.Main) { playbackManager.cancelStopAfterCurrent() }
+            // #3713: start an audiobook by voice, like play_now for tracks.
+            // No position_ms means "where Todd left off" (the Continue button's
+            // reconciler, so local and server progress both count).
+            "play_book" -> {
+                val bookId = cmd.payload?.bookId ?: return badPayload("book_id")
+                val book = runCatching { apiHolder.api?.getBook(bookId) }.getOrNull()
+                    ?: downloadRepository.getCachedBookDetail(bookId)
+                    ?: return DispatchResult("no_book", "book $bookId")
+                val startSeconds = cmd.payload.positionMs?.let { it / 1000.0 }
+                    ?: positionRepository.resolveStartPosition(bookId).positionSeconds
+                val errorSeq = playbackManager.lastPlayerError.value?.seq ?: 0L
+                val wasPlaying = playbackManager.isPlaying.value
+                withContext(Dispatchers.Main) { playbackManager.play(book, baseUrl, startSeconds) }
+                return awaitStart(errorSeq, wasPlaying, DispatchResult("ok", "book $bookId at ${startSeconds.toLong()} s"))
+            }
             "resume" -> withContext(Dispatchers.Main) { playbackManager.resume() }
             "previous" -> withContext(Dispatchers.Main) { playbackManager.skipBack() }
             "seek" -> {
@@ -653,13 +673,16 @@ class DjCommandClient @Inject constructor(
             appVersionName = BuildConfig.VERSION_NAME,
             appVersionCode = BuildConfig.VERSION_CODE,
             queueOrigin = music?.origin,  // #3601
+            book = playbackManager.currentBook.value
+                ?.takeIf { playbackManager.playerKind.value == PlayerKind.Audiobook }
+                ?.let { NowPlayingBookDto(it.id, it.title) },
         )
         // Always refresh while playing (position moves); otherwise on a
         // meaningful state change, plus a slow idle heartbeat. Without it a
         // server restart left now-playing at "never" until something changed
         // (#2843). Device liveness does NOT depend on this — the server
         // tracks that from the command long-poll, every ~25s regardless.
-        val key = "${state.playing}:${trackDto?.id}:${state.queueIndex}"
+        val key = "${state.playing}:${trackDto?.id}:${state.queueIndex}:${state.book?.id}"
         val now = System.currentTimeMillis()
         if (force || shouldReport(playing, key, lastReportKey, now - lastReportAt)) {
             api.postPlaybackState(state)

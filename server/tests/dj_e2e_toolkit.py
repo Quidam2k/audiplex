@@ -108,7 +108,7 @@ def _mint(tmp: Path, env: dict, username: str) -> str:
 class FakeRenderer(threading.Thread):
     """The e2e device: never plays audio; answers per `mode` (see module doc)."""
 
-    START = {"play_now", "resume", "queue", "play_next", "play_stream", "activate"}
+    START = {"play_now", "resume", "queue", "play_next", "play_stream", "activate", "play_book"}
 
     def __init__(self, base: str, token: str, catalog: dict[int, str]) -> None:
         super().__init__(daemon=True)
@@ -119,6 +119,7 @@ class FakeRenderer(threading.Thread):
         self.queue: list[int] = []
         self.index = 0
         self.playing = False
+        self.book: int | None = None  # #3713
         self.stop = threading.Event()
 
     def report(self) -> None:
@@ -126,6 +127,7 @@ class FakeRenderer(threading.Thread):
         self.client.post("/api/playback/state", params={"device_id": TEST_ID}, json={
             "playing": self.playing,
             "track": {"id": cur, "title": self.catalog.get(cur, "?"), "artist": "E2E Artist"} if cur else None,
+            "book": {"id": self.book, "title": "E2E Book"} if self.book else None,
             "queue_length": len(self.queue), "queue_index": self.index,
             "queue": [{"index": i, "id": t, "title": self.catalog.get(t, "?"), "artist": "E2E Artist"}
                       for i, t in enumerate(self.queue)],
@@ -140,7 +142,14 @@ class FakeRenderer(threading.Thread):
             self.crossfade_asked = p.get("seconds")
             self.ack(cmd["id"], "unknown_type", typ)
             return
+        if typ == "play_book" and self.mode == "old_app":  # #3713: a phone build before play_book
+            self.ack(cmd["id"], "unknown_type", typ)
+            return
         ids = list(p.get("track_ids") or [])
+        if typ == "play_book":
+            self.queue, self.index, self.book = [], 0, p.get("book_id")
+        elif typ in ("play_now", "play_stream"):
+            self.book = None
         if typ == "play_now":
             self.queue, self.index = ids, 0
         elif typ == "queue":
@@ -156,7 +165,7 @@ class FakeRenderer(threading.Thread):
             self.ack(cmd["id"], "ok")
             return
         if self.mode == "honest":
-            self.playing = bool(self.queue) or typ == "activate"
+            self.playing = bool(self.queue or self.book) or typ == "activate"
             self.report()
             self.ack(cmd["id"], "ok")
         elif self.mode == "silent":
@@ -384,6 +393,35 @@ async def harmonic_checks(dj, fake: FakeRenderer, ids: list[int], db_path: Path)
     await dj.dj_pause()
 
 
+async def book_checks(dj, fake: FakeRenderer, api: httpx.Client) -> None:
+    """#3713: dj_play_book starts a book on a phone-style renderer at a computed
+    spot, saves that spot first, and tells the truth to an old app."""
+    books = [b for b in api.get("/api/library/books").json() if b.get("title") == "E2E Book"]
+    if not check(len(books) == 1, f"e2e book scanned: {books}"):
+        return
+    bid, dur = books[0]["id"], books[0]["duration_seconds"]
+    fake.mode = "honest"
+    out = await dj.dj_play_book("E2E Book", from_end_seconds=20)
+    cmd = fake.received[-1]
+    want_ms = int((dur - 20) * 1000)
+    check(cmd["type"] == "play_book" and cmd["payload"].get("position_ms") == want_ms,
+          f"play_book sent at duration-20 s: {cmd}")
+    check(" playing=YES" in first(out), f"honest renderer: book confirmed playing: {first(out)}")
+    saved = api.get(f"/api/progress/{bid}").json()
+    check(abs(saved["position_seconds"] - (dur - 20)) < 0.01, f"spot saved before play: {saved}")
+    check("not both" in await dj.dj_play_book("E2E Book", position_seconds=5, from_end_seconds=5),
+          "both positions refused")
+    out = await dj.dj_set_book_position(str(bid), position_seconds=12)
+    check(api.get(f"/api/progress/{bid}").json()["position_seconds"] == 12 and fake.received[-1] is cmd,
+          f"set position saves, sends nothing: {out}")
+    fake.mode = "old_app"
+    out = await dj.dj_play_book(str(bid), position_seconds=30)
+    check(" playing=NO" in first(out) and "too old" in out and "Continue" in out,
+          f"old app: honest NO + Continue hint: {out!r}")
+    check(api.get(f"/api/progress/{bid}").json()["position_seconds"] == 30, "old app: spot still saved")
+    fake.mode = "honest"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8199)
@@ -401,8 +439,14 @@ def main() -> int:
                         "-c:a", "aac", "-t", "5", "-metadata", f"title={title}", "-metadata", "artist=E2E Artist",
                         "-metadata", "album=E2E Album", "-metadata", f"track={n}",
                         str(album / f"0{n} track.m4a")], check=True)
+    book_dir = tmp / "lib" / "books" / "E2E Book"  # #3713: one 60 s silent audiobook
+    book_dir.mkdir(parents=True)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                    "-c:a", "aac", "-t", "60", "-metadata", "title=E2E Book", "-metadata", "artist=E2E Author",
+                    "-f", "mp4", str(book_dir / "E2E Book.m4b")], check=True)
     (tmp / "config.yaml").write_text(json.dumps({
-        "library_roots": [{"path": str(tmp / "lib" / "music"), "category": "music"}],
+        "library_roots": [{"path": str(tmp / "lib" / "music"), "category": "music"},
+                          {"path": str(tmp / "lib" / "books"), "category": "audiobook_clean"}],
         "database_url": f"sqlite:///{db_path.as_posix()}",
         "port": args.port,
         "cover_cache_dir": str(tmp / "covers"),
@@ -463,6 +507,7 @@ def main() -> int:
         asyncio.run(energy_checks(dj, fake, ids, db_path))  # #2806 S2
         tempo_key_analyzer_checks(fake, base, owner, db_path, tmp)  # #1002
         asyncio.run(harmonic_checks(dj, fake, ids, db_path))  # #1002
+        asyncio.run(book_checks(dj, fake, api))  # #3713
     finally:
         if fake:
             fake.stop.set()

@@ -162,7 +162,12 @@ def wire(monkeypatch):
         calls.append(("CMD", cmd, payload))
         return {"id": 5, "pending": 1}
 
+    async def fake_put(path, body):  # #3713: an explicit start is saved first
+        calls.append(("PUT", path, body))
+        return {}
+
     monkeypatch.setattr(mcp_server, "_get", fake_get)
+    monkeypatch.setattr(mcp_server, "_put", fake_put)
     monkeypatch.setattr(mcp_server, "_enqueue_raw", fake_raw)
     return calls
 
@@ -177,3 +182,71 @@ def test_dj_play_book_ambiguous_and_explicit_position(wire):
     assert "pick one by id" in asyncio.run(mcp_server.dj_play_book("un"))
     asyncio.run(mcp_server.dj_play_book("3", position_seconds=90))
     assert ("CMD", "play_book", {"book_id": 3, "playing": True, "position_ms": 90_000}) in wire
+
+
+# ---- #3713: start a book at a computed spot, or just save the spot ----
+
+@pytest.fixture
+def wire3713(wire, monkeypatch):
+    async def fake_get(path):
+        wire.append(("GET", path))
+        if path == "/api/library/books":
+            return [
+                {"id": 1, "title": "Dune", "duration_seconds": 100000},
+                {"id": 2, "title": "Dune Messiah", "duration_seconds": 100000},
+                {"id": 3, "title": "Emma", "duration_seconds": 100000},
+            ]
+        if path == "/api/library/books/1":
+            return {"chapters": [{"start_seconds": 0}, {"start_seconds": 50000}]}
+        return {}
+
+    monkeypatch.setattr(mcp_server, "_get", fake_get)
+    return wire
+
+
+def test_dj_play_book_from_end_saves_before_command(wire3713):
+    asyncio.run(mcp_server.dj_play_book("1", from_end_seconds=61800))
+    put = ("PUT", "/api/progress/1", {"position_seconds": 38200, "chapter_index": 0})
+    cmd = ("CMD", "play_book", {"book_id": 1, "playing": True, "position_ms": 38_200_000})
+    assert put in wire3713
+    assert cmd in wire3713
+    assert wire3713.index(put) < wire3713.index(cmd)
+
+
+@pytest.mark.parametrize("tool", [mcp_server.dj_play_book, mcp_server.dj_set_book_position])
+def test_book_position_refuses_both_arguments(wire3713, tool):
+    out = asyncio.run(tool("1", position_seconds=10, from_end_seconds=20))
+    assert "not both" in out
+    assert not any(call[0] in ("CMD", "PUT") for call in wire3713)
+
+
+def test_dj_play_book_refuses_from_end_beyond_duration(wire3713):
+    out = asyncio.run(mcp_server.dj_play_book("1", from_end_seconds=100001))
+    assert "longer than" in out
+    assert not any(call[0] in ("CMD", "PUT") for call in wire3713)
+
+
+def test_dj_set_book_position_saves_chapter_and_requires_position(wire3713):
+    asyncio.run(mcp_server.dj_set_book_position("1", position_seconds=60000))
+    assert ("PUT", "/api/progress/1", {"position_seconds": 60000, "chapter_index": 1}) in wire3713
+    assert not any(call[0] == "CMD" for call in wire3713)
+    wire3713.clear()
+    out = asyncio.run(mcp_server.dj_set_book_position("1"))
+    assert "Give position_seconds or from_end_seconds" in out
+    assert not any(call[0] in ("CMD", "PUT") for call in wire3713)
+
+
+def test_dj_play_book_saved_position_does_not_write(wire3713):
+    asyncio.run(mcp_server.dj_play_book("1"))
+    assert ("CMD", "play_book", {"book_id": 1, "playing": True}) in wire3713
+    assert not any(call[0] == "PUT" for call in wire3713)
+
+
+def test_dj_play_book_old_phone_suggests_continue(wire3713, monkeypatch):
+    async def fake_result(data, wait):
+        return "RESULT ... phone_ack=unknown_type: play_book playing=NO\n"
+
+    monkeypatch.setattr(mcp_server, "_result", fake_result)
+    out = asyncio.run(mcp_server.dj_play_book("1", from_end_seconds=61800))
+    assert "too old" in out
+    assert "Continue" in out
