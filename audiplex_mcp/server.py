@@ -1354,6 +1354,7 @@ async def dj_break_brief() -> str:
         if later:
             lines.append("After that: " + "; ".join(f"{i.get('title')} - {i.get('artist')}" for i in later))
         lines += await _pair_note_lines(prev, t, nxt)  # #ride0928
+        lines += await dj_toolkit.todd_lines([prev, t, nxt])  # #7230: his stars + loves
     else:
         lines += ["", "Nothing is playing right now."]
 
@@ -1402,7 +1403,7 @@ async def _pair_note_lines(prev: dict | None, now: dict | None, nxt: dict | None
         except Exception:
             continue
         for n in notes:
-            if n["id"] in seen:
+            if n["id"] in seen or n["note"].startswith(dj_toolkit.LOVE_PREFIX):  # #7230: todd_lines shows it
                 continue
             seen.add(n["id"])
             who = f" ({n['persona']})" if n.get("persona") else ""

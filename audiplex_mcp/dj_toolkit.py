@@ -18,7 +18,7 @@ def register(mcp, ns: dict) -> None:
     _NS = ns
     for fn in (dj_upcoming, dj_remove, dj_insert, dj_swap, dj_pool_lane,
                dj_ban, dj_unban, dj_bans, dj_tag, dj_untag, dj_tags, dj_energy_set,
-               dj_harmonic_set, dj_crossfade, dj_star, dj_resume):  # #3576 dj_star, #3601 dj_resume
+               dj_harmonic_set, dj_crossfade, dj_star, dj_resume, dj_love, dj_loves):  # #3576 dj_star/dj_love, #3601 dj_resume
         mcp.tool()(fn)
 
 
@@ -315,7 +315,17 @@ async def dj_tag(track_ids: list[int], tags: list[str], persona: str = "") -> st
     return out
 
 
-async def dj_star(track_ids: list[int], stars: float, words: str = "", persona: str = "") -> str:
+LOVE_PREFIX = "Todd loves this"  # #7230: dj_love's track note starts with this
+PRIVATE = "[private]"  # #7230: his reason is kept, but never read on air
+
+
+def _his_words(words: str, private: bool) -> str:
+    words = " ".join(words.split())
+    return f"{PRIVATE} {words}" if private and words else words
+
+
+async def dj_star(track_ids: list[int], stars: float, words: str = "", persona: str = "",
+                  private: bool = False) -> str:
     """Set Todd's star rating (1-5, halves allowed) when he says one out loud:
     "five stars", "four and a half". It lands in the SAME star field he taps in
     the app, on his account, so he sees it there. #3576. Halves show as halves
@@ -325,12 +335,14 @@ async def dj_star(track_ids: list[int], stars: float, words: str = "", persona: 
     words: his own words, verbatim-ish ("one of the all-time greats") - they
         are kept with the rating and teach more than the number.
     persona: who heard it. Re-rating replaces. (#6117: halves are stored exactly.)
+    private: his reason is personal (therapy, people in his life): the stars
+        still count, but dj_break_brief leaves the words out. (#7230)
     Do not use the old five-star-verbal tags for this any more."""
     if not track_ids:
         return "Give track_ids (dj_search finds them)."
     try:
         res = await _h("_put")("/api/playback/ratings", {
-            "track_ids": track_ids, "stars": stars, "words": words, "persona": persona})
+            "track_ids": track_ids, "stars": stars, "words": _his_words(words, private), "persona": persona})
     except PermissionError as e:
         return str(e)
     except Exception as e:
@@ -346,6 +358,134 @@ async def dj_star(track_ids: list[int], stars: float, words: str = "", persona: 
     if res.get("unknown"):
         out += f" Unknown id(s) {res['unknown']}."
     return out
+
+
+async def dj_love(track_ids: list[int], words: str, stars: float = 0, persona: str = "",
+                  private: bool = False) -> str:
+    """Remember a song Todd says he loves, with his reason (#3576, #7230): "I
+    love this one", "one of my favorites", "this goes on anything about hope".
+    Call it in the moment, from chat, voice or a dead drop.
+
+    stars: only if he SAID a number; then this is dj_star. Without one, the
+        track gets the `loved` tag and his words as a note, and NO stars:
+        never turn "love" into a 5 he didn't say.
+    words: his own words; they teach more than the tag.
+    track_ids: every copy of the song (dj_search).
+    private: the reason is personal; kept for picking, never read on air.
+    dj_loves lists everything; dj_break_brief shows it when the song comes up;
+    {"kind": "tag", "query": "loved"} is a mix/pool source."""
+    if not track_ids:
+        return "Give track_ids (dj_search finds them)."
+    if stars:
+        return await dj_star(track_ids, stars, words, persona, private)
+    words = _his_words(words, private)
+    note = f"{LOVE_PREFIX}: {words}" if words else LOVE_PREFIX
+    try:
+        res = await _h("_post")("/api/playback/tags",
+                                {"track_ids": track_ids, "tags": ["loved"], "persona": persona or None})
+        for tid in res.get("tracks") or []:
+            await _h("_post")("/api/playback/pair-notes",
+                              {"track_a": tid, "note": note, "persona": persona or None})
+    except PermissionError as e:
+        return str(e)
+    except Exception as e:
+        return await _say_http_error(e)
+    loved = res.get("tracks") or []
+    if not loved:
+        return f"Nothing saved: unknown id(s) {res.get('unknown')}."
+    out = f"Loved {len(loved)} track(s), no stars (he gave no number). Note: {note!r}."
+    if res.get("unknown"):
+        out += f" Unknown id(s) {res['unknown']}."
+    return out
+
+
+async def _love_notes(track_ids) -> dict[int, str]:
+    """{track_id: his latest dj_love words ('' if none given)} for loved tracks."""
+    out: dict[int, str] = {}
+    for tid in track_ids:
+        try:
+            notes = await _h("_get")(f"/api/playback/pair-notes?track_a={tid}&limit=20")
+        except Exception:
+            continue
+        for n in notes:  # newest first
+            if not n.get("track_b") and n["note"].startswith(LOVE_PREFIX):
+                out[tid] = n["note"][len(LOVE_PREFIX):].lstrip(": ")
+                break
+    return out
+
+
+def _rating_words(note: str) -> str:
+    """'[Juno, said 5] one of the greats' -> 'one of the greats'."""
+    if not note.startswith("["):
+        return note
+    return note.split("] ", 1)[1] if "] " in note else ""
+
+
+async def dj_loves(limit: int = 50) -> str:
+    """Every song Todd has said he loves, in one list (#3576, #7230): his stars
+    (from the app or dj_star) with his words, then `loved` songs with no
+    number. Read it before building a set. [private] words are for picking
+    only, never for on-air copy."""
+    try:
+        ratings = await _h("_get")("/api/playback/ratings")
+        loved = await _h("_get")("/api/playback/tags/loved")
+    except PermissionError as e:
+        return str(e)
+    lines = []
+    if ratings:
+        lines.append(f"His stars ({len(ratings)}), best first:")
+        for r in ratings[:limit]:
+            label = f"track {r['track_id']}"
+            try:
+                t = await _h("_get")(f"/api/music/tracks/{r['track_id']}")
+                label = f"{t.get('artist_name', '')} - {t.get('title', '')}".strip(" -") or label
+            except Exception:
+                pass
+            words = _rating_words(r.get("note") or "")
+            lines.append(f"  [{r.get('stars', r['rating']):g}*] {r['track_id']} | {label}"
+                         + (f'  "{words}"' if words else ""))
+    rated = {r["track_id"] for r in ratings or []}
+    unrated = [t for t in loved or [] if t["track_id"] not in rated][:limit]
+    if unrated:
+        why = await _love_notes([t["track_id"] for t in unrated])
+        lines.append(f"Loved, no number ({len(unrated)}):")
+        for t in unrated:
+            who = f"{t['artist']} - " if t.get("artist") else ""
+            words = why.get(t["track_id"])
+            lines.append(f"  {t['track_id']} | {who}{t.get('title') or '?'}" + (f'  "{words}"' if words else ""))
+    return "\n".join(lines) or "Nothing yet. dj_star (a number) or dj_love (no number) when he says one."
+
+
+async def todd_lines(tracks) -> list[str]:
+    """dj_break_brief lines: what Todd has said about the prev/now/next songs
+    (#7230). His words are colour for the break, never a quote; [private]
+    words are dropped and only the stars or the love remain."""
+    tracks = [t for t in tracks if t and (t.get("id") or 0) > 0]
+    if not tracks:
+        return []
+    try:
+        stars = {r["track_id"]: r for r in await _h("_get")("/api/playback/ratings")}
+        loved = {t["track_id"] for t in await _h("_get")("/api/playback/tags/loved")}
+    except Exception:
+        return []
+    why = await _love_notes([t["id"] for t in tracks if t["id"] in loved and t["id"] not in stars])
+    out, seen = [], set()
+    for t in tracks:
+        if t["id"] in seen:
+            continue
+        seen.add(t["id"])
+        r = stars.get(t["id"])
+        if r:
+            what, words = f"{r.get('stars', r['rating']):g} stars", _rating_words(r.get("note") or "")
+        elif t["id"] in loved:
+            what, words = "loves it", why.get(t["id"], "")
+        else:
+            continue
+        if PRIVATE in words:
+            words = ""
+        out.append(f"Todd on {t.get('title')}: {what}" + (f' (his words: "{words}")' if words else "")
+                   + ". Colour, not a quote.")
+    return ([""] + out) if out else []
 
 
 async def dj_resume(play: bool = False) -> str:

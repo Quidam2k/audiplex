@@ -234,3 +234,12 @@ def test_rated_source_uses_exact_stars(monkeypatch):
     monkeypatch.setattr(mcp, "_get", fake_get)
     _, tracks = asyncio.run(mcp._resolve_source("rated", "4.5"))
     assert [t["id"] for t in tracks] == [1]
+
+
+def test_pending_in_applied_column_is_not_applied():  # #7230: "pending" rows were skipped forever
+    md = MD.replace("| Todd's words | Msg |", "| Todd's words | Msg | Applied |").replace("|---|---|---|---|---|", "|---|---|---|---|---|---|")
+    rows = bf.parse_table(md)[2]
+    lines = md.splitlines()
+    lines[rows[0]["line_no"]] += " 2026-09-30: 5 (app 5) |"
+    lines[rows[1]["line_no"]] += " pending |"
+    assert [r["applied"] for r in bf.parse_table("\n".join(lines))[2]] == [True, False, False, False]

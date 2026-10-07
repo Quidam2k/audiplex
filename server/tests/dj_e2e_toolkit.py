@@ -407,6 +407,30 @@ async def harmonic_checks(dj, fake: FakeRenderer, ids: list[int], db_path: Path)
     await dj.dj_pause()
 
 
+async def love_checks(dj, fake: FakeRenderer, ids: list[int], api: httpx.Client) -> None:  # #7230
+    from audiplex_mcp import dj_toolkit as tk
+
+    a, b, c = ids[:3]
+    out = await tk.dj_star([a], 5, "all-time great", "e2e")
+    check(out.startswith("Rated 1 track(s) 5 stars"), f"dj_star rates: {out!r}")
+    out = await tk.dj_love([b], "my sister's song", stars=4.5, persona="e2e", private=True)
+    check(out.startswith("Rated 1 track(s) 4.5 stars"), f"dj_love with a number is dj_star: {out!r}")
+    out = await tk.dj_love([c], "goes on anything about hope", persona="e2e")
+    check("no stars" in out, f"dj_love without a number sets no stars: {out!r}")
+    app = {r["track_id"]: r["stars"] for r in api.get("/api/music/ratings").json()}
+    check(app.get(a) == 5 and app.get(b) == 4.5 and c not in app, f"the app sees his stars, none on the love: {app}")
+    out = await tk.dj_loves()
+    check('"all-time great"' in out and f"  {c} | " in out and '"goes on anything about hope"' in out,
+          f"dj_loves lists stars and loves: {out!r}")
+    fake.queue, fake.index, fake.playing = [a, b, c], 1, True
+    fake.report()
+    brief = await dj.dj_break_brief()
+    check('5 stars (his words: "all-time great")' in brief and "4.5 stars. Colour" in brief
+          and "loves it" in brief and "sister" not in brief and "Todd loves this" not in brief,
+          f"dj_break_brief shows prev/now/next, private words left out: {brief[-400:]!r}")
+    await dj.dj_pause()
+
+
 async def book_checks(dj, fake: FakeRenderer, api: httpx.Client) -> None:
     """#3713: dj_play_book starts a book on a phone-style renderer at a computed
     spot, saves that spot first, and tells the truth to an old app."""
@@ -522,6 +546,7 @@ def main() -> int:
         asyncio.run(energy_checks(dj, fake, ids, db_path))  # #2806 S2
         tempo_key_analyzer_checks(fake, base, owner, db_path, tmp)  # #1002
         asyncio.run(harmonic_checks(dj, fake, ids, db_path))  # #1002
+        asyncio.run(love_checks(dj, fake, ids, api))  # #7230
         asyncio.run(book_checks(dj, fake, api))  # #3713
     finally:
         if fake:

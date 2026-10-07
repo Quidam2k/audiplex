@@ -73,7 +73,9 @@ def parse_table(text: str) -> tuple[list[str], int, list[dict]]:
             "line_no": n,
             "ids": [int(x) for x in re.findall(r"\d+", id_text)],
             "words": cells[words_col].replace('"', ""),
-            "applied": bool(applied_col is not None and len(cells) > applied_col and cells[applied_col]),
+            # Only a dated stamp ("2026-09-30: 5 (app 5)") counts; "pending" is not applied (#7230).
+            "applied": bool(applied_col is not None and len(cells) > applied_col
+                            and re.match(r"\d{4}-\d{2}-\d{2}:", cells[applied_col])),
         })
     return lines, head, rows
 
