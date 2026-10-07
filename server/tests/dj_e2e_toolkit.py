@@ -290,7 +290,7 @@ async def toolkit_checks(dj, fake: FakeRenderer, ids: list[int]) -> None:  # #28
     st = await dj._get("/api/playback/pool")
     check(any(ln.get("paused") for ln in st["lanes"]), "the server pool reports the paused lane")
     out = await dj.dj_pool_set(sources=[{"kind": "vibes", "query": "x"}])
-    check("REFUSED" in out and "'tag', or 'tracks'" in out, f"an unknown kind names the valid ones: {out[:160]!r}")  # #2806
+    check("REFUSED" in out and "'bucket'" in out and "or 'tracks'" in out, f"an unknown kind names the valid ones: {out[:160]!r}")  # #2806 #3912
     await dj.dj_pool_stop()
 
 
