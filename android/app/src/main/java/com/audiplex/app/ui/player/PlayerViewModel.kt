@@ -5,11 +5,13 @@ import androidx.lifecycle.viewModelScope
 import com.audiplex.app.data.ApiServiceHolder
 import com.audiplex.app.data.api.BookDetail
 import com.audiplex.app.data.api.ChapterSchema
+import com.audiplex.app.data.api.SleepBed
 import com.audiplex.app.data.api.TrackRatingCreate
 import com.audiplex.app.playback.ControllerMetadata
 import com.audiplex.app.playback.MusicQueueState
 import com.audiplex.app.playback.PlaybackManager
 import com.audiplex.app.playback.PlayerKind
+import com.audiplex.app.playback.SleepFade
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -17,6 +19,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -138,6 +143,33 @@ class PlayerViewModel @Inject constructor(
     }
 
     fun getBaseUrl(): String = apiHolder.baseUrl
+
+    // ----- #3714: the sleep button -----
+
+    val bedPlaying: StateFlow<Boolean> = playbackManager.bedPlaying
+
+    private val _sleepBeds = MutableStateFlow<List<SleepBed>>(emptyList())
+    val sleepBeds: StateFlow<List<SleepBed>> = _sleepBeds.asStateFlow()
+
+    /** Minutes until the armed sleep fade starts, ticking each 15 s; null when none is armed. */
+    val sleepMinutesLeft: StateFlow<Int?> = combine(
+        playbackManager.sleepEndsAtMs,
+        kotlinx.coroutines.flow.flow { while (currentCoroutineContext().isActive) { emit(Unit); delay(15_000) } }
+    ) { endsAt, _ -> endsAt?.let { SleepFade.minutesLeft(it, System.currentTimeMillis()) } }
+        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000), null)
+
+    /** Refresh the bed list when the dialog opens: a bed dropped into the library shows up. */
+    fun loadSleepBeds() {
+        viewModelScope.launch {
+            val api = apiHolder.api ?: return@launch
+            runCatching { api.getSleepBeds() }.onSuccess { _sleepBeds.value = it }
+        }
+    }
+
+    fun startSleep(minutes: Int, bed: SleepBed?) = playbackManager.startSleepMode(minutes.toFloat(), bed?.streamUrl)
+    fun extendSleep() = playbackManager.extendSleepMode(15f)
+    fun cancelSleep() = playbackManager.cancelSleepMode()
+    fun stopSleepBed() = playbackManager.bedStop()
 
     fun formatTime(ms: Long): String {
         val totalSeconds = ms / 1000

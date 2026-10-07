@@ -249,6 +249,12 @@ class PlaybackManager @Inject constructor(
     private val _bedPlaying = MutableStateFlow(false)
     val bedPlaying: StateFlow<Boolean> = _bedPlaying
     private var sleepTimerJob: Job? = null
+    // #3714: when the armed sleep fade STARTS (wall clock), null when none is
+    // armed or it has finished; the app's sleep button reads it, whoever armed it.
+    private val _sleepEndsAtMs = MutableStateFlow<Long?>(null)
+    val sleepEndsAtMs: StateFlow<Long?> = _sleepEndsAtMs
+    private var sleepFadeSeconds = SleepFade.DEFAULT_FADE_SECONDS
+    private var sleepBedFadeTo: Float? = null
 
     /** Synthetic ids for non-catalog queue items (DJ voice breaks, #431). */
     private var nextSyntheticTrackId: Int = -1
@@ -1369,6 +1375,9 @@ class PlaybackManager @Inject constructor(
      */
     fun startSleepTimer(minutes: Float, fadeSeconds: Int, bedFadeTo: Float? = null) {
         sleepTimerJob?.cancel()
+        sleepFadeSeconds = fadeSeconds
+        sleepBedFadeTo = bedFadeTo
+        _sleepEndsAtMs.value = System.currentTimeMillis() + (minutes * 60_000).toLong().coerceAtLeast(0)
         sleepTimerJob = scope.launch {
             delay((minutes * 60_000).toLong().coerceAtLeast(0))
             val ctrl = controller ?: return@launch
@@ -1384,6 +1393,7 @@ class PlaybackManager @Inject constructor(
             }
             PlayerHooks.notePause("sleep_timer")  // #3552
             controller?.pause()
+            _sleepEndsAtMs.value = null
         }
     }
 
@@ -1391,7 +1401,36 @@ class PlaybackManager @Inject constructor(
     fun cancelSleepTimer() {
         sleepTimerJob?.cancel()
         sleepTimerJob = null
+        _sleepEndsAtMs.value = null
         applyVolumeForCurrentKind()
+    }
+
+    /**
+     * The app's sleep button (#3714): keep the current book playing (resuming
+     * it where it is if paused), then after [minutes] fade it out INTO [bedUrl]
+     * (silent until the fade, then up to [SleepFade.BED_VOLUME]), or into
+     * silence when [bedUrl] is null. Same engine as dj_sleep_start.
+     */
+    fun startSleepMode(minutes: Float, bedUrl: String?) {
+        if (!isPlaying.value) resume()
+        if (bedUrl != null) bedPlay(SleepFade.resolveUrl(bedUrl, apiHolder.baseUrl), 0f)
+        startSleepTimer(minutes, SleepFade.DEFAULT_FADE_SECONDS, if (bedUrl != null) SleepFade.BED_VOLUME else null)
+    }
+
+    /** Push the armed fade [minutes] later, undoing any fade already under way. */
+    fun extendSleepMode(minutes: Float) {
+        val endsAt = _sleepEndsAtMs.value ?: return
+        val leftMin = (endsAt - System.currentTimeMillis()).coerceAtLeast(0) / 60_000f
+        val bedTo = sleepBedFadeTo
+        cancelSleepTimer()
+        if (bedTo != null) bedPlayer?.volume = 0f
+        startSleepTimer(leftMin + minutes, sleepFadeSeconds, bedTo)
+    }
+
+    /** Cancel the sleep button's timer; a bed still waiting silently for the crossfade goes too. */
+    fun cancelSleepMode() {
+        cancelSleepTimer()
+        if (bedPlayer?.volume == 0f) bedStop()
     }
 
     /** [source] says who asked (#3552): it rides the pause_source client log. */

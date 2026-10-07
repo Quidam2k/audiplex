@@ -6,6 +6,14 @@ package com.audiplex.app.playback
  */
 object SleepFade {
 
+    /** #3714: the sleep button's fade length and bed level, matching dj_sleep_start's defaults. */
+    const val DEFAULT_FADE_SECONDS = 120
+    const val BED_VOLUME = 0.5f
+
+    /** Whole minutes until [endsAtMs], rounded up so "1 min" shows until it starts; never negative. */
+    fun minutesLeft(endsAtMs: Long, nowMs: Long): Int =
+        ((endsAtMs - nowMs).coerceAtLeast(0) + 59_999).div(60_000).toInt()
+
     /**
      * Volumes at step [i] of [steps]: the main player ramps linearly from
      * [mainStart] to 0; when [bedTarget] is set the bed ramps linearly from

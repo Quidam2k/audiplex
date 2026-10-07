@@ -46,6 +46,9 @@ interface AudiplexApi {
     @GET("api/library/books/{id}")
     suspend fun getBook(@Path("id") id: Int): BookDetail
 
+    @GET("api/library/sleep-beds")
+    suspend fun getSleepBeds(): List<SleepBed>  // #3714
+
     @GET("api/library/authors")
     suspend fun getAuthors(@Query("category") category: String? = null): List<AuthorSchema>
 

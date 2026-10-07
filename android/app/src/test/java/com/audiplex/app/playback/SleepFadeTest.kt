@@ -50,4 +50,13 @@ class SleepFadeTest {
         assertEquals("http://solace:8100/api/stream/7", SleepFade.resolveUrl("/api/stream/7", "http://solace:8100/"))
         assertEquals("http://solace:8100/api/stream/7", SleepFade.resolveUrl("api/stream/7", "http://solace:8100"))
     }
+
+    @Test
+    fun minutesLeftRoundsUpAndNeverGoesNegative() {  // #3714
+        assertEquals(30, SleepFade.minutesLeft(30 * 60_000L, 0))
+        assertEquals(30, SleepFade.minutesLeft(30 * 60_000L - 1, 0))
+        assertEquals(1, SleepFade.minutesLeft(1_000, 0))
+        assertEquals(0, SleepFade.minutesLeft(0, 0))
+        assertEquals(0, SleepFade.minutesLeft(0, 5_000))
+    }
 }

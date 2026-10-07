@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.Forward30
 import androidx.compose.material.icons.filled.MusicNote
@@ -80,6 +81,23 @@ fun PlayerScreen(
     val positionMs by viewModel.positionMs.collectAsState()
     val durationMs by viewModel.durationMs.collectAsState()
     val chapterIndex by viewModel.currentChapterIndex.collectAsState()
+    val sleepMinutesLeft by viewModel.sleepMinutesLeft.collectAsState()
+    val bedPlaying by viewModel.bedPlaying.collectAsState()
+    val sleepBeds by viewModel.sleepBeds.collectAsState()
+    var showSleep by remember { mutableStateOf(false) }
+
+    if (showSleep) {
+        SleepDialog(
+            beds = sleepBeds,
+            minutesLeft = sleepMinutesLeft,
+            bedPlaying = bedPlaying,
+            onStart = { minutes, bed -> viewModel.startSleep(minutes, bed) },
+            onExtend = { viewModel.extendSleep() },
+            onCancel = { viewModel.cancelSleep() },
+            onStopBed = { viewModel.stopSleepBed() },
+            onDismiss = { showSleep = false },
+        )
+    }
 
     Column(
         modifier = Modifier.fillMaxSize(),
@@ -90,6 +108,20 @@ fun PlayerScreen(
             navigationIcon = {
                 IconButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                }
+            },
+            actions = {
+                // #3714: sleep button. Tinted while a fade is armed or the bed plays.
+                if (kind != null) {
+                    IconButton(onClick = { viewModel.loadSleepBeds(); showSleep = true }) {
+                        Icon(
+                            Icons.Default.Bedtime,
+                            contentDescription = "Sleep",
+                            tint = if (sleepMinutesLeft != null || bedPlaying)
+                                MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             },
             colors = TopAppBarDefaults.topAppBarColors(

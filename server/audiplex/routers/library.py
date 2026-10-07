@@ -11,6 +11,7 @@ from audiplex.config import get_settings
 from audiplex.database import get_db
 from audiplex.models import Book, User
 from audiplex.scanner import scan_library
+from audiplex.sleep_beds import find_beds
 from audiplex.schemas import (
     AuthorSchema,
     BookDetail,
@@ -40,6 +41,13 @@ def list_books(
     if category:
         query = query.filter(Book.category == category)
     return query.order_by(Book.title).all()
+
+
+@router.get("/sleep-beds")
+def list_sleep_beds(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Beds the app's sleep button can fade into (#3714), default first."""
+    return [{"id": b.id, "title": b.title, "stream_url": f"/api/stream/{b.id}"}
+            for b in find_beds(db)]
 
 
 @router.get("/books/{book_id}", response_model=BookDetail)

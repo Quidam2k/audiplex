@@ -3,6 +3,14 @@ package com.audiplex.app.data.api
 import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
 
+// #3714: a bed the sleep button can fade into (default first).
+@JsonClass(generateAdapter = true)
+data class SleepBed(
+    val id: Int,
+    val title: String,
+    @Json(name = "stream_url") val streamUrl: String
+)
+
 // ----- Auth -----
 
 @JsonClass(generateAdapter = true)
