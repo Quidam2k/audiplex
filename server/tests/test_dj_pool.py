@@ -144,11 +144,14 @@ def test_top_up_updates_played_this_session(tmp_pool):
         upcoming_track_ids=[1, 10],  # Only 1 ahead, need 3 more
     )
 
-    # Second top_up should skip the picks from the first
+    # Second top_up should skip the picks from the first. The one queued track
+    # is one of result1's picks: picks are random (#7108), so a fixed id here
+    # could be the only unpicked track and leave nothing to pick (#7202).
     result2 = tmp_pool.top_up(
         current_track_id=10,
-        upcoming_track_ids=[10, 20],  # Still only 1 ahead
+        upcoming_track_ids=[10, result1["picks"][0]],  # Still only 1 ahead
     )
+    assert result2["picks"]
 
     # result2's picks should not include result1's picks (unless coincidental)
     played = set(tmp_pool.state["played_this_session"])
