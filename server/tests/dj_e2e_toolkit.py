@@ -291,6 +291,20 @@ async def toolkit_checks(dj, fake: FakeRenderer, ids: list[int]) -> None:  # #28
     check(any(ln.get("paused") for ln in st["lanes"]), "the server pool reports the paused lane")
     out = await dj.dj_pool_set(sources=[{"kind": "vibes", "query": "x"}])
     check("REFUSED" in out and "'bucket'" in out and "or 'tracks'" in out, f"an unknown kind names the valid ones: {out[:160]!r}")  # #2806 #3912
+    fake.queue, fake.index, fake.playing = [a, c], 1, True  # #3912: c just started, a played before it
+    fake.report()
+    out = await dj.dj_what_was_that()
+    check(out.startswith("That was") and f"(track {a})" in out and "next 3 times" in out,
+          f"dj_what_was_that names the last song: {out!r}")
+    got = (await dj._get(f"/api/playback/callouts?ids={a}"))["tracks"][str(a)]
+    check(got["callout"] and got["why"] == "you asked what this was", f"...and the DJ will call it out: {got}")
+    out = await dj.dj_callouts()
+    check("- alpha: auto (by folder)" in out in out and "named 3 more" in out, f"dj_callouts shows lanes: {out!r}")
+    out = await dj.dj_callouts("beta", "callout")
+    check(out == "beta: callout.", f"dj_callouts sets one lane: {out!r}")
+    out = await dj.dj_callouts("zzz", "silent")
+    check(out.startswith("REFUSED: 'zzz' matches 0"), f"an unknown lane is refused: {out!r}")
+    await dj.dj_pause()
     await dj.dj_pool_stop()
 
 
@@ -461,6 +475,7 @@ def main() -> int:
         "AUDIPLEX_LINK_LOG": str(tmp / "link.jsonl"),
         "AUDIPLEX_DIAG_LOG": str(tmp / "diag.jsonl"),
         "AUDIPLEX_DJ_POOL_STATE": str(tmp / "pool.json"),
+        "AUDIPLEX_DJ_CALLOUTS_STATE": str(tmp / "callouts.json"),  # #3912
         "AUDIPLEX_CHIME_CACHE_DIR": str(tmp / "chimes"),
     }
     log = open(tmp / "server.log", "w", encoding="utf-8")

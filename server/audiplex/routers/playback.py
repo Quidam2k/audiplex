@@ -42,6 +42,7 @@ client simply re-issues.
 """
 
 import json
+import re  # #3912
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -1666,6 +1667,85 @@ def owner_history(
             "loudness_lufs": t.loudness_lufs,
         })
     return out
+
+
+def _callout_tracks(db: Session, ids: list[int]) -> dict[int, dict]:  # #3912
+    from audiplex.models import Artist, Track
+
+    rows = (db.query(Track.id, Track.title, Track.file_path, Artist.name)
+            .outerjoin(Artist, Artist.id == Track.artist_id).filter(Track.id.in_(ids)).all())
+    return {r[0]: {"id": r[0], "title": r[1], "path": r[2], "artist": r[3]} for r in rows}
+
+
+def _lane_of(track_id: int) -> str | None:  # #3912: the pool lane this track was picked from
+    from audiplex.dj_pool import get_pool
+
+    labels = get_pool().state.get("source_labels") or {}
+    return labels.get(track_id) or labels.get(str(track_id))
+
+
+@router.get("/callouts", tags=["dj_pool"])
+def get_callouts(
+    ids: str = Query(""),
+    consume: bool = Query(False),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """#3912: should the DJ NAME these songs? {tracks: {id: {callout, why, lane,
+    title, artist}}, sources, exceptions}. consume=true counts one play off any
+    "what was that?" exception that matched (the bridge watcher sets it)."""
+    from audiplex import dj_callouts
+
+    wanted = [int(x) for x in re.findall(r"\d+", ids)]
+    state = dj_callouts.load_state()
+    tracks = _callout_tracks(db, wanted) if wanted else {}
+    out, changed = {}, False
+    for tid in wanted:
+        t = tracks.get(tid) or {"id": tid, "path": None, "artist": None, "title": None}
+        out[tid] = {**dj_callouts.decide(t, _lane_of(tid), state), "title": t["title"], "artist": t["artist"]}
+        if consume and out[tid].get("exception"):
+            changed |= dj_callouts.consume(state, t)
+    if changed:
+        dj_callouts.save_state(state)
+    return {"tracks": out, "sources": state["sources"], "exceptions": state["exceptions"]}
+
+
+@router.put("/callouts/source", tags=["dj_pool"])
+def put_callout_source(body: dict, user: User = Depends(get_current_user)):
+    """#3912: {source: <pool lane label>, mode: callout|silent|auto}."""
+    from audiplex import dj_callouts
+
+    source = str(body.get("source") or "").strip()
+    if not source:
+        raise HTTPException(status_code=400, detail="source is required")
+    state = dj_callouts.load_state()
+    try:
+        mode = dj_callouts.set_source(state, source, str(body.get("mode") or ""))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    dj_callouts.save_state(state)
+    return {"source": source, "mode": mode or "auto", "sources": state["sources"]}
+
+
+@router.post("/callouts/exception", tags=["dj_pool"])
+def post_callout_exception(body: dict, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """#3912 "what was that?": {track_id, scope: track|artist} -> named the next few plays."""
+    from audiplex import dj_callouts
+
+    tid = int(body.get("track_id") or 0)
+    t = _callout_tracks(db, [tid]).get(tid)
+    if t is None:
+        raise HTTPException(status_code=404, detail=f"no track {tid}")
+    scope = str(body.get("scope") or "track")
+    key = str(tid) if scope == "track" else (t["artist"] or "")
+    label = f"{t['title']} - {t['artist']}" if scope == "track" else (t["artist"] or "")
+    state = dj_callouts.load_state()
+    try:
+        entry = dj_callouts.add_exception(state, scope, key, label)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    dj_callouts.save_state(state)
+    return {"exception": entry, "track": t}
 
 
 @router.get("/pair-notes", tags=["dj_library"])

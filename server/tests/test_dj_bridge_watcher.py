@@ -55,7 +55,7 @@ def test_counts_transitions_and_fires_at_target(monkeypatch):
     r3 = c.observe(make_state(3, "C", "CC", position_ms=182000), SETTINGS_ON, 1200.0)
     assert r3 is not None
     assert r3["mode"] == "outro"
-    assert r3["prev"] == {"title": "B", "artist": "BB"}
+    assert r3["prev"] == {"id": 2, "title": "B", "artist": "BB"}  # #3912 id
     assert r3["now"]["title"] == "C"
     assert r3["source"] == "audiplex"
     assert c.counter == 0 and c.armed is None
@@ -170,7 +170,7 @@ def test_skipped_armed_song_fires_intro_on_next(monkeypatch):  # #5986
     c = _armed(monkeypatch)
     r = c.observe(make_state(3, "C", "CC", position_ms=2000), SETTINGS_ON, 1010.0)
     assert r["mode"] == "intro"
-    assert r["prev"] == {"title": "B", "artist": "BB"} and r["now"]["title"] == "C"
+    assert r["prev"] == {"id": 2, "title": "B", "artist": "BB"} and r["now"]["title"] == "C" # #3912
     assert c.armed is None and c.counter == 0
 
 
@@ -228,9 +228,9 @@ def test_intro_prev_falls_back_to_the_queue(monkeypatch):  # #6038 watcher resta
     c = BridgeCounter()
     state = make_state(3, "C", "CC", queue=_q((1, "A"), (-7, "clip"), (3, "C"), (4, "D")), queue_index=2)
     p = c._payload("intro", state["track"], None, state, 1000.0)
-    assert p["prev"] == {"title": "A", "artist": "AA"} and p["next"]["title"] == "D"
+    assert p["prev"] == {"id": 1, "title": "A", "artist": "AA"} and p["next"]["title"] == "D" # #3912
     remembered = c._payload("intro", state["track"], {"title": "Z", "artist": "ZZ"}, state, 1000.0)
-    assert remembered["prev"] == {"title": "Z", "artist": "ZZ"}  # what was actually heard wins
+    assert remembered["prev"] == {"id": None, "title": "Z", "artist": "ZZ"}  # what was actually heard wins #3912
 
 
 class _Resp:  # #6038
@@ -257,3 +257,32 @@ def test_facts_carry_album_artist():  # #6038 Pantheon needs it to tell a folder
     assert dbw.fetch_facts(_Client(folder), "http://x", "", 5) == {
         "album_artist": "faster", "album": "On Playa", "year": 1999}
     assert "album_artist" not in dbw.fetch_facts(_Client({"title": "Kick", "year": 1987}), "http://x", "", 5)
+
+
+class _CalloutClient:  # #3912
+    def __init__(self, tracks=None, fail=False):
+        self.tracks, self.fail, self.params = tracks or {}, fail, None
+
+    def get(self, url, headers=None, timeout=None, params=None):
+        if "/callouts" in url:
+            if self.fail:
+                raise OSError("down")
+            self.params = params
+            return _Resp({"tracks": self.tracks})
+        return _Resp({"album_id": 9} if "/tracks/" in url else {"title": "LP"})
+
+
+def test_enrich_flags_each_beat_and_consumes():  # #3912
+    payload = {"prev": {"id": 1}, "now": {"id": 2}, "next": {"id": 3}, "after": {"id": 4}}
+    client = _CalloutClient({"1": {"callout": True, "why": "whole album: X"}, "2": {"callout": False, "why": "picks"},
+                             "3": {"callout": True, "why": "you asked what this was"}})
+    p = dbw.enrich_payload(payload, client, "http://x", "")
+    assert client.params == {"ids": "1,2,3,4", "consume": "true"}
+    assert p["prev"]["callout"] is True and p["now"]["callout"] is False and p["next"]["callout"] is True
+    assert p["now"]["callout_why"] == "picks" and "callout" not in p["after"]
+
+
+def test_enrich_without_callouts_keeps_old_payload(monkeypatch, tmp_path):  # #3912 server down = name every song, as before
+    monkeypatch.setenv("DJ_BRIDGE_LOG", str(tmp_path / "bridge.log"))  # not the live log
+    p = dbw.enrich_payload({"now": {"id": 2}, "next": {"id": 3}}, _CalloutClient(fail=True), "http://x", "")
+    assert "callout" not in p["now"] and "callout" not in p["next"]

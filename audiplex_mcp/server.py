@@ -1466,6 +1466,73 @@ async def dj_pair_notes(track_a: int = 0, track_b: int = 0, limit: int = 20) -> 
     )
 
 
+WHAT_WAS_THAT_RECENT_S = 45  # #3912: this early into a song, "what was that?" means the last one
+
+
+@mcp.tool()
+async def dj_what_was_that(which: str = "auto", scope: str = "track") -> str:
+    """Todd asked "what was that?" (#3912). Names the song and makes the DJ
+    call it out (artist + title) the next 3 times it plays, until he knows it.
+    which: 'last' (the song before this one), 'now', or 'auto' (= last if the
+    current song started under 45 s ago, else now). scope: 'track' or 'artist'
+    (name every song by that artist for the next 3 plays). Say the answer to Todd."""
+    state = await _get("/api/playback/state")
+    now = state.get("track") if (state.get("track") or {}).get("id", 0) > 0 else None
+    prev, _, _ = await _prev_next(state)
+    if which == "auto":
+        which = "last" if prev and ((state.get("position_ms") or 0) / 1000 < WHAT_WAS_THAT_RECENT_S or not now) else "now"
+    pick = prev if which == "last" else now
+    if not pick or not pick.get("id"):
+        return f"Nothing to name: no {'previous' if which == 'last' else 'current'} song."
+    try:
+        r = await _post("/api/playback/callouts/exception", {"track_id": pick["id"], "scope": scope})
+    except httpx.HTTPStatusError as e:
+        return f"Couldn't record it: {e.response.status_code} {e.response.text[:200]}"
+    t = r["track"]
+    said = f"'{t['title']}' by {t['artist']}" if t.get("artist") else f"'{t['title']}'"
+    who = f"every {t['artist']} song" if scope == "artist" else "it"
+    out = [f"{'That was' if which == 'last' else 'This is'} {said} (track {t['id']}).",
+           f"The DJ will name {who} the next {r['exception']['remaining']} times it plays."]
+    if which == "last" and now:
+        out.append(f"Playing now: '{now.get('title')}' by {now.get('artist')}.")
+    return "\n".join(out)
+
+
+@mcp.tool()
+async def dj_callouts(source: str = "", mode: str = "") -> str:
+    """Which songs the DJ names on a bridge (#3912). Whole-album folders are
+    called out (deep cuts); Todd's faster/slower picks, hit countdowns and
+    compilations stay quiet. No args = show the current pool lanes with their
+    setting and any "what was that?" exceptions. source + mode sets one lane:
+    source = part of a lane label from dj_pool_status, mode = 'callout',
+    'silent' or 'auto' (back to the folder default)."""
+    info = await _get("/api/playback/callouts")
+    pool = await _get("/api/playback/pool")
+    lanes = [ln["label"] for ln in pool.get("lanes") or []]
+    if not source:
+        out = ["DJ call-outs (#3912): whole albums are named, Todd's picks/hits stay quiet."]
+        for ln in lanes:
+            out.append(f"- {ln}: {info['sources'].get(ln, 'auto (by folder)')}")
+        for ln, m in info["sources"].items():
+            if ln not in lanes:
+                out.append(f"- {ln}: {m} (not in the current pool)")
+        if not lanes and not info["sources"]:
+            out.append("No pool lanes and no per-source settings.")
+        for ex in info["exceptions"]:
+            out.append(f"Asked about ({ex['scope']}): {ex['label']} - named {ex['remaining']} more time(s).")
+        return "\n".join(out)
+    known = list(dict.fromkeys(lanes + list(info["sources"])))
+    hits = [ln for ln in known if ln.lower() == source.lower()] or [ln for ln in known if source.lower() in ln.lower()]
+    if len(hits) != 1:
+        return (f"REFUSED: '{source}' matches {len(hits)} lane(s)"
+                + (": " + "; ".join(hits) if hits else "") + ". Lanes: " + ("; ".join(known) or "none"))
+    try:
+        r = await _put("/api/playback/callouts/source", {"source": hits[0], "mode": mode})
+    except httpx.HTTPStatusError as e:
+        return f"REFUSED: {e.response.text[:200]}"
+    return f"{hits[0]}: {r['mode']}."
+
+
 @mcp.tool()
 async def dj_set_kind(kind: str, track_ids: list[int] | None = None, folder: str = "") -> str:
     """Mark tracks as music | podcast | clip | ambient (#ride0928). Only 'music'

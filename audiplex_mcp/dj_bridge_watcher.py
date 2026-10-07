@@ -168,7 +168,7 @@ class BridgeCounter:
     @classmethod  # #6038
     def _prev_item(cls, state):  # #6038 the song before this one in the queue
         items = cls._music_items(state, ahead=False)  # #6038
-        return {"title": items[0].get("title"), "artist": items[0].get("artist")} if items else None  # #6038
+        return {"id": items[0].get("id"), "title": items[0].get("title"), "artist": items[0].get("artist")} if items else None  # #6038 #3912 id -> callout
 
     def _reset_after_fire(self, settings):
         self.counter = 0
@@ -178,7 +178,7 @@ class BridgeCounter:
         self._maybe_redraw(settings)  # redraw target after every fire
 
     def _payload(self, mode, track, prev, state, now):  # #5986
-        prev_payload = {"title": prev.get("title"), "artist": prev.get("artist")} if prev else None
+        prev_payload = {"id": prev.get("id"), "title": prev.get("title"), "artist": prev.get("artist")} if prev else None  # #3912 id -> callout
         if prev_payload is None:  # #6038 watcher just started: the queue still knows what played before
             prev_payload = self._prev_item(state)  # #6038
         detected_dt = datetime.fromtimestamp(now, tz=timezone.utc)
@@ -324,11 +324,35 @@ def fetch_facts(client, base_url, token, track_id):  # #5986
     return facts
 
 
+def fetch_callouts(client, base_url, token, ids):  # #3912
+    """{id: {callout, why}} for the bridge's songs: name the deep cuts, not the
+    songs Todd knows. consume=true counts a play off any "what was that?"
+    exception. Any failure = {} and the bridge names every song, as before."""
+    ids = [i for i in ids if isinstance(i, int) and i > 0]
+    if not ids:
+        return {}
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        r = client.get(f"{base_url}/api/playback/callouts", headers=headers, timeout=FACTS_TIMEOUT_S,
+                       params={"ids": ",".join(map(str, ids)), "consume": "true"})
+        r.raise_for_status()
+        return {int(k): v for k, v in (r.json().get("tracks") or {}).items()}
+    except Exception as exc:
+        log_line(f"callouts fetch failed: {exc!r}")
+        return {}
+
+
 def enrich_payload(payload, client, base_url, token):  # #5986
     for key in ("now", "next"):
         item = payload.get(key)
         if item:
             item["facts"] = fetch_facts(client, base_url, token, item.get("id"))
+    beats = [payload.get(k) for k in ("prev", "now", "next", "after") if payload.get(k)]  # #3912
+    calls = fetch_callouts(client, base_url, token, list(dict.fromkeys(b.get("id") for b in beats)))  # #3912
+    for item in beats:  # #3912
+        c = calls.get(item.get("id"))
+        if c:
+            item["callout"], item["callout_why"] = bool(c.get("callout")), c.get("why")
     return payload
 
 

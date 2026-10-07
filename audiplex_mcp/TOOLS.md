@@ -75,6 +75,8 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_track_ratings` — his own 1-5 star ratings from the phone.
 - `dj_track_stats` — completion rates and where skips land.
 - `dj_pair_note` / `dj_pair_notes` — write / read DJ notes on a track or a track_a -> track_b pairing (kept across rides).
+- `dj_what_was_that` — Todd asked "what was that?": names the last (or current) song and has the DJ name it the next 3 plays (#3912).
+- `dj_callouts` — which songs a DJ bridge names: whole-album deep cuts yes, Todd's faster/slower picks and hits no; show or set per pool lane (#3912).
 
 ## Themed buckets
 - `dj_bucket_list` / `dj_bucket_show` — list buckets; show one.
