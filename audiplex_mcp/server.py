@@ -61,6 +61,8 @@ safe to extend to other stream-carrying commands.
 import asyncio
 import contextlib
 import datetime
+import functools  # #3924
+import inspect  # #3924
 import json
 import os
 import re
@@ -95,6 +97,44 @@ def _load_token() -> str:
 AUDIPLEX_TOKEN = _load_token()
 
 mcp = FastMCP("audiplex-dj")
+
+# #3924: on the 10/6 ride dj_pool_set and dj_search hung past Claude Code's 120 s
+# background move and Todd rode in silence. Every tool now answers within its
+# deadline, saying it timed out, so the persona can start music another way.
+TOOL_DEADLINE_S = 45.0  # #3924
+TOOL_DEADLINES = {  # #3924: tools that legitimately run longer; None = no deadline
+    "dj_ingest": None,  # yt-dlp download, 180 s HTTP
+    "dj_announce": 110.0,  # 20 s speech gate + TTS render
+    "dj_outro": 110.0,
+    "dj_spec_note": 110.0,
+}
+
+
+def _with_deadline(fn):  # #3924
+    limit = TOOL_DEADLINES.get(fn.__name__, TOOL_DEADLINE_S)
+    if limit is None or not inspect.iscoroutinefunction(fn):
+        return fn
+
+    @functools.wraps(fn)
+    async def guarded(*args, **kwargs):
+        try:
+            return await asyncio.wait_for(fn(*args, **kwargs), limit)
+        except asyncio.TimeoutError:
+            return (f"TIMED OUT after {limit:g}s in {fn.__name__} (#3924): Audiplex is slow or "
+                    "stalled, and whatever this call was doing may be half done. To get music "
+                    "going now, dj_play_now a bucket's track ids (dj_bucket_show) instead of retrying.")
+    return guarded
+
+
+_mcp_tool = mcp.tool  # #3924
+
+
+def _tool_with_deadline(*args, **kwargs):  # #3924: every @mcp.tool() gets the deadline
+    register = _mcp_tool(*args, **kwargs)
+    return lambda fn: register(_with_deadline(fn))
+
+
+mcp.tool = _tool_with_deadline  # #3924
 
 
 def _headers() -> dict[str, str]:

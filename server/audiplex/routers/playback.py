@@ -970,6 +970,87 @@ def disarm_pool_outro(user: User = Depends(get_current_user)):
     return {"disarmed": dj_triggers.disarm_outro()}
 
 
+@router.post("/ride-fallback", tags=["dj_pool"])
+async def ride_fallback_start(
+    body: dict,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Start ride music without the DJ persona (#3924): Pantheon's bike sweep
+    calls this when a ride started but nothing plays ~90 s later.
+
+    body: {clip_id} or {say} (the announce, rendered here like the outro),
+    optional title, duration_seconds, spec (default todd-ride-mix).
+    Plays the announce now, then about 10 s later starts the pool on the
+    spec's buckets only. 200 {started: false} when music is already playing
+    or a pool runs; 409 when a stop is latched or the spec has no buckets;
+    503 when {say} cannot be rendered."""
+    from audiplex import dj_triggers, ride_fallback as rf
+    from audiplex.dj_pool import get_pool
+    from audiplex.playback_bus import _pool_session
+
+    def refuse(reason: str, code: int = 200):
+        rf.last.clear()
+        rf.last.update({"started": False, "reason": reason, "phase": "announce", "at": time.time()})
+        return JSONResponse({"started": False, "reason": reason}, status_code=code)
+
+    if stop_controller.latch_active(time.time()):
+        return refuse(f"a stop is latched: {stop_controller.latch['reason']}", 409)
+    if (bus.get_state() or {}).get("playing"):
+        return refuse("already playing")
+    if get_pool().is_active():
+        return refuse("a DJ pool is already running")
+    spec = str(body.get("spec") or rf.RIDE_SPEC)
+    lanes = rf.ride_bucket_lanes(db, spec)
+    if not lanes:
+        return refuse(f"no ride buckets on spec '{spec}' (add one with dj_bucket_load)", 409)
+
+    title = body.get("title") or "Ride music"
+    clip_id, duration = body.get("clip_id"), body.get("duration_seconds")
+    if clip_id is None:
+        say = body.get("say")
+        if not isinstance(say, str) or not say.strip():
+            raise HTTPException(status_code=400, detail="clip_id or say required")
+        try:
+            clip = await dj_triggers.render_say(say.strip(), title)
+        except Exception as e:
+            return refuse(f"announce render failed: {e}", 503)
+        clip_id, duration = clip["clip_id"], clip["duration_seconds"]
+    try:
+        clip_id = int(clip_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="clip_id must be an integer")
+
+    payload = {**dj_triggers._announce_payload(clip_id, title, duration), "mode": "now"}
+    rec = await bus.enqueue("announce", payload, source=f"{user.username}/ride_fallback")
+    delay = max(rf.START_GAP_S, float(duration or 0) + 1.0)  # never cut the announce
+
+    def start_pool() -> dict:
+        session = _pool_session()
+        try:
+            return set_pool({"lanes": lanes, "balance": "even", "ahead": rf.POOL_AHEAD,
+                             "refill_at": rf.POOL_REFILL_AT, "exclude_recent_hours": 12,
+                             "prime_current_id": 0}, db=session, user=user)
+        finally:
+            session.close()
+
+    rf.schedule(rf.start_after_announce(
+        bus, start_pool, delay, latched=lambda: stop_controller.latch_active(time.time())))
+    counts = {label: len(ids) for label, ids in lanes.items()}
+    rf.last.clear()
+    rf.last.update({"started": True, "phase": "announce", "announce_command_id": rec.id,
+                    "music_in_s": delay, "lanes": counts, "at": time.time()})
+    return {"started": True, "announce_command_id": rec.id, "music_in_s": delay, "lanes": counts}
+
+
+@router.get("/ride-fallback", tags=["dj_pool"])
+def ride_fallback_status(user: User = Depends(get_current_user)):
+    """The latest ride-fallback outcome (#3924), {} if none since the server started."""
+    from audiplex import ride_fallback as rf
+
+    return dict(rf.last)
+
+
 @router.patch("/pool/chimes", tags=["dj_pool"])
 def set_pool_chimes(body: dict, user: User = Depends(get_current_user)):
     """Chime settings (#5499): {enabled?, volume? 0-1, hour_strikes?}."""
