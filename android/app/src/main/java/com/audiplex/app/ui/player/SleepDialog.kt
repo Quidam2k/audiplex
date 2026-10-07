@@ -27,25 +27,32 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.audiplex.app.data.api.SleepBed
+import com.audiplex.app.playback.SleepFade
+
+private const val TEST_MINUTES = 1
 
 /** #3714 in-app sleep button */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SleepDialog(
     beds: List<SleepBed>,
+    defaultBedId: Int?,
+    bedsError: String?,
     minutesLeft: Int?,
     bedPlaying: Boolean,
-    onStart: (minutes: Int, bed: SleepBed?) -> Unit,
+    onRetryBeds: () -> Unit,
+    onStart: (minutes: Int, bed: SleepBed?, fadeSeconds: Int) -> Unit,
     onExtend: () -> Unit,
     onCancel: () -> Unit,
     onStopBed: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var minutes by rememberSaveable { mutableStateOf(30) }
-    // Keyed on the default bed: the list loads after the dialog opens, and the
-    // default must follow it instead of sticking on Silence.
-    var selectedBedId by rememberSaveable(beds.firstOrNull()?.id) {
-        mutableStateOf<Int?>(beds.firstOrNull()?.id)
+    // Keyed on the default bed (last used, else first; #3953): the list loads
+    // after the dialog opens, and the default must follow it instead of
+    // sticking on Silence.
+    var selectedBedId by rememberSaveable(defaultBedId) {
+        mutableStateOf<Int?>(defaultBedId)
     }
 
     AlertDialog(
@@ -72,6 +79,14 @@ fun SleepDialog(
                     ) {
                         Text("Keep the book playing, then fade into:")
 
+                        // #3953: never let a failed bed list pass as a choice of Silence.
+                        if (bedsError != null) {
+                            Text("Couldn't load sleep beds: $bedsError")
+                            TextButton(onClick = onRetryBeds) {
+                                Text("Retry")
+                            }
+                        }
+
                         FlowRow(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -83,6 +98,12 @@ fun SleepDialog(
                                     label = { Text("$duration min") },
                                 )
                             }
+                            // #3953: hear the whole handoff before bed (1 min + short fade).
+                            FilterChip(
+                                selected = minutes == TEST_MINUTES,
+                                onClick = { minutes = TEST_MINUTES },
+                                label = { Text("Test: 1 min") },
+                            )
                         }
 
                         Column(Modifier.selectableGroup()) {
@@ -157,11 +178,12 @@ fun SleepDialog(
                             onStart(
                                 minutes,
                                 beds.firstOrNull { it.id == selectedBedId },
+                                if (minutes == TEST_MINUTES) SleepFade.TEST_FADE_SECONDS else SleepFade.DEFAULT_FADE_SECONDS,
                             )
                             onDismiss()
                         }
                     ) {
-                        Text("Start")
+                        Text(if (beds.none { it.id == selectedBedId }) "Start (silence)" else "Start")
                     }
                 }
             }

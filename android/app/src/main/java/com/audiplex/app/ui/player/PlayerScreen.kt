@@ -84,14 +84,19 @@ fun PlayerScreen(
     val sleepMinutesLeft by viewModel.sleepMinutesLeft.collectAsState()
     val bedPlaying by viewModel.bedPlaying.collectAsState()
     val sleepBeds by viewModel.sleepBeds.collectAsState()
+    val sleepBedsError by viewModel.sleepBedsError.collectAsState()
+    val defaultSleepBedId by viewModel.defaultSleepBedId.collectAsState()
     var showSleep by remember { mutableStateOf(false) }
 
     if (showSleep) {
         SleepDialog(
             beds = sleepBeds,
+            defaultBedId = defaultSleepBedId,
+            bedsError = sleepBedsError,
             minutesLeft = sleepMinutesLeft,
             bedPlaying = bedPlaying,
-            onStart = { minutes, bed -> viewModel.startSleep(minutes, bed) },
+            onRetryBeds = { viewModel.loadSleepBeds() },
+            onStart = { minutes, bed, fadeSeconds -> viewModel.startSleep(minutes, bed, fadeSeconds) },
             onExtend = { viewModel.extendSleep() },
             onCancel = { viewModel.cancelSleep() },
             onStopBed = { viewModel.stopSleepBed() },

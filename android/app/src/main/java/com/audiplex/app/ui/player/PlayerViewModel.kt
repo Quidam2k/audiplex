@@ -3,6 +3,7 @@ package com.audiplex.app.ui.player
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.audiplex.app.data.ApiServiceHolder
+import com.audiplex.app.data.SettingsStore
 import com.audiplex.app.data.api.BookDetail
 import com.audiplex.app.data.api.ChapterSchema
 import com.audiplex.app.data.api.SleepBed
@@ -28,7 +29,8 @@ import javax.inject.Inject
 @HiltViewModel
 class PlayerViewModel @Inject constructor(
     private val playbackManager: PlaybackManager,
-    private val apiHolder: ApiServiceHolder
+    private val apiHolder: ApiServiceHolder,
+    private val settingsStore: SettingsStore,
 ) : ViewModel() {
 
     val currentBook: StateFlow<BookDetail?> = playbackManager.currentBook
@@ -158,15 +160,34 @@ class PlayerViewModel @Inject constructor(
     ) { endsAt, _ -> endsAt?.let { SleepFade.minutesLeft(it, System.currentTimeMillis()) } }
         .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000), null)
 
+    // #3953: why the bed list did not load, null when it did. The dialog shows it
+    // instead of silently offering only Silence (10/6: a 404 left Todd in silence).
+    private val _sleepBedsError = MutableStateFlow<String?>(null)
+    val sleepBedsError: StateFlow<String?> = _sleepBedsError.asStateFlow()
+
+    /** #3953: the bed the dialog preselects: last used if still offered, else the first. */
+    val defaultSleepBedId: StateFlow<Int?> = combine(_sleepBeds, settingsStore.lastSleepBedId) { beds, last ->
+        SleepFade.defaultBedId(beds.map { it.id }, last)
+    }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000), null)
+
     /** Refresh the bed list when the dialog opens: a bed dropped into the library shows up. */
     fun loadSleepBeds() {
         viewModelScope.launch {
-            val api = apiHolder.api ?: return@launch
-            runCatching { api.getSleepBeds() }.onSuccess { _sleepBeds.value = it }
+            val api = apiHolder.api
+            if (api == null) {
+                _sleepBedsError.value = "no server configured"
+                return@launch
+            }
+            runCatching { api.getSleepBeds() }
+                .onSuccess { _sleepBeds.value = it; _sleepBedsError.value = null }
+                .onFailure { _sleepBedsError.value = it.message ?: it.javaClass.simpleName }
         }
     }
 
-    fun startSleep(minutes: Int, bed: SleepBed?) = playbackManager.startSleepMode(minutes.toFloat(), bed?.streamUrl)
+    fun startSleep(minutes: Int, bed: SleepBed?, fadeSeconds: Int = SleepFade.DEFAULT_FADE_SECONDS) {
+        if (bed != null) viewModelScope.launch { settingsStore.setLastSleepBedId(bed.id) }
+        playbackManager.startSleepMode(minutes.toFloat(), bed?.streamUrl, fadeSeconds)
+    }
     fun extendSleep() = playbackManager.extendSleepMode(15f)
     fun cancelSleep() = playbackManager.cancelSleepMode()
     fun stopSleepBed() = playbackManager.bedStop()

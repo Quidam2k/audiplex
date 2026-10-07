@@ -1379,21 +1379,18 @@ class PlaybackManager @Inject constructor(
         sleepBedFadeTo = bedFadeTo
         _sleepEndsAtMs.value = System.currentTimeMillis() + (minutes * 60_000).toLong().coerceAtLeast(0)
         sleepTimerJob = scope.launch {
-            delay((minutes * 60_000).toLong().coerceAtLeast(0))
-            val ctrl = controller ?: return@launch
-            val startVolume = ctrl.volume
-            val bedStart = bedPlayer?.volume ?: 0f
-            val steps = (fadeSeconds.coerceAtLeast(1) * 4).coerceAtLeast(1)
-            val stepDelayMs = (fadeSeconds * 1000L / steps).coerceAtLeast(50L)
-            for (i in 0..steps) {
-                val (main, bed) = SleepFade.levels(i, steps, startVolume, bedStart, bedFadeTo)
-                if (startVolume > 0f) setPlayerVolume(main)
-                if (bed != null) bedPlayer?.volume = bed
-                delay(stepDelayMs)
-            }
-            PlayerHooks.notePause("sleep_timer")  // #3552
-            controller?.pause()
-            _sleepEndsAtMs.value = null
+            val done = SleepFade.runTimer(  // #3953: the loop lives in SleepFade so it is unit-tested
+                minutes, fadeSeconds, bedFadeTo,
+                mainVolume = { controller?.volume },
+                bedVolume = { bedPlayer?.volume ?: 0f },
+                setMain = { setPlayerVolume(it) },
+                setBed = { bedPlayer?.volume = it },
+                pause = {
+                    PlayerHooks.notePause("sleep_timer")  // #3552
+                    controller?.pause()
+                },
+            )
+            if (done) _sleepEndsAtMs.value = null
         }
     }
 
@@ -1411,10 +1408,10 @@ class PlaybackManager @Inject constructor(
      * (silent until the fade, then up to [SleepFade.BED_VOLUME]), or into
      * silence when [bedUrl] is null. Same engine as dj_sleep_start.
      */
-    fun startSleepMode(minutes: Float, bedUrl: String?) {
+    fun startSleepMode(minutes: Float, bedUrl: String?, fadeSeconds: Int = SleepFade.DEFAULT_FADE_SECONDS) {
         if (!isPlaying.value) resume()
         if (bedUrl != null) bedPlay(SleepFade.resolveUrl(bedUrl, apiHolder.baseUrl), 0f)
-        startSleepTimer(minutes, SleepFade.DEFAULT_FADE_SECONDS, if (bedUrl != null) SleepFade.BED_VOLUME else null)
+        startSleepTimer(minutes, fadeSeconds, if (bedUrl != null) SleepFade.BED_VOLUME else null)
     }
 
     /** Push the armed fade [minutes] later, undoing any fade already under way. */

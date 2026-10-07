@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.floatPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -54,6 +55,7 @@ class SettingsStore @Inject constructor(
     // ~0.2 on top of it, so the effective ducked level is dial × 0.2.
     private val musicVolumeKey = floatPreferencesKey("music_volume")
     private val audiobookVolumeKey = floatPreferencesKey("audiobook_volume")
+    private val lastSleepBedIdKey = intPreferencesKey("last_sleep_bed_id")  // #3953
 
     override val serverUrl: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[serverUrlKey] ?: ""
@@ -139,6 +141,13 @@ class SettingsStore @Inject constructor(
         context.dataStore.edit { prefs ->
             prefs[audiobookVolumeKey] = volume.coerceIn(0f, 1f)
         }
+    }
+
+    /** #3953: the sleep bed last started, so the sleep dialog preselects it next time. */
+    val lastSleepBedId: Flow<Int?> = context.dataStore.data.map { prefs -> prefs[lastSleepBedIdKey] }
+
+    suspend fun setLastSleepBedId(id: Int) {
+        context.dataStore.edit { prefs -> prefs[lastSleepBedIdKey] = id }
     }
 
     suspend fun setServerUrl(url: String) {
