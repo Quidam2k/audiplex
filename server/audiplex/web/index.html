@@ -34,6 +34,7 @@
       <button data-tab="folders" class="tab">Folders</button>
       <button data-tab="playlists" class="tab">Playlists</button>
       <button data-tab="favorites" class="tab">Favorites</button>
+      <button data-tab="queue" class="tab">Queue</button>
       <button data-tab="videos" class="tab">Videos</button>
     </nav>
     <div id="crumbs" class="crumbs"></div>
@@ -41,6 +42,22 @@
     <div id="content"></div>
   </section>
 </main>
+
+<footer id="np" class="np" hidden aria-label="Now playing">
+  <div class="np-meta"><span id="np-title" class="title"></span><span id="np-sub" class="sub"></span></div>
+  <div class="np-seekrow">
+    <span id="np-pos" class="sub">0:00</span>
+    <input id="np-seek" type="range" min="0" max="0" value="0" step="1000" aria-label="Seek">
+    <span id="np-dur" class="sub">0:00</span>
+  </div>
+  <div class="np-controls">
+    <button id="np-prev" class="icon" title="Previous" aria-label="Previous">⏮</button>
+    <button id="np-play" class="icon" title="Play or pause" aria-label="Play">▶</button>
+    <button id="np-next" class="icon" title="Next" aria-label="Next">⏭</button>
+    <label class="np-vol sub">Vol <input id="np-vol" type="range" min="0" max="100" value="100" aria-label="Volume"></label>
+    <button id="np-stop" class="np-stop">Stop after this song</button>
+  </div>
+</footer>
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 

@@ -91,6 +91,7 @@ function showLogin(msg) {
   $("app-view").hidden = true;
   $("device-box").hidden = true;
   $("signout").hidden = true;
+  $("np").hidden = true;
   $("login-view").hidden = false;
   $("login-error").textContent = msg || "";
   $("username").focus();
@@ -842,6 +843,211 @@ async function renderVideosView() {
   }
 }
 
+// ---- now playing + queue (#3602): transport and queue edits on the active device ----
+//
+// The page only reads state on load and on its 2 s poll; every command comes
+// from a click, so opening the page never touches what is playing.
+
+const np = { state: null, timer: null, seeking: false, volDragging: false };
+let queueSignature = null;
+
+// Poll quietly; playback changes only through handlers.
+async function pollNowPlaying() {
+  if (!token() || document.hidden) return;
+  try {
+    const s = await get("/api/playback/state");
+    np.state = s;
+    paintNowPlaying();
+    if (state.view === renderQueueView) paintQueue();
+  } catch (_) {
+    // A later poll will retry.
+  }
+}
+
+function startNowPlaying() {
+  if (!np.timer) np.timer = setInterval(pollNowPlaying, 2000);
+  pollNowPlaying();
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) pollNowPlaying();
+});
+
+function paintNowPlaying() {
+  const s = np.state;
+  if (!s) return;
+
+  const duration = Math.max(0, Number(s.duration_ms) || 0);
+  let position = Math.max(0, Number(s.position_ms) || 0);
+  if (s.playing && s.updated_at != null) {
+    position += Math.max(0, Date.now() / 1000 - s.updated_at) * 1000;
+  }
+  position = Math.min(duration, position);
+
+  $("np").hidden = false;
+  $("np-title").textContent = (s.track && s.track.title) ||
+    (s.book && s.book.title) || "Nothing playing";
+  $("np-sub").textContent = s.track ? (s.track.artist || "") :
+    (s.book ? "Audiobook" : "");
+
+  const play = $("np-play");
+  play.textContent = s.playing ? "⏸" : "▶";
+  play.setAttribute("aria-label", s.playing ? "Pause" : "Play");
+
+  const seek = $("np-seek");
+  seek.max = duration;
+  if (!np.seeking) seek.value = position;
+  $("np-pos").textContent = fmtDuration(
+    (np.seeking ? Number(seek.value) : position) / 1000
+  );
+  $("np-dur").textContent = fmtDuration(duration / 1000);
+
+  const volume = $("np-vol");
+  volume.disabled = s.volume == null;
+  if (s.volume != null && !np.volDragging) {
+    volume.value = Math.round(s.volume * 100);
+  }
+
+  const armed = s.stop && (s.stop.active || s.stop.latched);
+  $("np-stop").textContent = armed ? "Cancel stop" : "Stop after this song";
+  const idle = !s.track && !s.book;
+  $("np-prev").disabled = idle;
+  $("np-next").disabled = idle;
+  seek.disabled = idle;
+}
+
+async function send(type, payload, okMsg) {
+  const result = await guard(() => api("POST", "/api/playback/command", {
+    type, payload: payload || {}
+  }), okMsg);
+  setTimeout(async () => {
+    await pollNowPlaying();
+    if (state.view === renderQueueView &&
+        (type === "reorder" || type === "replace_upcoming")) {
+      paintQueue(true);
+    }
+  }, 600);
+  return result;
+}
+
+// Footer controls.
+$("np-play").addEventListener("click", () => {
+  send(np.state && np.state.playing ? "pause" : "resume");
+});
+$("np-prev").addEventListener("click", () => send("previous"));
+$("np-next").addEventListener("click", () => send("skip"));
+
+$("np-seek").addEventListener("input", () => {
+  np.seeking = true;
+  $("np-pos").textContent = fmtDuration(Number($("np-seek").value) / 1000);
+});
+$("np-seek").addEventListener("change", () => {
+  np.seeking = false;
+  send("seek", { position_ms: Math.round(Number($("np-seek").value)) });
+});
+
+$("np-vol").addEventListener("input", () => {
+  np.volDragging = true;
+});
+$("np-vol").addEventListener("change", () => {
+  np.volDragging = false;
+  send("volume", { volume: Number($("np-vol").value) / 100 });
+});
+
+$("np-stop").addEventListener("click", async () => {
+  const stop = np.state && np.state.stop;
+  const armed = stop && (stop.active || stop.latched);
+  if (armed) {
+    await guard(() => api("DELETE", "/api/playback/scheduled-stop"),
+      "Stop cancelled");
+  } else {
+    await guard(() => api("POST", "/api/playback/scheduled-stop", {
+      mode: "after_current"
+    }), "Will stop after this song");
+  }
+  await pollNowPlaying();
+});
+
+async function renderQueueView() {
+  setCrumbs([{ label: "Queue" }]);
+  const s = await guard(() => get("/api/playback/state"));
+  if (s) {
+    np.state = s;
+    paintNowPlaying();
+  }
+  if (state.view === renderQueueView) paintQueue(true);
+}
+
+// Set disabled only when needed; el uses attributes.
+function queueButton(label, glyph, disabled, onclick, danger) {
+  const attrs = {
+    type: "button",
+    class: danger ? "icon danger" : "icon",
+    title: label,
+    "aria-label": label,
+    onclick
+  };
+  if (disabled) attrs.disabled = "";
+  return el("button", attrs, glyph);
+}
+
+function paintQueue(force) {
+  const s = np.state;
+  const queue = s && Array.isArray(s.queue) ? s.queue : [];
+  const current = s ? s.queue_index : -1;
+  const signature = queue.map(item => JSON.stringify(item.id)).join("|") +
+    ":" + current + ":" + (s && s.queue_length);
+  if (!force && signature === queueSignature) return;
+  queueSignature = signature;
+
+  if (s && s.book) {
+    render(el("p", { class: "muted" }, "An audiobook is playing. The queue is for music."));
+    return;
+  }
+  if (!queue.length) {
+    render(el("p", { class: "muted" },
+      "The queue is empty. Play or queue something from the library."));
+    return;
+  }
+
+  const upcoming = queue.filter(item => item.index > current);
+  // The PC reports at most 200 items from the current one. Remove rewrites the
+  // whole upcoming list, so it is only safe when we can see all of it.
+  const last = (Number(s.queue_length) || queue.length) - 1;
+  const hidden = last - queue[queue.length - 1].index;
+  const rows = queue.map(item => {
+    const index = item.index;
+    const rowClass = "track" + (index === current ? " current" :
+      (index < current ? " played" : ""));
+    const row = el("li", { class: rowClass, "data-queue-index": index },
+      el("div", { class: "meta" },
+        el("span", { class: "title" }, item.title || ""),
+        el("span", { class: "sub" }, item.artist || "")));
+
+    if (index > current) {
+      row.appendChild(el("div", { class: "row-actions" },
+        queueButton("Move up", "↑", index === current + 1, () =>
+          send("reorder", { from_index: index, to_index: index - 1 })),
+        queueButton("Move down", "↓", index === last, () =>
+          send("reorder", { from_index: index, to_index: index + 1 })),
+        queueButton("Play next", "⤒", index === current + 1, () =>
+          send("reorder", { from_index: index, to_index: current + 1 })),
+        queueButton(hidden ? "Remove (queue too long to edit safely)" : "Remove", "✕", hidden > 0, () =>
+          send("replace_upcoming", {
+            track_ids: upcoming.filter(entry => entry.index !== index)
+              .map(entry => entry.id)
+          }), true)));
+    }
+    return row;
+  });
+
+  render([
+    el("p", { class: "muted" }, `${upcoming.length + Math.max(0, hidden)} upcoming`),
+    el("ol", { class: "tracks queue" }, ...rows),
+    ...(hidden > 0 ? [el("p", { class: "muted" }, `…and ${hidden} more not shown`)] : [])
+  ]);
+}
+
 // ---- tabs + boot -------------------------------------------------------------
 
 const TABS = {
@@ -850,6 +1056,7 @@ const TABS = {
   playlists: showPlaylists,
   favorites: showFavorites,
   videos: renderVideosView,
+  queue: renderQueueView,
 };
 
 function setTabUI(tab) {
@@ -918,6 +1125,7 @@ async function start() {
   await loadCaches();
   if (!token()) return;  // a 401 during load already sent us to sign-in
   loadDevices();
+  startNowPlaying();
   if (!start.timer) start.timer = setInterval(() => { if (token() && !document.hidden) loadDevices(); }, 15000);
   selectTab(state.tab);
 }

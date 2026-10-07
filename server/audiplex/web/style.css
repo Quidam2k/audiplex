@@ -45,7 +45,7 @@ main { max-width: 820px; margin: 0 auto; padding: 12px 16px 80px; }
 #login-form label { display: grid; gap: 4px; font-size: 14px; color: var(--muted); }
 .error { color: var(--danger); min-height: 1.4em; margin: 0; }
 
-.tabs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: 10px; }
+.tabs { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; margin-bottom: 10px; }
 .tab { padding: 0 4px; }
 .tab[aria-selected="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 .crumbs { display: flex; flex-wrap: wrap; gap: 2px 6px; align-items: center; margin: 6px 0; font-size: 14px; }
@@ -129,3 +129,25 @@ button.thumb.selected { outline: 3px solid var(--accent); outline-offset: -3px; 
 .job { padding: 10px 0; border-bottom: 1px solid var(--line); display: grid; gap: 6px; }
 .job .head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
 .job video { max-width: 100%; border-radius: 8px; background: #000; }
+
+/* #3602 now-playing bar + queue */
+main { padding-bottom: 150px; }
+.np {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 3; display: grid; gap: 4px;
+  padding: 8px 16px; background: var(--surface); border-top: 1px solid var(--line);
+}
+.np-meta { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.np-meta .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np-meta .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np-seekrow { display: flex; align-items: center; gap: 8px; }
+.np-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.np input[type="range"] { min-height: 0; height: 24px; padding: 0; border: none; background: none; }
+#np-seek { flex: 1; min-width: 0; }
+.np-vol { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+#np-vol { width: 90px; }
+.np-stop { white-space: nowrap; }
+@media (max-width: 520px) { .tabs { grid-template-columns: repeat(3, 1fr); } }
+.toast { bottom: 140px; z-index: 4; }
+.queue .current { border-left: 4px solid var(--accent); padding-left: 8px; }
+.queue .current .title { font-weight: 700; }
+.queue .played { opacity: .55; }

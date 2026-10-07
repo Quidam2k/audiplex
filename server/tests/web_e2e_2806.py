@@ -5,9 +5,12 @@
 Stands up a throwaway server (temp config.yaml + fresh temp DB) on 127.0.0.1:<port>
 with three short silent tracks, one titled with an HTML injection payload. A
 scripted fake renderer "e2e-test-device" is the ONLY device on the bus; it plays
-nothing and just records the commands it gets. Headless Chromium (no window)
-signs in, browses, favorites, rates, builds and reorders a playlist, sends a play
-to the e2e device, reloads, and signs out; each step is checked through the API.
+nothing and just records the commands it gets. Chromium (visible but started
+minimized, so it never takes focus; --headless for no window at all) signs in,
+browses, favorites, rates, builds and reorders a playlist, sends a play to the e2e
+device, drives the #3602 now-playing bar and Queue tab against a state the fake
+renderer reports, checks that opening the page sends no command, and signs out;
+each step is checked through the API or the commands the fake renderer receives.
 Refuses to run on :8100, on the live DB, on a busy port, or if any device id could
 be the real phone. Exit code 0 = every check passed.
 """
@@ -104,10 +107,19 @@ class FakeRenderer(threading.Thread):
             self.received.append(cmd)
             self.client.post(f"/api/playback/command/{cmd['id']}/ack", json={"status": "ok"})
 
+    def report(self, state: dict) -> None:
+        self.client.post("/api/playback/state", params={"device_id": TEST_ID}, json=state).raise_for_status()
+
+    def wait_for(self, mark: int, ctype: str, timeout: float = 10) -> dict:
+        """The first command of `ctype` received after the first `mark` ones."""
+        return _wait(lambda: next((c for c in self.received[mark:] if c.get("type") == ctype), None),
+                     timeout, f"{ctype} delivered")
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8199)
+    ap.add_argument("--headless", action="store_true", help="no window at all (default: visible, minimized)")
     args = ap.parse_args()
 
     tmp = Path(tempfile.mkdtemp(prefix="audiplex-e2e-2806-"))
@@ -165,7 +177,8 @@ def main() -> int:
             return 1
 
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
+            browser = pw.chromium.launch(headless=args.headless,
+                                         args=[] if args.headless else ["--start-minimized"])
             page = browser.new_page(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
             console_errors: list[str] = []
             page.on("console", lambda m: m.type == "error" and console_errors.append(m.text))
@@ -226,10 +239,21 @@ def main() -> int:
             got = _wait(lambda: [c for c in fake.received if c.get("type") == "play_now"], 30, "play delivered")
             check(got[-1]["payload"]["track_ids"] == [by_title["Alpha Song"]],
                   f"Play sent play_now {got[-1]['payload']['track_ids']} to {TEST_ID} (the only device)")
+            try:
+                _now_playing_and_queue(page, fake, api, by_title)
+            except Exception:
+                page.screenshot(path=str(tmp / "failure.png"))
+                note(f"failure screenshot: {tmp / 'failure.png'}")
+                raise
 
+            mark = len(fake.received)
             page.reload()
             page.wait_for_selector("text=E2E Artist")
             check(True, "still signed in after a reload")
+            page.wait_for_selector("#np-title:text('Alpha Song')")
+            page.wait_for_timeout(5000)  # two-plus now-playing polls
+            check(len(fake.received) == mark,
+                  f"opening the page sent no command: {[c['type'] for c in fake.received[mark:]]}")
             page.click(".tab[data-tab=playlists]")
             page.click(".row-link:has-text('Ride Mix')")
             page.wait_for_selector(".track")
@@ -250,6 +274,15 @@ def main() -> int:
             check(True, "favorites tab lists the favorited song")
             check(page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"),
                   "no sideways scrolling at phone width (390 px)")
+            page.click(".tab[data-tab=queue]")
+            page.wait_for_selector(".queue .track")
+            page.screenshot(path=str(tmp / "web-3602-queue-phone.png"))
+            page.set_viewport_size({"width": 1280, "height": 800})
+            page.screenshot(path=str(tmp / "web-3602-queue-desktop.png"))
+            note(f"queue screenshots in {tmp}")
+            page.set_viewport_size({"width": 390, "height": 844})
+            page.click(".tab[data-tab=favorites]")
+            page.wait_for_selector(".track:has-text('Alpha Song')")
             shot = tmp / "web-2806-phone.png"
             page.screenshot(path=str(shot), full_page=True)
             note(f"screenshot: {shot}")
@@ -268,6 +301,64 @@ def main() -> int:
 
     note(f"RESULT: {'PASS' if not failures else 'FAIL'} ({len(failures)} failed)")
     return 0 if not failures else 1
+
+
+def _now_playing_and_queue(page, fake: FakeRenderer, api: httpx.Client, by_title: dict) -> None:
+    """#3602: the transport bar and the Queue tab send the right bus commands."""
+    a, b, x = by_title["Alpha Song"], by_title["Beta Song"], by_title[XSS_TITLE]
+    queue = [(a, "Alpha Song"), (b, "Beta Song"), (x, XSS_TITLE), (a, "Alpha Song")]  # a repeat: remove is by index
+    state = {"playing": True, "track": {"id": a, "title": "Alpha Song", "artist": "E2E Artist"},
+             "position_ms": 1000, "duration_ms": 5000, "queue_length": 4, "queue_index": 0,
+             "queue": [{"index": i, "id": tid, "title": t, "artist": "E2E Artist"} for i, (tid, t) in enumerate(queue)],
+             "volume": 0.8}
+    fake.report(state)
+    page.wait_for_selector("#np-title:text('Alpha Song')")
+    check(page.locator("#np-play").get_attribute("aria-label") == "Pause", "now-playing bar shows the playing song")
+
+    def sent(action, ctype, payload, what):
+        mark = len(fake.received)
+        action()
+        try:
+            cmd = fake.wait_for(mark, ctype)
+        except TimeoutError:
+            return check(False, f"{what}: no {ctype} arrived")
+        return check(payload is None or cmd["payload"] == payload, f"{what} -> {ctype} {cmd['payload']}")
+
+    sent(lambda: page.click("#np-play"), "pause", None, "pause button")
+    sent(lambda: page.click("#np-next"), "skip", None, "next button")
+    sent(lambda: page.click("#np-prev"), "previous", None, "previous button")
+    set_range = "(e, v) => { e.value = v; e.dispatchEvent(new Event('change')); }"
+    sent(lambda: page.eval_on_selector("#np-seek", set_range, 3000), "seek", {"position_ms": 3000}, "seek slider")
+    sent(lambda: page.eval_on_selector("#np-vol", set_range, 50), "volume", {"volume": 0.5}, "volume slider")
+
+    page.click(".tab[data-tab=queue]")
+    page.wait_for_selector(".queue .track[data-queue-index='3']")
+    row = lambda i: page.locator(f".queue .track[data-queue-index='{i}']")
+    check("current" in (row(0).get_attribute("class") or "") and row(0).locator("button").count() == 0,
+          "queue highlights the current song and offers no edits on it")
+    check(row(2).locator(".title").inner_text() == XSS_TITLE and page.evaluate("window.__xss === undefined"),
+          "queue renders an HTML-looking title as plain text")
+    check(row(1).locator("button[aria-label='Move up']").is_disabled(), "the next song can't move above the current one")
+    sent(lambda: row(2).locator("button[aria-label='Move up']").click(), "reorder",
+         {"from_index": 2, "to_index": 1}, "queue move up")
+    sent(lambda: row(3).locator("button[aria-label='Play next']").click(), "reorder",
+         {"from_index": 3, "to_index": 1}, "queue play next")
+    sent(lambda: row(1).locator("button[aria-label='Remove']").click(), "replace_upcoming",
+         {"track_ids": [x, a]}, "queue remove (by position, keeps the repeat)")
+
+    page.click("#np-stop")
+    _wait(lambda: api.get("/api/playback/scheduled-stop").json().get("active"), 10, "stop armed")
+    check(True, "stop after this song arms the server's verified stop")
+    page.wait_for_selector("#np-stop:text('Cancel stop')")
+    page.click("#np-stop")
+    _wait(lambda: not api.get("/api/playback/scheduled-stop").json().get("latched"), 10, "stop cancelled")
+    check(True, "cancel stop lifts the stop latch")
+
+    # A PC renderer reports at most 200 items: remove must not wipe what the page can't see.
+    fake.report({**state, "queue_length": 300})
+    page.wait_for_selector("text=…and 296 more not shown")
+    check(row(1).locator("button[aria-label^='Remove']").is_disabled(), "remove is disabled when the queue is truncated")
+    fake.report(state)
 
 
 def _up(url: str) -> bool:
