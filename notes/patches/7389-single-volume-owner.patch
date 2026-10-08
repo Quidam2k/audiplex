@@ -1,0 +1,277 @@
+# #7389 4b single volume owner — PARKED 2026-10-08 by #7399 (Todd: no audible auto music gain).
+# Tests passed (FocusPolicyTest 13/13). Codex P2s to fix before any reuse:
+#  1) base below duck level (mute / late sleep fade) is ignored while ducked
+#  2) base stored only in preDuckVolume is lost on pause (abandonFocus clears it)
+#  3) track change late in a sleep fade writes full dial x gain (removed DUCKED guard)
+diff --git a/android/app/src/main/java/com/audiplex/app/playback/AudioFocusManager.kt b/android/app/src/main/java/com/audiplex/app/playback/AudioFocusManager.kt
+index 376765a..eb0adec 100644
+--- a/android/app/src/main/java/com/audiplex/app/playback/AudioFocusManager.kt
++++ b/android/app/src/main/java/com/audiplex/app/playback/AudioFocusManager.kt
+@@ -72,6 +72,31 @@ class AudioFocusManager(
+         restoringTo = null
+     }
+ 
++    /**
++     * #7389: the app's music level (dial x track gain) arrives here instead of being
++     * written to the player from PlaybackManager, which can't see a duck. A track change
++     * mid-duck used to un-duck a Talk; now the duck holds and the restore lands on the
++     * new level.
++     */
++    fun setBase(level: Float, writer: String) {
++        val v = level.coerceIn(0f, 1f)
++        when (FocusPolicy.onBaseChange(ducked = preDuckVolume != null, restoring = restoringTo != null)) {
++            FocusPolicy.BaseAction.HoldUnderDuck -> {
++                PlayerHooks.noteVolumeWrite("$writer@ducked", preDuckVolume ?: v, v)
++                preDuckVolume = v
++            }
++            FocusPolicy.BaseAction.RetargetRestore -> {
++                PlayerHooks.noteVolumeWrite("$writer@restoring", player.volume, v)
++                restoringTo = v
++                rampTo(v, DuckRamp.RESTORE_MS, DuckRamp::restoreLevel) { restoringTo = null }
++            }
++            FocusPolicy.BaseAction.WriteNow -> {
++                PlayerHooks.noteVolumeWrite(writer, player.volume, v)
++                player.volume = v
++            }
++        }
++    }
++
+     private val focusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+         val state = FocusPolicy.FocusState(
+             wasPlaying = wasPlaying,
+@@ -149,6 +174,7 @@ class AudioFocusManager(
+                 // events while already ducked must not overwrite it with 0.05.
+                 if (preDuckVolume == null) preDuckVolume = restoringTo ?: player.volume  // #3597
+                 restoringTo = null
++                PlayerHooks.noteVolumeWrite("duck", player.volume, action.volume)  // #7389
+                 rampTo(action.volume, DuckRamp.DUCK_MS)  // #3597 was an instant snap
+             }
+             FocusPolicy.FocusAction.Pause -> {
+@@ -165,6 +191,7 @@ class AudioFocusManager(
+             }
+             is FocusPolicy.FocusAction.Restore -> {
+                 restoringTo = action.volume  // #3597
++                PlayerHooks.noteVolumeWrite("restore", player.volume, action.volume)  // #7389
+                 rampTo(action.volume, DuckRamp.RESTORE_MS, DuckRamp::restoreLevel) { restoringTo = null }  // #3597 Pantheon #2187
+                 if (action.resume && !player.isPlaying) player.play()
+                 preDuckVolume = null
+diff --git a/android/app/src/main/java/com/audiplex/app/playback/FocusPolicy.kt b/android/app/src/main/java/com/audiplex/app/playback/FocusPolicy.kt
+index e90eed1..7d7e819 100644
+--- a/android/app/src/main/java/com/audiplex/app/playback/FocusPolicy.kt
++++ b/android/app/src/main/java/com/audiplex/app/playback/FocusPolicy.kt
+@@ -74,4 +74,20 @@ object FocusPolicy {
+         }
+         else -> FocusAction.NoOp
+     }
++
++    /** #7389: what the volume owner does when the app's music level (dial x track gain) changes. */
++    enum class BaseAction {
++        /** Not ducked, nothing ramping: write it now. */
++        WriteNow,
++        /** Ducked (or ducking): keep the duck, restore to the new level later. */
++        HoldUnderDuck,
++        /** An un-duck is ramping: ramp to the new level instead of the old one. */
++        RetargetRestore,
++    }
++
++    fun onBaseChange(ducked: Boolean, restoring: Boolean): BaseAction = when {
++        ducked -> BaseAction.HoldUnderDuck
++        restoring -> BaseAction.RetargetRestore
++        else -> BaseAction.WriteNow
++    }
+ }
+diff --git a/android/app/src/main/java/com/audiplex/app/playback/PlaybackManager.kt b/android/app/src/main/java/com/audiplex/app/playback/PlaybackManager.kt
+index a44b8e4..3865e6c 100644
+--- a/android/app/src/main/java/com/audiplex/app/playback/PlaybackManager.kt
++++ b/android/app/src/main/java/com/audiplex/app/playback/PlaybackManager.kt
+@@ -62,6 +62,9 @@ data class ControllerMetadata(
+ internal const val SKIP_LOOP_MAX_FAILURES = 5
+ internal const val SKIP_LOOP_WINDOW_MS = 30_000L
+ 
++/** #7389: same-writer player-volume log lines closer than this are coalesced. */
++private const val VOLUME_LOG_GAP_MS = 2_000L
++
+ /** #ride0928: only a file that is not there. A network error (tunnel blip) must NOT skip songs. */
+ internal val SKIPPABLE_ERROR_CODES = setOf(
+     PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+@@ -143,17 +146,18 @@ class PlaybackManager @Inject constructor(
+     private var audiobookVolume: Float = 1f
+ 
+     init {
++        PlayerHooks.onVolumeWrite = { w, from, to -> logVolumeWrite(w, from, to) }  // #7389
+         scope.launch {
+             settingsStore.musicVolume.collect { v ->
+                 musicVolume = v
+                 // Live-apply if a music/stream track is currently playing.
+-                if (_playerKind.value != PlayerKind.Audiobook) applyVolumeForCurrentKind()
++                if (_playerKind.value != PlayerKind.Audiobook) applyVolumeForCurrentKind("kind_dial")
+             }
+         }
+         scope.launch {
+             settingsStore.audiobookVolume.collect { v ->
+                 audiobookVolume = v
+-                if (_playerKind.value == PlayerKind.Audiobook) applyVolumeForCurrentKind()
++                if (_playerKind.value == PlayerKind.Audiobook) applyVolumeForCurrentKind("kind_dial")
+             }
+         }
+     }
+@@ -192,19 +196,14 @@ class PlaybackManager @Inject constructor(
+ 
+     /**
+      * #7109: on a track change, move the player to the new track's normalized
+-     * level. Only while normalization is ON (off = exactly the old behaviour),
+-     * and never while the music looks ducked: the duck lives in the service's
+-     * AudioFocusManager, which this side can't see, and setting the volume
+-     * mid-duck would un-duck a Talk. The ducked track keeps its old gain until
+-     * the next change; the restore goes back to that pre-duck level.
++     * level. Only while normalization is ON (off = exactly the old behaviour).
++     * #7389: safe mid-duck now: the level goes to the service's AudioFocusManager,
++     * which holds the duck and restores to the new track's level.
+      */
+     private fun reapplyTrackGain() {
+         if (musicLevels?.normalizeMusic != true) return
+-        val applied = _playerVolume.value
+-        val expected = effectiveMusicVolume(volumeForKind(PlayerKind.Music))
+-        if (applied < expected * DUCKED_FRACTION) return
+         updateCurrentTrackGain()
+-        applyVolumeForCurrentKind()
++        applyVolumeForCurrentKind("track_gain")
+     }
+ 
+     /**
+@@ -230,10 +229,10 @@ class PlaybackManager @Inject constructor(
+      * report loop) stays coherent. No-op if nothing is playing yet — the next
+      * play entry applies it via applyAudioAttributesFor.
+      */
+-    private fun applyVolumeForCurrentKind() {
++    private fun applyVolumeForCurrentKind(writer: String) {
+         val kind = _playerKind.value ?: return
+         val sliderVolume = volumeForKind(kind)
+-        setPlayerVolume(effectiveMusicVolume(sliderVolume))
++        setPlayerVolume(effectiveMusicVolume(sliderVolume), writer)
+     }
+     private var controllerFuture: ListenableFuture<MediaController>? = null
+     private var controller: MediaController? = null
+@@ -301,8 +300,6 @@ class PlaybackManager @Inject constructor(
+     // #7109: per-track music loudness normalization settings and current track gain
+     private var musicLevels: MusicLevelsResponse? = null
+     private var currentMusicGain: Float = 1.0f
+-    /** #7109: below this share of the expected level the player is ducked (ducks go to ~5%). */
+-    private val DUCKED_FRACTION = 0.5f
+ 
+     private var currentBaseUrl: String = ""
+     private var lastReportedTrackIndex: Int = -1
+@@ -629,7 +626,7 @@ class PlaybackManager @Inject constructor(
+         // ~5% during a transient focus loss and restores to whatever the dial
+         // was (it records the pre-duck volume, never a hardcoded 1.0).
+         // Via setPlayerVolume so the DJ-report volume snapshot stays coherent.
+-        setPlayerVolume(volumeForKind(kind))
++        setPlayerVolume(volumeForKind(kind), "play_entry")
+     }
+ 
+     private fun ensureController(onReady: (MediaController) -> Unit) {
+@@ -1383,7 +1380,7 @@ class PlaybackManager @Inject constructor(
+                 minutes, fadeSeconds, bedFadeTo,
+                 mainVolume = { controller?.volume },
+                 bedVolume = { bedPlayer?.volume ?: 0f },
+-                setMain = { setPlayerVolume(it) },
++                setMain = { setPlayerVolume(it, "sleep_fade") },
+                 setBed = { bedPlayer?.volume = it },
+                 pause = {
+                     PlayerHooks.notePause("sleep_timer")  // #3552
+@@ -1399,7 +1396,7 @@ class PlaybackManager @Inject constructor(
+         sleepTimerJob?.cancel()
+         sleepTimerJob = null
+         _sleepEndsAtMs.value = null
+-        applyVolumeForCurrentKind()
++        applyVolumeForCurrentKind("sleep_cancel")
+     }
+ 
+     /**
+@@ -1471,13 +1468,39 @@ class PlaybackManager @Inject constructor(
+     }
+ 
+     /** Media3 player volume (0.0-1.0) — NOT device/stream volume, deliberately;
+-     * device volume would fight the Pantheon companion's mic-hot media-ducking. */
+-    fun setPlayerVolume(volume: Float) {
++     * device volume would fight the Pantheon companion's mic-hot media-ducking.
++     * #7389: goes through the service's AudioFocusManager (the one volume owner) so a
++     * duck can't be undone from here; [writer] tags the write in the volume log. */
++    fun setPlayerVolume(volume: Float, writer: String = "dj") {
+         val clamped = volume.coerceIn(0f, 1f)
+-        controller?.volume = clamped
++        val owner = PlayerHooks.volumeOwner
++        if (owner != null) {
++            owner(clamped, writer)
++        } else {
++            PlayerHooks.noteVolumeWrite(writer, _playerVolume.value, clamped)
++            controller?.volume = clamped
++        }
+         _playerVolume.value = clamped
+     }
+ 
++    // #7389: one log line per tagged volume write; a dial drag or sleep fade by the
++    // same writer is coalesced to one line per VOLUME_LOG_GAP_MS. Main thread.
++    private var lastVolumeLogWriter: String? = null
++    private var lastVolumeLogAtMs = 0L
++
++    private fun logVolumeWrite(writer: String, from: Float, to: Float) {
++        val now = android.os.SystemClock.elapsedRealtime()
++        if (writer == lastVolumeLogWriter && now - lastVolumeLogAtMs < VOLUME_LOG_GAP_MS) return
++        lastVolumeLogWriter = writer
++        lastVolumeLogAtMs = now
++        clientLog.report(
++            level = "info",
++            event = "player_volume",
++            message = "$writer %.3f->%.3f".format(from, to),
++            detail = mapOf("writer" to writer, "from" to "%.3f".format(from), "to" to "%.3f".format(to)),
++        )
++    }
++
+     /**
+      * Last known player volume, safe to read from ANY thread.
+      *
+diff --git a/android/app/src/main/java/com/audiplex/app/playback/PlaybackService.kt b/android/app/src/main/java/com/audiplex/app/playback/PlaybackService.kt
+index a55b2d3..8b0f6f4 100644
+--- a/android/app/src/main/java/com/audiplex/app/playback/PlaybackService.kt
++++ b/android/app/src/main/java/com/audiplex/app/playback/PlaybackService.kt
+@@ -70,6 +70,7 @@ class PlaybackService : MediaSessionService() {
+ 
+         val focusManager = AudioFocusManager(this, player)
+         audioFocusManager = focusManager
++        PlayerHooks.volumeOwner = focusManager::setBase  // #7389 single volume owner
+         PlayerHooks.exoPlayer = player  // #6913
+         player.addListener(object : Player.Listener {
+             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+@@ -121,6 +122,7 @@ class PlaybackService : MediaSessionService() {
+     override fun onDestroy() {
+         audioFocusManager?.abandonFocus()
+         audioFocusManager = null
++        PlayerHooks.volumeOwner = null  // #7389
+         mediaSession?.run {
+             if (PlayerHooks.exoPlayer === player) PlayerHooks.exoPlayer = null  // #6913
+             player.release()
+diff --git a/android/app/src/main/java/com/audiplex/app/playback/PlayerHooks.kt b/android/app/src/main/java/com/audiplex/app/playback/PlayerHooks.kt
+index da4a152..898a550 100644
+--- a/android/app/src/main/java/com/audiplex/app/playback/PlayerHooks.kt
++++ b/android/app/src/main/java/com/audiplex/app/playback/PlayerHooks.kt
+@@ -19,6 +19,19 @@ object PlayerHooks {
+     @Volatile
+     private var pauseSource: String? = null
+ 
++    /** #7389: the ONE writer of the music player's volume — the service's AudioFocusManager.
++     *  PlaybackManager hands it (level, writer); null while the service is down. Main thread. */
++    @Volatile
++    var volumeOwner: ((level: Float, writer: String) -> Unit)? = null
++
++    /** #7389: told about every player-volume write with its writer tag; PlaybackManager logs it. */
++    @Volatile
++    var onVolumeWrite: ((writer: String, from: Float, to: Float) -> Unit)? = null
++
++    fun noteVolumeWrite(writer: String, from: Float, to: Float) {
++        onVolumeWrite?.invoke(writer, from, to)
++    }
++
+     fun notePause(source: String) {
+         pauseSource = source
+     }
