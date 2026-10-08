@@ -507,8 +507,10 @@ class MusicLevelsResponse(BaseModel):
 
     normalize_music: whether per-track gain normalization is enabled.
     target_lufs: the reference loudness level to normalize tracks to.
-    fallback_lufs: median EBU R128 loudness of all tracks (null if none measured).
+    fallback_lufs: always null since #7387 (unmeasured tracks get no gain change).
+    median_lufs: median EBU R128 loudness of measured tracks, informational.
     """
     normalize_music: bool
     target_lufs: float
     fallback_lufs: float | None = None
+    median_lufs: float | None = None  # #7387 informational; never applied as gain

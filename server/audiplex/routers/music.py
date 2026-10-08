@@ -1123,8 +1123,12 @@ def get_music_levels(
         n = len(lufs_values)
         fallback_lufs = (lufs_values[n // 2 - 1] + lufs_values[n // 2]) / 2 if n % 2 == 0 else lufs_values[n // 2]
 
+    # #7387 (Jarvis review): an unmeasured track gets NO gain change. The median
+    # (~-15 LUFS) as a fallback cut unmeasured tracks ~9 dB on a guess, so it is
+    # reported as median_lufs for information and fallback_lufs stays null.
     return MusicLevelsResponse(
         normalize_music=settings.normalize_music,
         target_lufs=settings.music_target_lufs,
-        fallback_lufs=fallback_lufs,
+        fallback_lufs=None,
+        median_lufs=fallback_lufs,
     )

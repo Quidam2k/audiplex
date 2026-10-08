@@ -55,7 +55,9 @@ def test_levels_endpoint_fallback_lufs_is_median(client, db_session, sample_albu
 
     # Sorted: [-23.5, -22.0, -19.8, -18.0, -15.2]
     # Median of 5 values: index 2 = -19.8
-    assert data["fallback_lufs"] == pytest.approx(-19.8)
+    assert data["median_lufs"] == pytest.approx(-19.8)
+    # #7387: an unmeasured track is never cut on a guess
+    assert data["fallback_lufs"] is None
 
 
 def test_levels_endpoint_fallback_lufs_even_count(client, db_session, sample_album):
@@ -82,7 +84,7 @@ def test_levels_endpoint_fallback_lufs_even_count(client, db_session, sample_alb
 
     # Sorted: [-23.5, -22.0, -18.0, -15.2]
     # Median of 4 values: average of indices 1 and 2 = (-22.0 + -18.0) / 2 = -20.0
-    assert data["fallback_lufs"] == pytest.approx(-20.0)
+    assert data["median_lufs"] == pytest.approx(-20.0)
 
 
 def test_loudness_lufs_in_track_payload(client, db_session, sample_album):
