@@ -20,7 +20,7 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_mix_status` — did dj_mix's song-boundary swap (old phone builds) fire yet?
 - `dj_folder` — one folder: shuffle it (via dj_mix), queue it, or save it as a playlist.
 - `dj_play_stream` — play an external HTTP stream (e.g. Radio Free Luna).
-- `dj_skip` / `dj_previous` — next / previous item in the queue.
+- `dj_skip` / `dj_previous` — next / previous item in the queue. Pass `dj_skip(todd_asked=True)` only when Todd asked for the skip: those count against the song when the DJ learns from the ride (#4057).
 - `dj_pause` / `dj_resume` — pause / resume (resume is talk-guarded).
 - `dj_seek` — jump to a position in the current track.
 - `dj_volume` — app player volume 0-100.

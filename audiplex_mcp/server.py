@@ -344,13 +344,18 @@ async def dj_link_history(limit: int = 25) -> str:
 
 
 @mcp.tool()
-async def dj_skip() -> str:
+async def dj_skip(todd_asked: bool = False) -> str:
     """Skip to the next track in the Audiplex device's current queue.
+
+    todd_asked: True ONLY when Todd himself asked to skip this song ("skip
+    this", "next"). That skip counts against the song when the DJ learns from
+    the ride (#4057). Your own DJ skips stay False and never count.
 
     No-op if nothing is queued after the current track. Use dj_now_playing
     afterward to confirm what's playing.
     """
-    data = await _enqueue("skip", {})  # #ride0928: one send path for every command
+    payload = {"by": "todd"} if todd_asked else {}  # #4057
+    data = await _enqueue("skip", payload)  # #ride0928: one send path for every command
     return await _acked(data, "skip")  # #3505
 
 
