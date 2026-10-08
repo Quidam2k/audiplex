@@ -360,6 +360,39 @@ def list_devices(user: User = Depends(get_current_user)):
     return {"active_device_id": bus.active_device_id, "devices": bus.devices()}
 
 
+@router.post("/pause-book")  # #4052
+def pause_book(body: dict | None = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Pause the audiobook and bookmark it for the owner, before the DJ starts music.
+
+    body: {source?}. A no-op when no book is playing, so a DJ can call it
+    unconditionally. The bookmark is the live position from the device's last
+    state report, written as the owner's progress (the caller is a service
+    account with no books of its own).
+    """
+    from datetime import datetime, timezone
+
+    from audiplex.models import PlaybackPosition
+
+    state = bus.get_state() or {}
+    book = state.get("book")
+    if not book or not state.get("playing"):
+        return {"paused": False, "reason": "no book playing", "book": book}
+    owner = _resolve_owner(db)
+    seconds = round((state.get("position_ms") or 0) / 1000.0, 3)
+    chapter = int(book.get("chapter_index") or 0)
+    row = db.query(PlaybackPosition).filter(
+        PlaybackPosition.book_id == book["id"], PlaybackPosition.user_id == owner.id).first()
+    if row is None:
+        row = PlaybackPosition(book_id=book["id"], user_id=owner.id)
+        db.add(row)
+    row.position_seconds, row.chapter_index, row.updated_at = seconds, chapter, datetime.now(timezone.utc)
+    db.commit()
+    source = str((body or {}).get("source") or "dj:pause_book")
+    cmd = bus._enqueue("pause", {}, source=source)
+    return {"paused": True, "book": book, "position_seconds": seconds, "chapter_index": chapter,
+            "command_id": cmd.id}
+
+
 @router.post("/devices/{device_id}/activate")
 def activate_device(device_id: str, user: User = Depends(get_current_user)):
     """Transfer playback to `device_id` (Spotify-Connect handoff).

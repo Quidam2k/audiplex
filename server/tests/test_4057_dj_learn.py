@@ -140,3 +140,26 @@ def test_learn_endpoint(client, db_engine, monkeypatch):
     assert r.json()["todd_skips"] == 1
     assert client.get("/api/dj/weights").json()[0] == {
         "track_id": a, "weight": 0.5, "reason": "fast-skipped by you (<5 s)", "ride_id": "api1", "skip_rides": 1}
+
+
+def test_pause_book_bookmarks_for_the_owner_and_pauses(client, db_engine, sample_book, monkeypatch):
+    """#4052: the DJ pauses a playing book and saves the owner's place first."""
+    from sqlalchemy.orm import sessionmaker
+
+    from audiplex.models import PlaybackPosition
+
+    s = playback.get_settings().model_copy(update={"dj_owner_username": "testuser"})
+    monkeypatch.setattr(playback, "get_settings", lambda: s)
+    playback.bus.reset()
+    assert client.post("/api/playback/pause-book", json={}).json()["paused"] is False
+
+    playback.bus.set_state({"playing": True, "position_ms": 754_500,
+                            "book": {"id": sample_book.id, "title": "B", "chapter_index": 3}})
+    r = client.post("/api/playback/pause-book", json={"source": "jarvis:dj_play"}).json()
+    assert r["paused"] is True and r["position_seconds"] == 754.5
+    cmd = playback.bus.command(r["command_id"])
+    assert (cmd.type, cmd.source) == ("pause", "jarvis:dj_play")
+    db = sessionmaker(bind=db_engine)()
+    pos = db.query(PlaybackPosition).filter_by(book_id=sample_book.id).one()
+    assert (pos.position_seconds, pos.chapter_index) == (754.5, 3)
+    playback.bus.reset()
