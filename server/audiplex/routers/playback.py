@@ -53,6 +53,7 @@ from sqlalchemy.orm import Session, selectinload
 from audiplex import taste
 from audiplex.identity import build_identity_map
 from audiplex.dj_bans import banned_ids  # #2806
+from audiplex.dj_learn import LOVE_MIN_STARS, restore as dj_learn_restore  # #4057
 from audiplex.mix import plan_mix, plan_summary
 from audiplex.scheduled_stop import controller as stop_controller  # #3505
 from audiplex.auth import get_current_user
@@ -542,7 +543,11 @@ def set_owner_ratings(
             db.add(TrackRating(user_id=owner.id, track_id=tid, rating=stored, note=note))
         rated.append({"track_id": tid, "rating": stored, "was": was})
     db.commit()
+    restored = []  # #4057: a 4+ star rating brings back a track the rides dropped
+    if stored >= LOVE_MIN_STARS:
+        restored = [tid for tid in sorted(known) if dj_learn_restore(db, tid)]
     return {
+        "restored": restored,
         "stars": body.stars,
         "stored": stored,
         "note": note,

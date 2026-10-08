@@ -24,6 +24,15 @@ from typing import Any, Optional
 from audiplex import taste
 from audiplex.identity import build_identity_map
 
+
+def _weighted_pick(ids: list[int], weights: dict[int, float]) -> int:
+    """#4057: learned weights tilt the pick; with none for these ids it is plain random.choice."""
+    if not any(t in weights for t in ids):
+        return random.choice(ids)
+    from audiplex.dj_learn import weighted_pick
+
+    return weighted_pick(ids, weights)
+
 # #7108: a lane that has played all its tracks recycles them, but never one
 # picked within the last this-many picks (about two hours of songs).
 NO_REPEAT_PICKS = 30
@@ -268,6 +277,7 @@ class DJPool:
             "no_repeat_picks": self.state.get("no_repeat_picks", NO_REPEAT_PICKS),  # #7108
             "played_this_session_count": len(self.state.get("played_this_session", [])),
             "last_topup_at": self.state.get("last_topup_at"),
+            "dropped_by_learning": self.state.get("dropped_by_learning", []),  # #4057: as of the last top-up
             "lanes": lane_details,
             "source_counts": self._count_sources(),  # Backward compat
             "starvation_config": self.state.get("starvation_config", {}),
@@ -430,6 +440,8 @@ class DJPool:
         skip_recordings: set[str] = set()
         identities: dict = {}
         banned: set[int] = set()
+        weights: dict[int, float] = {}  # #4057: learned from Todd's rides
+        dropped: set[int] = set()  # #4057: weight 0, a soft reversible drop
         played_before: set[str] = set()  # #7108: owner plays inside exclude_recent_hours
 
         if db is not None:
@@ -449,6 +461,14 @@ class DJPool:
             except Exception as e:  # #7335: logged, still fail-open for picking
                 # If taste lookup fails, just skip session-played tracks
                 print(f"[dj_pool] WARNING taste/ban lookup failed, picking without it: {e}", flush=True)  # #7335
+            try:  # #4057: its own try, so a learning fault never drops the bans
+                from audiplex import dj_learn
+
+                weights = dj_learn.weights_for(db)
+                dropped = {t for t, w in weights.items() if w <= 0}
+                skip_ids.update(dropped)
+            except Exception as e:
+                print(f"[dj_pool] WARNING learned weights unavailable, picking unweighted: {e}", flush=True)
 
         def recording_of(tid: int) -> Optional[str]:
             ident = identities.get(tid) if identities else None
@@ -510,7 +530,7 @@ class DJPool:
             return set((history + picks)[-window:]) if window > 0 else set()
 
         def recyclable(tid: Any, recent: set[int], recent_recs: set[str]) -> bool:
-            if not isinstance(tid, int) or tid <= 0 or tid in banned or tid in recent or not work_ok(tid):  # #7335
+            if not isinstance(tid, int) or tid <= 0 or tid in banned or tid in dropped or tid in recent or not work_ok(tid):  # #7335 #4057
                 return False
             rec = recording_of(tid)
             return rec is None or (rec not in recent_recs and rec not in played_before)
@@ -521,10 +541,10 @@ class DJPool:
                 return _why_no_tracks(lane.get("dropped"))
             # #4051: one reason per track, first match wins. The old catch-all called
             # every queued / work-blocked track "a copy of a recently picked recording".
-            counts = {"banned": 0, "recent": 0, "queued": 0, "before": 0, "work": 0, "copy": 0, "other": 0}
+            counts = {"banned": 0, "dropped": 0, "recent": 0, "queued": 0, "before": 0, "work": 0, "copy": 0, "other": 0}
             for t in ids:
                 rec = recording_of(t)
-                key = ("banned" if t in banned else "recent" if t in recent
+                key = ("banned" if t in banned else "dropped" if t in dropped else "recent" if t in recent
                        else "queued" if t in skip_ids else "before" if rec in played_before
                        else "work" if not work_ok(t) else "copy" if rec in skip_recordings else "other")
                 counts[key] += 1
@@ -533,6 +553,7 @@ class DJPool:
                      f"{counts['before']} played recently outside this pool",
                      f"{counts['work']} another version of a song already queued or in cooldown",
                      f"{counts['banned']} banned",
+                     f"{counts['dropped']} dropped after you skipped them on rides (a 4+ star rating brings one back)",
                      f"{counts['copy']} a copy of a recording already queued"]
             if counts["other"]:
                 parts.append(f"{counts['other']} other")
@@ -557,7 +578,7 @@ class DJPool:
             ids = lane.get("track_ids", [])
             fresh = [t for t in ids if eligible(t)]
             if fresh:
-                pick = random.choice(fresh)
+                pick = _weighted_pick(fresh, weights)  # #4057
             else:
                 recent = recent_window()
                 recent_recs = {r for r in map(recording_of, recent) if r is not None}
@@ -570,7 +591,7 @@ class DJPool:
                         f"all {len(ids)} track(s) already played or queued, and no other lane "
                         "has fresh tracks left to recycle alongside")
                     continue
-                pick = random.choice(again)
+                pick = _weighted_pick(again, weights)  # #4057
             lane["why_empty"] = None
 
             picks.append(pick)
@@ -601,9 +622,12 @@ class DJPool:
                 "played_count": lane_data.get("played_count", 0),
                 "exhausted": lane_data.get("exhausted", False),
                 "why_empty": lane_data.get("why_empty"),  # #7108
+                "dropped": len(dropped.intersection(lane_data.get("track_ids", []))),  # #4057
             }
             for lane_name, lane_data in self.state.get("lanes", {}).items()
         ]
+        self.state["dropped_by_learning"] = sorted(  # #4057: shown by status()
+            dropped.intersection(t for d in self.state.get("lanes", {}).values() for t in d.get("track_ids", [])))
 
         self.state["last_topup_current_track_id"] = current_track_id
         if not picks:

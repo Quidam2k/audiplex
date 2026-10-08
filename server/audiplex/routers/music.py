@@ -9,6 +9,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
 
 from audiplex import taste
+from audiplex.dj_learn import LOVE_MIN_STARS, restore as dj_learn_restore  # #4057
 from audiplex.config import get_settings, set_library_roots_for_category
 from audiplex.auth import get_admin_user, get_current_user
 from audiplex.database import get_db
@@ -706,6 +707,8 @@ def set_track_rating(
         )
         db.add(rating)
     db.commit()
+    if body.value >= LOVE_MIN_STARS:  # #4057: brings back a track the rides dropped
+        dj_learn_restore(db, track_id)
     db.refresh(rating)
     return rating
 

@@ -252,6 +252,36 @@ class TrackRating(Base):
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
+class DjTrackWeight(Base):
+    """How likely the pool is to pick a track, learned from Todd's rides (#4057).
+
+    1.0 is neutral. Weight 0 is a soft, reversible drop: the pool skips it and
+    a 4+ star rating restores it (dj_learn.restore). Only Todd's own skips move
+    it down; DJ-initiated skips are attributed away by dj_learn.
+    """
+
+    __tablename__ = "dj_track_weights"
+
+    track_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    weight: Mapped[float] = mapped_column(Float, default=1.0)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ride_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    skip_rides: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
+class DjLearnRun(Base):
+    """One ride's learning pass (#4057); its presence makes a replay a no-op."""
+
+    __tablename__ = "dj_learn_runs"
+
+    ride_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    since: Mapped[datetime] = mapped_column()
+    until: Mapped[datetime] = mapped_column()
+    summary: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
 # Favorite uses a polymorphic key so genres (string-keyed) and
 # tracks/albums/artists/books (int-keyed) share one table.
 class Favorite(Base):
