@@ -975,6 +975,7 @@ def set_pool(
     if isinstance(body.get("starvation_config"), dict):
         pool.state["starvation_config"].update(body["starvation_config"])
     pool.state["pending_cues"] = _spec_cues(db, spec_id)
+    pool.state["replace_reason"] = body.get("replace_reason")  # #4054
     pool._persist()
 
     prime = body.get("prime_current_id")
@@ -1502,7 +1503,8 @@ def update_mix_spec(
     if lanes is not None and pool.is_active() and pool.state.get("spec_id") == spec_id:
         pool.resync_lanes({str(k): [int(t) for t in v] for k, v in lanes.items()})
         resynced = True
-        bus.replan_pool(f"{user.username}/spec_edit")  # #3644: show the edit now
+        if body.get("replan", True):  # #4054 a bucket joining the ride set only appends its lane
+            bus.replan_pool(f"{user.username}/spec_edit")  # #3644: show the edit now
 
     return {"name": name, "id": spec_id, "sources": sources, "status": "updated",
             "pool_resynced": resynced}

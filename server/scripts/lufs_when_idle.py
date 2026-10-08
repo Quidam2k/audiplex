@@ -73,21 +73,39 @@ def main() -> int:
     src.close(); dst.close()
     print(f"backup: {backup}", flush=True)
 
-    prio = [int(x) for x in Path(a.priority_file).read_text().split(",") if x.strip()] if a.priority_file else []
-    phases = ([("priority", prio)] if prio else []) + [("library", [])]
-    for name, ids in phases:
-        todo = null_ids(a.db, ids)  # each id is tried once; failures stay null
-        print(f"{name}: {len(todo)} to measure", flush=True)
-        while todo:
-            if streaming(time.time()):
-                print(f"[{time.strftime('%H:%M:%S')}] streaming, waiting", flush=True)
-                time.sleep(a.poll_s)
-                continue
-            chunk, todo = todo[:a.batch], todo[a.batch:]
-            measure_loudness.main(["--db", a.db, "--all-tracks", "--limit", "0", "--workers", str(a.workers),
-                                   "--ids", ",".join(map(str, chunk)), "--apply", "--backup-done-at", str(backup),
-                                   "--report", str(SERVER / "data" / "loudness-7387-last.json")])
-        print(f"{name} done: {len(null_ids(a.db, ids))} still null", flush=True)
+    def read_prio() -> list[int]:  # re-read each batch: bucket saves append to it (#4054)
+        if not a.priority_file:
+            return []
+        try:
+            return [int(x) for x in Path(a.priority_file).read_text().split(",") if x.strip()]
+        except (OSError, ValueError):
+            return []
+
+    tried: set[int] = set()  # each id is tried once; failures stay null
+    library: list[int] | None = None
+    while True:
+        queued = read_prio()
+        prio = [t for t in null_ids(a.db, queued) if t not in tried] if queued else []
+        if prio:
+            todo = prio
+        else:
+            if library is None:
+                library = null_ids(a.db, [])
+                print(f"priority done; library: {len(library)} to measure", flush=True)
+            library = [t for t in library if t not in tried]
+            todo = library
+        if not todo:
+            break
+        if streaming(time.time()):
+            print(f"[{time.strftime('%H:%M:%S')}] streaming, waiting", flush=True)
+            time.sleep(a.poll_s)
+            continue
+        chunk = todo[:a.batch]
+        tried.update(chunk)
+        measure_loudness.main(["--db", a.db, "--all-tracks", "--limit", "0", "--workers", str(a.workers),
+                               "--ids", ",".join(map(str, chunk)), "--apply", "--backup-done-at", str(backup),
+                               "--report", str(SERVER / "data" / "loudness-7387-last.json")])
+    print(f"done: {len(null_ids(a.db, []))} still null", flush=True)
     return 0
 
 

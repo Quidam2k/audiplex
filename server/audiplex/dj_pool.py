@@ -262,6 +262,7 @@ class DJPool:
             "spec_id": self.state.get("spec_id"),
             "eligible_count": sum(d["remaining"] for d in lane_details),
             "balance_mode": self.state.get("balance_mode"),
+            "replace_reason": self.state.get("replace_reason"),  # #4054
             "ahead": self.state.get("ahead"),
             "refill_at": self.state.get("refill_at"),
             "no_repeat_picks": self.state.get("no_repeat_picks", NO_REPEAT_PICKS),  # #7108
@@ -299,60 +300,17 @@ class DJPool:
         return counts
 
     def _select_next_lane(self) -> str | None:
-        """Select the next lane using round-robin + starvation rule."""
+        """#4054 strict rotation: the active lane picked least recently goes next, so
+        no lane repeats until every other active lane has had a turn. Paused and
+        exhausted (no eligible track this top-up) lanes are skipped, never waited on.
+        Replaces round-robin-by-index + starvation, which could hand the lane after
+        a skipped one two turns in a row; least-recent-first is also starvation-free."""
         lanes = self.state.get("lanes", {})
-        if not lanes:
+        order = list(lanes.keys())
+        active = [n for n in order if not lanes[n].get("exhausted") and not lanes[n].get("paused")]  # #2806
+        if not active:
             return None
-
-        lane_names = list(lanes.keys())
-        if not lane_names:
-            return None
-
-        config = self.state.get("starvation_config", {})
-        starvation_picks = config.get("check_interval_picks", 6)
-        starvation_minutes = config.get("check_interval_minutes", 25)
-        now = time.time()
-
-        # Find lanes that are starving (haven't played in N picks or M minutes)
-        starving = []
-        for name in lane_names:
-            lane = lanes[name]
-            if lane.get("exhausted") or lane.get("paused"):  # #2806
-                continue
-
-            # #7108: picks since THIS lane's last pick. It used to be total
-            # picks minus the lane's own count, which with two lanes left the
-            # first lane "starving" for good and let it take every slot.
-            picks_since = self.state.get("round_robin_index", 0) - lane.get("last_pick_index", -1) - 1
-            last_played_at = lane.get("last_played_at")
-            minutes_since = None
-            if last_played_at:
-                minutes_since = (now - last_played_at) / 60.0
-
-            # Starving if: never played, or N picks ago, or M minutes ago
-            if picks_since >= starvation_picks or (minutes_since and minutes_since >= starvation_minutes):
-                starving.append(name)
-
-        # Prioritize starving lanes, the longest-waiting first (#7108)
-        if starving:
-            rr = self.state.get("round_robin_index", 0)
-            selected = max(starving, key=lambda n: rr - lanes[n].get("last_pick_index", -1))
-        else:
-            # Round-robin through non-exhausted lanes
-            current_idx = self.state.get("round_robin_index", 0) % len(lane_names)
-            attempts = 0
-            while attempts < len(lane_names):
-                candidate = lane_names[current_idx % len(lane_names)]
-                if not lanes[candidate].get("exhausted") and not lanes[candidate].get("paused"):  # #2806
-                    selected = candidate
-                    break
-                current_idx += 1
-                attempts += 1
-            else:
-                # All lanes exhausted
-                return None
-
-        return selected
+        return min(active, key=lambda n: (lanes[n].get("last_pick_index", -1), order.index(n)))
 
     def set_lane(self, lane: str, action: str) -> dict[str, Any]:  # #2806
         """Pause, resume or remove one lane. Raises KeyError/ValueError with a sayable message."""

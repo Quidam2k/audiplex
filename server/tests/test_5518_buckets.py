@@ -13,6 +13,7 @@ from audiplex_mcp import buckets  # noqa: E402
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch, tmp_path):  # never touch the live buckets.db
     monkeypatch.setenv("DJ_BUCKETS_DB", str(tmp_path / "b.db"))
+    monkeypatch.setattr(bucket_tools, "LUFS_QUEUE", tmp_path / "lufs.txt")  # #7387 never the live queue
     return tmp_path
 
 
@@ -144,7 +145,8 @@ def test_save_from_sources_list_show_edit(monkeypatch):
 
     monkeypatch.setitem(bucket_tools._NS, "_resolve_source", fake_resolve)
     out = run(bucket_tools.dj_bucket_save("road songs", "for the river trail", track_ids=[3],
-                                          sources=[{"kind": "artist", "query": "A"}], created_by="jarvis"))
+                                          sources=[{"kind": "artist", "query": "A"}], created_by="jarvis",
+                                          add_to_set=""))  # #4054 set joining: test_4054_sets
     assert out == "Created bucket 'road songs': +3 tracks, 3 total."
     assert buckets.get_bucket("road songs")["origin"] == "dj"
     assert "ERROR" in run(bucket_tools.dj_bucket_save("x", sources=[{"kind": "artist", "query": "none"}]))

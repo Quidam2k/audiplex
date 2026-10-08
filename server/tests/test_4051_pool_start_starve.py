@@ -83,3 +83,23 @@ def test_undelivered_picks_are_forgotten(tmp_path):
     assert len(pool.state["played_this_session"]) == len(r["picks"]) > 0
     assert pool.forget_picks(r["picks"]) == len(r["picks"])
     assert pool.state["played_this_session"] == []
+
+
+def test_strict_rotation_skips_paused_and_dry_lanes(tmp_path):
+    """#4054: every active lane gets a turn before any repeats; a paused lane and a
+    lane with nothing eligible are skipped without stalling the others."""
+    lanes = {"a": list(range(1, 50)), "b": [100], "c": list(range(200, 250)),
+             "d": list(range(300, 350)), "paused": list(range(400, 450))}
+    pool = dj_pool.DJPool(state_file=tmp_path / "pool.json")
+    pool.set_pool(1, [t for v in lanes.values() for t in v], {}, lanes=dj_pool.lanes_from_ids(lanes),
+                  ahead=40, exclude_recent_hours=0, no_repeat_picks=1000)
+    pool.state["lanes"]["paused"]["paused"] = True
+    r = pool.top_up(CUR, [CUR])
+    label = {t: n for n, v in lanes.items() for t in v}
+    seq = [label[t] for t in r["picks"]]
+    assert "paused" not in seq
+    assert seq.count("b") == 1                      # one track, then dry (window 1000)
+    assert len(seq) == 40                           # the dry lane never stalls the fill
+    rest = [n for n in seq if n != "b"]
+    for i in range(0, len(rest) - 2, 3):            # a, c, d each once per cycle
+        assert sorted(rest[i:i + 3]) == ["a", "c", "d"], seq

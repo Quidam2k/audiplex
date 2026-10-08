@@ -4322,6 +4322,8 @@ async def dj_pool_set(
     starvation_picks: int | None = None,
     starvation_minutes: float | None = None,
     no_repeat_picks: int | None = None,
+    replace_set: bool = False,
+    replace_reason: str = "",
 ) -> str:
     """Start (or replace) the rolling DJ pool from a saved spec or inline sources.
 
@@ -4344,6 +4346,13 @@ async def dj_pool_set(
     no_repeat_picks:      a lane that has played everything recycles its tracks,
                           but never one picked in the last this-many picks
                           (default 30, about two hours)
+    replace_set / replace_reason: a single inline source REFUSES while a saved set
+                          (a spec with 2+ lanes, e.g. todd-ride-mix) exists, because
+                          it replaces the whole mix with one lane (#4054, 10/8: a
+                          'whole albums' bucket became the entire ride). To add a
+                          bucket to the mix use dj_bucket_load / dj_spec_add instead.
+                          Only a deliberate one-lane pool passes replace_set=True
+                          with a reason.
     Picks within a lane are shuffled.
     """
     try:
@@ -4362,6 +4371,20 @@ async def dj_pool_set(
             sources = saved.get("sources") or []
         if not sources:
             return "ERROR: no sources given and no spec named."
+        if spec is None and len(sources) == 1:  # #4054
+            try:
+                listed = await _get("/api/playback/mix-specs")
+            except Exception:
+                listed = []
+            sets = [s for s in (listed if isinstance(listed, list) else [])
+                    if isinstance(s, dict) and len(s.get("sources") or []) >= 2]
+            if sets and not (replace_set and replace_reason.strip()):
+                names = ", ".join(f"'{s.get('name')}'" for s in sets[:5])
+                return (f"REFUSED, pool not started: one inline source would replace the whole mix, and "
+                        f"saved set(s) exist: {names}. To ADD this source to the ride mix use "
+                        f"dj_bucket_load(bucket, spec='todd-ride-mix') or dj_spec_add, then "
+                        f"dj_pool_set(spec='todd-ride-mix'). Only if Todd asked for this source alone: "
+                        f"dj_pool_set(sources=[...], replace_set=True, replace_reason='<his words>').")
         balance = balance or saved.get("balance") or "even"
         # #3644: the pool is a visible queue now. Saved specs carry the old
         # default of 4, so an unspecified ahead is never shallower than this.
@@ -4398,6 +4421,7 @@ async def dj_pool_set(
             "refill_at": refill_at,
             "exclude_recent_hours": exclude_recent_hours,
             "queued_ids": _pool_start_kept_ids(state),  # #4051
+            "replace_reason": replace_reason.strip() or None,  # #4054 kept in pool state
         }
         starve = {}
         if starvation_picks is not None:
@@ -4443,8 +4467,16 @@ async def dj_pool_status() -> str:
     if not status.get("active"):
         return "Pool is not running"
 
+    n_lanes = len(status.get("lanes") or [])
+    try:  # #4054 "set X, N lanes" so a one-lane ride is obvious
+        name = next((s.get("name") for s in await _get("/api/playback/mix-specs")
+                     if s.get("id") == status.get("spec_id")), None)
+    except Exception:
+        name = None
+    set_label = f"set '{name}'" if name else "inline (no saved set)"
     lines = [
-        f"Pool status (spec {status.get('spec_id')}):",
+        f"Pool status: {set_label}, {n_lanes} lane(s)" + (" - ONE LANE" if n_lanes == 1 else "")
+        + (f" (replaced the set: {status['replace_reason']})" if status.get("replace_reason") else "") + ":",
         f"  Balance: {status.get('balance_mode')}, Ahead: {status.get('ahead')}",
         f"  Total tracks: {status.get('eligible_count')}, Queued this session: {status.get('played_this_session_count')}",
         "Lanes:",
@@ -4520,6 +4552,7 @@ async def dj_spec_add(
     spec: str,
     add_sources: list[dict] | None = None,
     add_tracks: list[int] | None = None,
+    replan: bool = True,
 ) -> str:
     """Add sources or specific tracks to a saved mix spec; re-syncs the pool if it is running this spec.
 
@@ -4527,6 +4560,8 @@ async def dj_spec_add(
 
     add_sources: [{kind, query, recursive?, label}, ...]
     add_tracks:  [track_id, ...] (stored as one "added tracks" source)
+    replan:      False = the live pool only gains the lane; the queued songs stay
+                 and the new lane is picked from at the next top-up (#4054)
     """
     new = list(add_sources or [])
     if add_tracks:
@@ -4540,7 +4575,7 @@ async def dj_spec_add(
         new_lanes, empty = await _resolve_lanes(new)
         if empty:
             return f"REFUSED, spec unchanged: empty source(s): {', '.join(empty)}."
-        body: dict = {"add_sources": new}
+        body: dict = {"add_sources": new, "replan": replan}  # #4054
         if await _pool_owns_spec(saved.get("id")):
             lanes, _ = await _resolve_lanes(saved.get("sources") or [])
             for label, ids in new_lanes.items():

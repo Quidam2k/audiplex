@@ -5,9 +5,12 @@ so dj_bucket_load is just dj_spec_add with a bucket source: the pool's lane
 and starvation rules apply to it like any folder or artist.
 """
 
-from pathlib import PurePath
+from pathlib import Path, PurePath
 
 from audiplex_mcp import buckets
+
+RIDE_SET = "todd-ride-mix"  # #4054
+LUFS_QUEUE = Path(__file__).resolve().parents[1] / "server" / "data" / "lufs_priority_ids.txt"  # #7387
 
 _NS: dict | None = None
 
@@ -93,6 +96,7 @@ async def dj_bucket_save(
     origin: str = "dj",
     created_by: str = "",
     replace: bool = False,
+    add_to_set: str = RIDE_SET,
 ) -> str:
     """Build or extend a themed bucket. DJs use this to keep their own sets ride over ride.
 
@@ -104,6 +108,10 @@ async def dj_bucket_save(
     created_by:  who built it (jarvis, karen, orolo)
     replace:     True clears the bucket's tracks first; otherwise tracks are appended
                  and duplicates skipped
+    add_to_set:  the set (saved spec) this bucket joins as its own lane, default
+                 'todd-ride-mix' (#4054, Todd 10/8: a new bucket joins the mix, it never
+                 replaces it). A live pool only gains the lane; nothing queued is cut.
+                 Pass "" to keep the bucket out of every set.
     """
     tracks: list[dict] = [{"track_id": t} for t in track_ids or []]
     for src in sources or []:
@@ -122,7 +130,33 @@ async def dj_bucket_save(
         return f"ERROR: {e}"
     verb = "Created" if r["created"] else "Updated"
     dup = f", {r['skipped_duplicates']} already in it" if r["skipped_duplicates"] else ""
-    return f"{verb} bucket '{r['name']}': +{r['added']} tracks{dup}, {r['track_count']} total."
+    out = f"{verb} bucket '{r['name']}': +{r['added']} tracks{dup}, {r['track_count']} total."
+    _queue_for_loudness(t["track_id"] for t in tracks)  # #7387 measured before it plays
+    if add_to_set:
+        out += " " + await _join_set(r["name"], add_to_set)
+    return out
+
+
+def _queue_for_loudness(track_ids) -> None:
+    """#7387: put new bucket tracks at the front of the idle LUFS run."""
+    try:
+        ids = {int(t) for t in track_ids}
+        old = {int(x) for x in LUFS_QUEUE.read_text().split(",") if x.strip()} if LUFS_QUEUE.exists() else set()
+        if ids - old:
+            LUFS_QUEUE.write_text(",".join(map(str, sorted(old | ids))))
+    except (OSError, ValueError):
+        pass
+
+
+async def _join_set(bucket_name: str, set_name: str) -> str:
+    """#4054: add the bucket as a lane of the set unless it is already one."""
+    spec = await _helper("_get_spec")(set_name)
+    if isinstance(spec, str):
+        return f"Not added to a set: {spec}"
+    if any(s.get("kind") == "bucket" and s.get("query") == bucket_name for s in spec.get("sources") or []):
+        return f"Already a lane of set '{set_name}'."
+    source = {"kind": "bucket", "query": bucket_name, "label": f"bucket: {bucket_name}"}
+    return await _helper("dj_spec_add")(spec=set_name, add_sources=[source], replan=False)
 
 
 async def dj_bucket_edit(
