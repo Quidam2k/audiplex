@@ -9,7 +9,7 @@ ATTRIB_BEFORE_S after (or ATTRIB_AFTER_S before) an agent advance command in the
 playback diag log is the DJ's and is ignored. A voice skip Todd asked for is
 relayed by an agent with payload by='todd' and counts as his.
 
-Weight 0 is a soft drop, named in the ride note; a 4+ star rating restores it.
+Weight 0 is a soft drop, named in the ride note; a 4+ star rating or dj_love restores it.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from audiplex.models import DjLearnRun, DjTrackWeight, PlayStat, Track, TrackRating, _utcnow
+from audiplex.models import DjLearnRun, DjTrackTag, DjTrackWeight, PlayStat, Track, TrackRating, _utcnow
 
 FAST_SKIP_S = 5.0
 ATTRIB_BEFORE_S = 15.0
@@ -125,6 +125,8 @@ def learn(
     loved = set(db.scalars(select(TrackRating.track_id).where(
         TrackRating.user_id == owner_id, TrackRating.rating >= LOVE_MIN_STARS,
         TrackRating.updated_at >= lo, TrackRating.updated_at <= hi)))
+    loved |= set(db.scalars(select(DjTrackTag.track_id).where(  # dj_love with no stars = the 'loved' tag
+        DjTrackTag.tag == "loved", DjTrackTag.created_at >= lo, DjTrackTag.created_at <= hi)))
 
     down: list[dict[str, Any]] = []
     up: list[dict[str, Any]] = []

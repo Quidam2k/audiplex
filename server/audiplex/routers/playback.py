@@ -1308,6 +1308,9 @@ def add_tags(body: dict, db: Session = Depends(get_db), user: User = Depends(get
                 db.add(DjTrackTag(track_id=tid, tag=tag, persona=body.get("persona")))
                 added += 1
     db.commit()
+    if "loved" in tags:  # #4057: dj_love brings back a track the rides dropped
+        for tid in sorted(known):
+            dj_learn_restore(db, tid)
     return {"tags": tags, "tracks": sorted(known), "added": added, "unknown": sorted(ids - known)}
 
 

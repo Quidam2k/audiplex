@@ -163,3 +163,20 @@ def test_pause_book_bookmarks_for_the_owner_and_pauses(client, db_engine, sample
     pos = db.query(PlaybackPosition).filter_by(book_id=sample_book.id).one()
     assert (pos.position_seconds, pos.chapter_index) == (754.5, 3)
     playback.bus.reset()
+
+
+def test_dj_love_tag_counts_as_loved_and_restores(client, db_engine):
+    from sqlalchemy.orm import sessionmaker
+
+    from audiplex.models import DjTrackTag
+
+    db = sessionmaker(bind=db_engine)()
+    a, b = _tracks(db, 2)
+    db.add(DjTrackTag(track_id=a, tag="loved", created_at=T0 + timedelta(minutes=1)))
+    db.add(DjTrackWeight(track_id=b, weight=0.0, skip_rides=2))
+    db.commit()
+    dj_learn.learn(db, _owner(db), T0, T0 + timedelta(hours=1), "r1", advance_times=[])
+    assert _w(db, a) == 1.3
+    assert client.post("/api/playback/tags", json={"track_ids": [b], "tags": ["loved"]}).status_code == 200
+    db.expire_all()
+    assert _w(db, b) == 1.0
