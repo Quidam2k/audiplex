@@ -6,11 +6,17 @@ from audiplex.models import Track
 
 
 def test_levels_endpoint_default_off(client, db_session, sample_album):
-    """Verify levels endpoint exists and reports normalization OFF by default."""
+    """Verify levels endpoint exists and reports the configured normalization flag.
+
+    #7389: the code default stays OFF; config.yaml turns it on in production.
+    """
+    from audiplex.config import Settings, get_settings
+
+    assert Settings.model_fields["normalize_music"].default is False  # #7389
     response = client.get("/api/music/levels")
     assert response.status_code == 200
     data = response.json()
-    assert data["normalize_music"] is False
+    assert data["normalize_music"] is get_settings().normalize_music  # #7389
     assert data["target_lufs"] == -24.0
     assert data["fallback_lufs"] is None
 
