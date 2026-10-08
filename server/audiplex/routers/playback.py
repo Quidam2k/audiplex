@@ -22,6 +22,7 @@ Endpoints:
   GET  /api/playback/favorites              — owner's favorites (read-only)
   GET  /api/playback/ratings                — owner's star ratings (read-only)
   GET  /api/playback/track-stats            — owner's completion rates / skip positions
+  GET  /api/playback/track-profile/{id}    — loudness profile + dips for a track (#7335)
   GET  /api/playback/tracks/{id}/identity   — recording + work keys for a track
   GET  /api/playback/cooldown               — what the owner heard recently
   POST /api/playback/candidates/filter      — advisory: which picks repeat, and why
@@ -125,8 +126,13 @@ async def post_command(cmd: PlaybackCommand, user: User = Depends(get_current_us
         raise HTTPException(status_code=409, detail=refusal)
     # #3552: record who sent it; the MCP adds "<persona>:<tool>".
     source = user.username + (f"/{cmd.source}" if cmd.source else "")
+    from audiplex import todd_stop  # #4011
+    todd_refusal = todd_stop.gate(cmd.type, cmd.payload or {}, source, get_settings().dj_owner_username, time.time())  # #4011
+    if todd_refusal:  # #4011
+        raise HTTPException(status_code=409, detail=todd_refusal)  # #4011
     rec = await bus.enqueue(cmd.type, cmd.payload, source=source)
-    return PlaybackCommandQueued(id=rec.id, type=rec.type, pending=bus.pending())
+    kept = len(rec.payload.get("track_ids") or []) if "track_ids" in (rec.payload or {}) else None  # #7335
+    return PlaybackCommandQueued(id=rec.id, type=rec.type, pending=bus.pending(), notes=rec.guard_notes, kept=kept)  # #7335
 
 
 @router.get("/command/next")
@@ -300,6 +306,47 @@ def cancel_scheduled_stop(user: User = Depends(get_current_user)):
     """Cancel any armed stop and lift the stop latch."""
     had = stop_controller.clear("cancelled by DELETE", bus, time.time())
     return {"cleared": had, **stop_controller.public(time.time(), bus)}
+
+
+# ----- #4011: Todd's own stop, persisted and lifted only by his words -----
+
+
+@router.get("/stop-latch")
+def get_stop_latch(user: User = Depends(get_current_user)):  # #4011
+    from audiplex import todd_stop  # #4011
+
+    state = todd_stop.read_latch()  # #4011
+    return {"latched": state is not None, "state": state}  # #4011
+
+
+@router.post("/stop-latch")
+def set_stop_latch(body: dict, user: User = Depends(get_current_user)):  # #4011
+    """dj_stop: pause, stop the DJ pool, refuse outstanding starts, and latch.
+
+    body {"reason": str, "todd_quote": str}. todd_quote is required: it is the
+    record of what Todd said. The latch never times out; only DELETE lifts it.
+    """
+    from audiplex import todd_stop  # #4011
+
+    quote = str(body.get("todd_quote") or "")  # #4011
+    if not quote.strip():  # #4011
+        raise HTTPException(status_code=422, detail="todd_quote is required")  # #4011
+    now = time.time()  # #4011
+    state = todd_stop.set_latch(str(body.get("reason") or "Todd stopped the DJ"), quote, now)  # #4011
+    cancelled = bus.cancel_outstanding_starts()  # #4011
+    stop_controller._stop_pool()  # #4011
+    pause = bus._enqueue("pause", {}, source="todd_stop")  # #4011
+    return {"latched": True, "state": state, "cancelled_starts": cancelled, "pause_id": pause.id}  # #4011
+
+
+@router.delete("/stop-latch")
+def lift_stop_latch(todd_quote: str = Query(..., min_length=1), user: User = Depends(get_current_user)):  # #4011
+    """dj_stop_lift: the only way the latch comes off. Quote required, kept in history."""  # #4011
+    from audiplex import todd_stop  # #4011
+
+    if not todd_quote.strip():  # #4011
+        raise HTTPException(status_code=422, detail="todd_quote is required")  # #4011
+    return todd_stop.lift(todd_quote, time.time())  # #4011
 
 
 @router.get("/devices")
@@ -589,6 +636,34 @@ def get_owner_track_identity(
     return identity
 
 
+@router.get("/track-profile/{track_id}")  # #7335 / #3981
+def get_track_profile(track_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Loudness profile and dips for one track (scripts/measure_profile.py).
+
+    Unmeasured tracks answer 200 with measured=false, so a DJ break can say
+    "not measured yet" without an error. 404 only when the track does not exist.
+    """
+    from audiplex.models import Track, TrackAudioProfile, TrackDip  # #7335
+    if db.get(Track, track_id) is None:
+        raise HTTPException(status_code=404, detail="Track not found")
+    row = db.get(TrackAudioProfile, track_id)
+    if row is None:
+        return {"track_id": track_id, "measured": False, "profile": None, "dips": []}
+    dips = (db.query(TrackDip).filter(TrackDip.track_id == track_id)
+            .order_by(TrackDip.start_s).all())
+    return {
+        "track_id": track_id,
+        "measured": True,
+        "profile": {
+            "integrated_lufs": row.integrated_lufs, "intro_quiet_s": row.intro_quiet_s,
+            "outro_fade_s": row.outro_fade_s, "duration_s": row.duration_s,
+            "analyzed_at": row.analyzed_at, "analyzer_version": row.analyzer_version,
+        },
+        "dips": [{"start_s": d.start_s, "end_s": d.end_s, "depth_db": d.depth_db, "kind": d.kind}
+                 for d in dips],
+    }
+
+
 def _cooldown_settings(
     recording_minutes: float | None, work_minutes: float | None
 ) -> tuple[float, float]:
@@ -729,7 +804,7 @@ def plan_owner_mix(
         list(body.played_ids) + [p.track_id for p in recent],
         body.upcoming_ids,
         [i for i in body.new_ids if i not in skip],
-        {track_id: ident.recording_id for track_id, ident in identities.items()},
+        {track_id: ident.work_id for track_id, ident in identities.items()},  # #7335: one song, any version
         shuffle=body.shuffle,
         seed=body.seed,
     )

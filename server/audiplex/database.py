@@ -358,6 +358,31 @@ def _migrate_track_tempo_key(engine):  # #1002
             conn.execute(text(f"ALTER TABLE tracks ADD COLUMN {name} {typ}"))
 
 
+def _migrate_track_audio_profile(engine):  # #7335 / #3981
+    """Create track_audio_profile and track_dips if missing (idempotent)."""
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "tracks" not in tables:
+        return
+    with engine.begin() as conn:
+        if "track_audio_profile" not in tables:
+            conn.execute(text(
+                "CREATE TABLE track_audio_profile ("
+                " track_id INTEGER PRIMARY KEY REFERENCES tracks(id),"
+                " integrated_lufs FLOAT, intro_quiet_s FLOAT, outro_fade_s FLOAT,"
+                " duration_s FLOAT, analyzed_at VARCHAR(40), analyzer_version VARCHAR(20))"
+            ))
+        if "track_dips" not in tables:
+            conn.execute(text(
+                "CREATE TABLE track_dips ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " track_id INTEGER NOT NULL REFERENCES tracks(id),"
+                " start_s FLOAT NOT NULL, end_s FLOAT NOT NULL,"
+                " depth_db FLOAT NOT NULL, kind VARCHAR(10) NOT NULL)"
+            ))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_track_dips_track_id ON track_dips (track_id)"))
+
+
 def init_db(database_url: str | None = None):
     """Initialize the database engine and session factory.
 
@@ -385,6 +410,7 @@ def init_db(database_url: str | None = None):
     _migrate_track_tempo_key(_engine)  # #1002
     _migrate_music_video_prompt_template(_engine)  # #6867
     _migrate_music_video_aspect(_engine)  # #6172
+    _migrate_track_audio_profile(_engine)  # #7335 / #3981
     Base.metadata.create_all(bind=_engine)
     return _engine
 

@@ -114,9 +114,9 @@ def test_rated_is_a_pool_source_kind(monkeypatch):
 
     monkeypatch.setattr(mcp, "_get", fake_get)
     label, tracks = asyncio.run(mcp._resolve_source("rated", "4"))
-    assert label == "rated 4+ stars" and [t["id"] for t in tracks] == [1, 2]
+    assert label == "rated 4+ stars" and sorted(t["id"] for t in tracks) == [1, 2]  # #7335: shuffled
     label, tracks = asyncio.run(mcp._resolve_source("rated", ""))
-    assert [t["id"] for t in tracks] == [1, 2]
+    assert sorted(t["id"] for t in tracks) == [1, 2]  # #7335: the rated pool is shuffled, so compare as a set
     with pytest.raises(LookupError):
         asyncio.run(mcp._resolve_source("rated", "5.5"))
 

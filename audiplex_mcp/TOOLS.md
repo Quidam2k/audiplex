@@ -50,7 +50,7 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_outro_cancel` — disarm a pending outro.
 
 ## Voice
-- `dj_break_brief` — everything to write a break: daypart, time, weather, Previous / Now playing / Next, DJ pair notes.
+- `dj_break_brief` — everything to write a break: daypart, time, weather, Previous / Now playing / Next, DJ pair notes, and a loudness line per track (intro quiet, fade, dips; "not measured yet" until scripts/measure_profile.py has run). #3981
 - `dj_announce` — synthesize your copy and queue it as a voice break (held while Todd talks).
 - `dj_patter` — turn the bridge watcher's automatic between-song patter on/off.
 
@@ -75,7 +75,7 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_cooldown` — what he heard recently enough that a pick would repeat it.
 - `dj_check_picks` — before queueing: which picks repeat something recent, and why (advisory).
 - `dj_track_ratings` — his own 1-5 star ratings from the phone.
-- `dj_track_stats` — completion rates and where skips land.
+- `dj_track_stats` — completion rates and where skips land, with each track's loudness line (intro quiet, fade, dips) when measured. #3981
 - `dj_pair_note` / `dj_pair_notes` — write / read DJ notes on a track or a track_a -> track_b pairing (kept across rides).
 - `dj_what_was_that` — Todd asked "what was that?": names the last (or current) song and has the DJ name it the next 3 plays (#3912).
 - `dj_callouts` — which songs a DJ bridge names: whole-album deep cuts yes, Todd's faster/slower picks and hits no; show or set per pool lane (#3912).
@@ -101,5 +101,7 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_stop_after_current` — "stop after this song": trims the queue, stops the pool, latches against refills, pauses at the song's end on any phone build, then verifies playing=no.
 - `dj_stop_status` — the verdict (VERIFIED or NOT verified) and whether the stop latch is on. Never tell Todd it stopped until this says VERIFIED.
 - `dj_stop_cancel` — cancel the stop and lift the latch. While the latch is on, dj_queue/dj_play_next answer STOPPED; that's deliberate. dj_play_now also lifts it; it expires after 3 h.
+- `dj_stop` (reason, todd_quote) — #4011: Todd's own stop. Pauses, stops the pool, refuses pending starts, and sets a PERSISTED latch with no timer. Every start (play_now, resume, queue, play_next, play_stream, play_book, activate, announce, bed_play, refills) is refused until Todd lifts it. resume, dj_stop_cancel and DELETE scheduled-stop do NOT lift it. A stop is lifted only by Todd's own words about music.
+- `dj_stop_lift` (todd_quote) — #4011: the only lift for dj_stop. Quote is required. Phone play, Bluetooth reconnect and audio focus never lift it.
 - Command tools (pause, skip, volume, seek, previous, reorder, bed_*) now lead with DONE only when the phone acked ok; otherwise NOT DONE.
 - `dj_sleep_start` — "sleep mode". No args: the playing book fades out after 30 min while the brown-noise bed (found by title in the library) crossfades in; `bed_mode="under"` keeps the bed underneath from the start.

@@ -397,6 +397,8 @@ class PlaybackCommandQueued(BaseModel):
     id: int
     type: str
     pending: int
+    notes: list[str] = []  # #7335: queue_guard drops/moves for this command
+    kept: int | None = None  # #7335: how many track ids survived the guard
 
 
 class PlaybackCommandAck(BaseModel):

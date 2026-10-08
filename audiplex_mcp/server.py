@@ -604,7 +604,20 @@ def _is_yes(result: str) -> bool:  # #2843: may a tool's prose say it's playing?
     return " playing=YES" in result.split("\n", 1)[0]
 
 
+def _guard_text(data) -> str:  # #7335: queue_guard drops and moves, named for the caller
+    notes = data.get("guard_notes") if isinstance(data, dict) else None  # #7335
+    return "".join(f"\nQueue guard: {note}" for note in notes or [])  # #7335
+
+
 async def _result(data: dict, asked: int, wait_ack: bool = True) -> str:  # #ride0928
+    # One machine-readable line every start-type tool leads with (#7335: plus  # #7335
+    # the queue guard's notes, and no ack wait when the guard dropped everything).  # #7335
+    if isinstance(data, dict) and not data.get("id"):  # #7335: nothing was queued
+        wait_ack = False  # #7335
+    return await _result_line(data, asked, wait_ack) + _guard_text(data)  # #7335
+
+
+async def _result_line(data: dict, asked: int, wait_ack: bool = True) -> str:  # #ride0928 #7335
     """One machine-readable line every start-type tool leads with:
     sent / held / skipped_missing (titles) / phone_ack (status: detail) /
     playing (#2843: YES only when the device reported it playing)."""
@@ -743,14 +756,19 @@ async def _enqueue(cmd_type: str, payload: dict) -> str:
     if not isinstance(data, dict):
         return data
     chunks, sent = 1, len(payload.get("track_ids") or [])
+    guard_notes = list(data.get("notes") or [])  # #7335: queue_guard, per chunk
+    sent = data.get("kept", sent) if data.get("kept") is not None else sent  # #7335: what the server kept
     for i in range(0, len(rest), QUEUE_CHUNK):  # #3249: FIFO bus keeps order
         piece = rest[i:i + QUEUE_CHUNK]
         more = await _enqueue_raw("queue", {"track_ids": piece})
         if not isinstance(more, dict):
             break
-        chunks, sent = chunks + 1, sent + len(piece)
+        guard_notes += list(more.get("notes") or [])  # #7335
+        kept_more = more.get("kept")  # #7335
+        chunks, sent = chunks + 1, sent + (len(piece) if kept_more is None else kept_more)  # #7335
     if kept:
         data["sent_count"], data["chunks"] = sent, chunks
+    data["guard_notes"] = guard_notes  # #7335
     data["_cmd"] = cmd_type  # #2843: _result verifies against what was asked
     data["_payload"] = {**payload, "track_ids": kept} if kept else payload
     if dropped:
@@ -1228,6 +1246,46 @@ async def dj_stop_cancel() -> str:
             else "Nothing was armed or latched.")
 
 
+@mcp.tool()
+async def dj_stop(reason: str, todd_quote: str) -> str:  # #4011
+    """Todd said stop the music. Pauses playback, stops the DJ pool, refuses every
+    queued or unacked start, and sets a PERSISTED latch that no persona can clear.
+    Only Todd lifts it, with dj_stop_lift and his own words.
+
+    Use this when Todd tells you to stop the DJ or the music, in any words.
+    todd_quote is REQUIRED: his exact words. reason is a short note of why.
+    A resume, play_now, dj_stop_cancel or a DELETE of the scheduled stop does NOT
+    lift it. Nothing else in the Audiplex lifts it either."""
+    if not (todd_quote or "").strip():  # #4011
+        return "REFUSED: todd_quote is required (Todd's own words)."  # #4011
+    try:  # #4011
+        data = await _post("/api/playback/stop-latch", {"reason": reason, "todd_quote": todd_quote})  # #4011
+    except Exception as e:  # #4011
+        return f"NOT STOPPED: {e}. Nothing was latched; tell Todd the stop did not go through."  # #4011
+    return (f"Stopped and latched. Refused {data.get('cancelled_starts', 0)} pending start(s). "  # #4011
+            "Starts stay refused until Todd lifts it with dj_stop_lift and his words.")  # #4011
+
+
+@mcp.tool()
+async def dj_stop_lift(todd_quote: str) -> str:  # #4011
+    """Lift Todd's DJ stop (dj_stop). Only call this with Todd's OWN words about
+    the music, quoted exactly. A stop is never lifted by a timer, a resume, a
+    Bluetooth reconnect or a phone auto-play, or because someone else asked."""
+    if not (todd_quote or "").strip():  # #4011
+        return "REFUSED: todd_quote is required (Todd's own words about the music)."  # #4011
+    try:  # #4011
+        async with httpx.AsyncClient(timeout=20) as client:  # #4011
+            resp = await client.delete(  # #4011
+                f"{AUDIPLEX_URL}/api/playback/stop-latch",  # #4011
+                headers=_headers(), params={"todd_quote": todd_quote})  # #4011
+        resp.raise_for_status()  # #4011
+    except Exception as e:  # #4011
+        return f"NOT lifted: {e}"  # #4011
+    data = resp.json()  # #4011
+    return ("Lifted. The DJ may play again on Todd's request." if data.get("lifted")  # #4011
+            else "Nothing was latched.")  # #4011
+
+
 # #3367: the default bed, found by title in the library (any category) so
 # dropping Todd's own track into a library root and rescanning switches it over
 # with no config edit. First match wins; the generated loop is the fallback.
@@ -1355,6 +1413,9 @@ async def dj_break_brief() -> str:
             lines.append("After that: " + "; ".join(f"{i.get('title')} - {i.get('artist')}" for i in later))
         lines += await _pair_note_lines(prev, t, nxt)  # #ride0928
         lines += await dj_toolkit.todd_lines([prev, t, nxt])  # #7230: his stars + loves
+        for role, tr in (('Previous', prev), ('Now', t), ('Next', nxt)):  # #3981
+            if tr and (tr.get('id') or 0) > 0:  # #3981
+                lines.append(f'  {role} loudness: {await _profile_line(tr["id"])}')  # #3981
     else:
         lines += ["", "Nothing is playing right now."]
 
@@ -1365,6 +1426,33 @@ async def dj_break_brief() -> str:
             "Set DJ_TTS_URL to an OpenAI-compatible speech endpoint.",
         ]
     return "\n".join(lines)
+
+
+def _mmss(seconds: float) -> str:  # #3981
+    minutes, secs = divmod(int(round(float(seconds))), 60)  # #3981
+    return f"{minutes}:{secs:02d}"  # #3981
+
+
+async def _profile_line(track_id) -> str:  # #3981
+    """One compact line: intro quiet, fade and dips from scripts/measure_profile.py (#7335)."""  # #3981
+    try:  # #3981
+        data = await _get(f"/api/playback/track-profile/{int(track_id)}")  # #3981
+    except Exception:  # #3981
+        return "loudness profile: unavailable"  # #3981
+    if not data or not data.get("measured"):  # #3981
+        return "loudness profile: not measured yet"  # #3981
+    prof = data.get("profile") or {}  # #3981
+    bits = []  # #3981
+    intro, outro = prof.get("intro_quiet_s"), prof.get("outro_fade_s")  # #3981
+    if intro is not None and intro >= 1:  # #3981
+        bits.append(f"intro quiet {intro:.0f}s")  # #3981
+    if outro is not None and outro >= 1:  # #3981
+        bits.append(f"fade {outro:.0f}s")  # #3981
+    dips = [f"{_mmss(d['start_s'])}-{_mmss(d['end_s'])} (-{d['depth_db']:.0f} dB, {d['kind']})"  # #3981
+            for d in (data.get("dips") or [])[:2]]  # #3981
+    if dips:  # #3981
+        bits.append("dips " + "; ".join(dips))  # #3981
+    return " · ".join(bits) if bits else "loudness profile: measured, no quiet intro, fade or dips"  # #3981
 
 
 async def _prev_next(state: dict) -> tuple[dict | None, dict | None, list[dict]]:  # #ride0928
@@ -2049,6 +2137,8 @@ async def _resolve_source(kind: str, query: str, recursive: bool = True) -> tupl
         rows = [r for r in await _get("/api/playback/ratings") if r.get("stars", r["rating"]) >= floor]  # #6117
         if not rows:
             raise LookupError(f"Nothing rated {floor:g}+ stars yet. dj_star() sets them.")
+        import random  # #7335: ratings order would lay five-stars back to back
+        random.shuffle(rows)  # #7335: queue_guard spaces them; the shuffle keeps the lanes honest
         label, tracks = f"rated {floor:g}+ stars", [{"id": r["track_id"]} for r in rows]
     elif kind == "tracks":  # #2806: explicit ids, "12, 34 56"
         ids = [int(x) for x in re.findall(r"\d+", query)]
@@ -2831,6 +2921,8 @@ async def dj_track_stats(limit: int = 25, min_starts: int = 2) -> str:
         if len(entry.get("track_ids") or []) > 1:
             line += f"  [{len(entry['track_ids'])} copies pooled]"
         lines.append(line)
+        if track.get('id'):  # #3981
+            lines.append('      ' + await _profile_line(track['id']))  # #3981
     return "\n".join(lines)
 
 

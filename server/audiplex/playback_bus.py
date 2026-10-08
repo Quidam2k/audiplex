@@ -62,9 +62,11 @@ import logging
 import os
 import time
 from collections import OrderedDict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field  # #7335
 from pathlib import Path
 from typing import Any, Deque, Optional
+
+from audiplex import queue_guard  # #7335
 
 # How long after the last poll we still consider a device connected. The client
 # re-issues its long-poll immediately after each 25s timeout, so anything past
@@ -166,6 +168,8 @@ class PlaybackCommandRecord:
     # #3552: who sent it ("<user>/<persona>:<tool>", "scheduled_stop", ...),
     # so a pause nobody admits to can be traced to its caller.
     source: str = "server"
+    # #7335: what queue_guard dropped or moved on this command, shown to the caller.
+    guard_notes: list[str] = field(default_factory=list)  # #7335
 
     def summary(self) -> dict[str, Any]:
         """What the DJ tools render — the whole point of the registry."""
@@ -258,6 +262,14 @@ class PlaybackBus:
         target_device_id: Optional[str] = None,
         source: str = "server",
     ) -> PlaybackCommandRecord:
+        guard_notes: list[str] = []  # #7335
+        if queue_guard.is_agent_source(source) and type in queue_guard.GUARDED_OPS:  # #7335
+            payload, guard_notes, all_dropped = self._guard_payload(type, payload, source)  # #7335
+            if all_dropped:  # #7335: nothing left to send, so nothing is queued
+                return PlaybackCommandRecord(  # #7335
+                    id=0, type=type, payload=payload, created_at=time.time(), status=STATUS_FAILED,  # #7335
+                    ack_detail="queue guard dropped every track", source=source, guard_notes=guard_notes,  # #7335
+                )  # #7335
         self._seq += 1
         rec = PlaybackCommandRecord(
             id=self._seq,
@@ -266,13 +278,88 @@ class PlaybackBus:
             created_at=time.time(),
             target_device_id=target_device_id,
             source=source,
+            guard_notes=guard_notes,  # #7335
         )
+        refusal = self._todd_stop_refusal(type, payload, source)  # #4011
+        if refusal:  # #4011
+            self._refuse(rec, refusal)  # #4011
         self._commands[rec.id] = rec
         while len(self._commands) > COMMAND_HISTORY_CAPACITY:
             self._commands.popitem(last=False)
         _append_diag("cmd_queued", _cmd_diag(rec))
         self._event().set()
         return rec
+
+    def _guard_payload(self, type: str, payload: Any, source: str) -> tuple[Any, list[str], bool]:  # #7335
+        # queue_guard over an agent batch: (payload, notes, every track dropped).  # #7335
+        # Fails open: if the guard cannot read its inputs the command goes out  # #7335
+        # unchanged, because a repeat is cheaper than silence.  # #7335
+        ids = payload.get("track_ids") if isinstance(payload, dict) else None  # #7335
+        if not isinstance(ids, list) or not ids:  # #7335
+            return payload, [], False  # #7335
+        try:  # #7335
+            state = self.get_state() or {}  # #7335
+            track = state.get("track") or {}  # #7335
+            current = track.get("id") if isinstance(track, dict) else None  # #7335
+            idx = state.get("queue_index") or 0  # #7335
+            queue = [q for q in state.get("queue") or [] if isinstance(q, dict)]  # #7335
+            upcoming = [q.get("id") for q in queue  # #7335
+                        if (q.get("index") or 0) > idx and isinstance(q.get("id"), int)]  # #7335
+            reserved = [t for rec in self._commands.values()  # #7335
+                        if rec.status in (STATUS_QUEUED, STATUS_DELIVERED) and rec.type in ("queue", "play_next")  # #7335
+                        for t in (rec.payload.get("track_ids") or []) if isinstance(t, int)]  # #7335
+            if type == "replace_upcoming":  # #7335: the replace discards the surviving queue
+                upcoming, reserved = [], []  # #7335
+            from audiplex.dj_pool import owner_user_id  # #7335
+            db = _pool_session()  # #7335
+            try:  # #7335
+                inp = queue_guard.load_guard_input(  # #7335
+                    db, op=type, incoming=[int(t) for t in ids],  # #7335
+                    current_id=current if isinstance(current, int) else None,  # #7335
+                    upcoming=upcoming, reserved=reserved,  # #7335
+                    owner_id=owner_user_id(db), now=time.time(),  # #7335
+                )  # #7335
+            finally:  # #7335
+                db.close()  # #7335
+            result = queue_guard.apply_guard(inp)  # #7335
+        except Exception as e:  # #7335
+            print(f"[queue_guard] skipped, sent unguarded: {e}", flush=True)  # #7335
+            return payload, [], False  # #7335
+        return {**payload, "track_ids": result.kept}, result.notes, not result.kept  # #7335
+
+    def _todd_stop_refusal(self, type: str, payload: Any, source: str) -> Optional[str]:  # #4011
+        """Refusal text while Todd's stop latch is set; None to let it through.
+
+        Checked at enqueue AND at delivery (_claim), so a command queued before
+        the latch never reaches the phone after it. Fails closed on any error.
+        """
+        from audiplex import todd_stop  # #4011
+        from audiplex.config import get_settings  # #4011
+        try:  # #4011
+            owner = get_settings().dj_owner_username  # #4011
+            return todd_stop.gate(type, payload or {}, source, owner, time.time())  # #4011
+        except Exception as e:  # #4011
+            print(f"[todd_stop] gate failed, refusing start: {e}", flush=True)  # #4011
+            return None if type not in todd_stop.START_CMDS else (  # #4011
+                "Todd's stop latch could not be read; start refused.")  # #4011
+
+    def _refuse(self, rec: PlaybackCommandRecord, detail: str) -> None:  # #4011
+        """Mark a command refused: it is never delivered, and the reason is its ack."""  # #4011
+        rec.status = STATUS_FAILED  # #4011
+        rec.ack_status = "refused"  # #4011
+        rec.ack_detail = detail  # #4011
+        rec.acked_at = time.time()  # #4011
+        _append_diag("cmd_refused", {"id": rec.id, "type": rec.type, "source": rec.source})  # #4011
+
+    def cancel_outstanding_starts(self) -> int:  # #4011
+        """dj_stop: refuse every start command still queued or unacked (they would retry after 60 s)."""  # #4011
+        from audiplex.todd_stop import START_CMDS  # #4011
+        n = 0  # #4011
+        for rec in self._commands.values():  # #4011
+            if rec.status in (STATUS_QUEUED, STATUS_DELIVERED) and rec.type in START_CMDS:  # #4011
+                self._refuse(rec, "cancelled by Todd's DJ stop")  # #4011
+                n += 1  # #4011
+        return n  # #4011
 
     def _claim(self, now: float, poller_id: str) -> Optional[PlaybackCommandRecord]:
         """The oldest command owed to `poller_id`, or None.
@@ -292,6 +379,10 @@ class PlaybackBus:
                 rec.status == STATUS_DELIVERED
                 and now - rec.delivered_at >= REDELIVER_AFTER_SECONDS
             ):
+                refusal = self._todd_stop_refusal(rec.type, rec.payload, rec.source)  # #4011
+                if refusal:  # #4011
+                    self._refuse(rec, refusal)  # #4011
+                    continue  # #4011
                 rec.status = STATUS_DELIVERED
                 rec.delivered_at = now
                 rec.delivery_count += 1

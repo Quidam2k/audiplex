@@ -488,9 +488,9 @@ class DJPool:
                     for play in taste.recent_plays_for(db, owner_id, window_minutes, identities):
                         played_before.add(play.recording_id)
                 skip_recordings |= played_before
-            except Exception:
+            except Exception as e:  # #7335: logged, still fail-open for picking
                 # If taste lookup fails, just skip session-played tracks
-                pass
+                print(f"[dj_pool] WARNING taste/ban lookup failed, picking without it: {e}", flush=True)  # #7335
 
         def recording_of(tid: int) -> Optional[str]:
             ident = identities.get(tid) if identities else None
@@ -502,8 +502,33 @@ class DJPool:
             if rec is not None:
                 skip_recordings.add(rec)
 
+        # #7335: one song, any version. A work already queued, playing, cued, or  # #7335
+        # counted inside the work cooldown is not picked, and a pick blocks its  # #7335
+        # work for the rest of this top-up. Checked BEFORE a pick is taken, so a  # #7335
+        # rejected candidate is never consumed from its lane.  # #7335
+        work_of = {tid: ident.work_id for tid, ident in identities.items()} if identities else {}  # #7335
+        blocked_works: set[str] = {  # #7335
+            work_of[t] for t in [current_track_id, *upcoming_track_ids, *(current_played_track_ids or [])]  # #7335
+            if isinstance(t, int) and t in work_of  # #7335
+        }  # #7335
+        if db is not None:  # #7335
+            try:  # #7335
+                from audiplex import queue_guard  # #7335
+                counted = queue_guard.load_guard_input(  # #7335
+                    db, op="queue", incoming=[], current_id=current_track_id,  # #7335
+                    upcoming=[t for t in upcoming_track_ids if isinstance(t, int)], reserved=[],  # #7335
+                    owner_id=owner_id, now=time.time(),  # #7335
+                )  # #7335
+                blocked_works |= queue_guard.work_blocked_keys(counted.work, counted.plays, time.time())  # #7335
+            except Exception as e:  # #7335
+                print(f"[dj_pool] WARNING work cooldown lookup failed, picking without it: {e}", flush=True)  # #7335
+        blocked_works |= {work_of[t] for t in cue_picks if t in work_of}  # #7335
+
+        def work_ok(tid: Any) -> bool:  # #7335
+            return work_of.get(tid) not in blocked_works  # #7335
+
         def eligible(tid: Any) -> bool:
-            if not isinstance(tid, int) or tid <= 0 or tid in skip_ids:
+            if not isinstance(tid, int) or tid <= 0 or tid in skip_ids or not work_ok(tid):  # #7335
                 return False
             rec = recording_of(tid)
             return rec is None or rec not in skip_recordings
@@ -527,7 +552,7 @@ class DJPool:
             return set((history + picks)[-window:]) if window > 0 else set()
 
         def recyclable(tid: Any, recent: set[int], recent_recs: set[str]) -> bool:
-            if not isinstance(tid, int) or tid <= 0 or tid in banned or tid in recent:
+            if not isinstance(tid, int) or tid <= 0 or tid in banned or tid in recent or not work_ok(tid):  # #7335
                 return False
             rec = recording_of(tid)
             return rec is None or (rec not in recent_recs and rec not in played_before)
@@ -585,6 +610,8 @@ class DJPool:
                 blocked["exhausted"] = False
             held.clear()
             skip_ids.add(pick)
+            if pick in work_of:  # #7335: this song is now spoken for in this top-up
+                blocked_works.add(work_of[pick])  # #7335
             rec = recording_of(pick)
             if rec is not None:
                 skip_recordings.add(rec)

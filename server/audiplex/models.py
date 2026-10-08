@@ -354,6 +354,40 @@ class DjTrackTag(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
+class TrackAudioProfile(Base):
+    """Per-track loudness profile from scripts/measure_profile.py (#7335 / #3981).
+
+    integrated_lufs mirrors tracks.loudness_lufs. intro_quiet_s / outro_fade_s are
+    None when the track never sustains a loud level. Rows are replaced on re-analysis.
+    """
+
+    __tablename__ = "track_audio_profile"
+
+    track_id: Mapped[int] = mapped_column(Integer, ForeignKey("tracks.id"), primary_key=True)
+    integrated_lufs: Mapped[float | None] = mapped_column(Float, nullable=True)
+    intro_quiet_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    outro_fade_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    duration_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    analyzed_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    analyzer_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+
+class TrackDip(Base):
+    """A loudness dip inside a track (#7335 / #3981): >= 8 dB below its local median for >= 2 s.
+
+    kind is "intro", "mid" or "outro". Rows are replaced whenever the track is re-analyzed.
+    """
+
+    __tablename__ = "track_dips"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    track_id: Mapped[int] = mapped_column(Integer, ForeignKey("tracks.id"), index=True)
+    start_s: Mapped[float] = mapped_column(Float, nullable=False)
+    end_s: Mapped[float] = mapped_column(Float, nullable=False)
+    depth_db: Mapped[float] = mapped_column(Float, nullable=False)
+    kind: Mapped[str] = mapped_column(String(10), nullable=False)
+
+
 class MusicVideoJob(Base):
     """One "Music video" render (#6172): a song, the images Todd picked, a direction.
 
