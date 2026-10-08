@@ -561,14 +561,24 @@ class DJPool:
             ids = lane.get("track_ids") or []
             if not ids:
                 return _why_no_tracks(lane.get("dropped"))
-            n_banned = sum(1 for t in ids if t in banned)
-            n_recent = sum(1 for t in ids if t in recent and t not in banned)
-            n_before = sum(1 for t in ids if t not in banned and t not in recent
-                           and recording_of(t) in played_before)
-            rest = len(ids) - n_recent - n_banned - n_before
-            return (f"all {len(ids)} track(s) unavailable: {n_recent} picked within the last "
-                    f"{window} picks, {n_before} played recently outside this pool, "
-                    f"{n_banned} banned, {rest} a copy of a recently picked recording")
+            # #4051: one reason per track, first match wins. The old catch-all called
+            # every queued / work-blocked track "a copy of a recently picked recording".
+            counts = {"banned": 0, "recent": 0, "queued": 0, "before": 0, "work": 0, "copy": 0, "other": 0}
+            for t in ids:
+                rec = recording_of(t)
+                key = ("banned" if t in banned else "recent" if t in recent
+                       else "queued" if t in skip_ids else "before" if rec in played_before
+                       else "work" if not work_ok(t) else "copy" if rec in skip_recordings else "other")
+                counts[key] += 1
+            parts = [f"{counts['recent']} picked within the last {window} picks",
+                     f"{counts['queued']} already queued or picked this session",
+                     f"{counts['before']} played recently outside this pool",
+                     f"{counts['work']} another version of a song already queued or in cooldown",
+                     f"{counts['banned']} banned",
+                     f"{counts['copy']} a copy of a recording already queued"]
+            if counts["other"]:
+                parts.append(f"{counts['other']} other")
+            return f"all {len(ids)} track(s) unavailable: " + ", ".join(parts)
 
         def others_fresh(name: str) -> bool:
             return any(eligible(t) for other, data in self.state["lanes"].items()
@@ -708,6 +718,15 @@ class DJPool:
             db=db,
         )
         return list(result.get("picks") or [])
+
+    def forget_picks(self, track_ids: list[int]) -> int:
+        """#4051: picks that never reached the phone (trim refused / nothing sent)
+        leave the session history, so they neither count nor block the next top-up."""
+        drop = {int(t) for t in track_ids}
+        before = self.state.get("played_this_session", [])
+        self.state["played_this_session"] = [t for t in before if t not in drop]
+        self._persist()
+        return len(before) - len(self.state["played_this_session"])
 
     def get_pending_cues(self) -> list[dict]:
         """Get all pending cues."""

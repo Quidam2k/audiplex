@@ -990,6 +990,14 @@ def set_pool(
     return result
 
 
+@router.post("/pool/forget", tags=["dj_pool"])
+def forget_pool_picks(body: dict, user: User = Depends(get_current_user)):
+    """#4051: drop picks that were never delivered from the session history."""
+    from audiplex.dj_pool import get_pool
+
+    return {"forgotten": get_pool().forget_picks([int(t) for t in body.get("track_ids") or []])}
+
+
 @router.delete("/pool", tags=["dj_pool"])
 def stop_pool(user: User = Depends(get_current_user)):
     """Stop the DJ pool. stopped is true only if one was running."""

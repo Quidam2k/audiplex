@@ -4254,6 +4254,22 @@ def _zero_lane_note(result: dict) -> str:
     return " Lanes that ran dry: " + "; ".join(f"{d['label']}: {d['why_empty']}" for d in zero) + "."
 
 
+def _pool_start_kept_ids(state: dict) -> list[int]:
+    """#4051: the queue a starting pool must not re-pick = what stays: everything up to
+    and including the current song. The tail after it is about to be REPLACED by
+    _trim_to_pool, so excluding it starved any lane whose tracks were all in it
+    (10/8: a one-lane 'whole albums' pool queued its 220 eligible tracks, the ride-set
+    re-pool skipped all 220 and that lane picked zero; a re-sync, which already
+    forgets the replaced tail, fixed it)."""
+    queue = state.get("queue") or []
+    ids = [q.get("id") for q in queue]
+    idx = state.get("queue_index")
+    cur = (state.get("track") or {}).get("id")
+    if not isinstance(idx, int) or not (0 <= idx < len(ids)) or ids[idx] != cur:
+        idx = ids.index(cur) if cur in ids else len(ids) - 1
+    return [t for t in ids[: idx + 1] if isinstance(t, int)]
+
+
 async def _trim_to_pool(picks: list[int], state: dict) -> str:
     """One-time queue trim when a pool starts (#5495): the pool's first picks
     replace whatever was queued after the current song. Same delivery as
@@ -4381,7 +4397,7 @@ async def dj_pool_set(
             "ahead": ahead,
             "refill_at": refill_at,
             "exclude_recent_hours": exclude_recent_hours,
-            "queued_ids": [q.get("id") for q in queue if isinstance(q.get("id"), int)],
+            "queued_ids": _pool_start_kept_ids(state),  # #4051
         }
         starve = {}
         if starvation_picks is not None:
@@ -4411,7 +4427,13 @@ async def dj_pool_set(
     picks = result.get("initial_picks") or []
     if not picks:
         return head + " No eligible picks right now (everything recent or already queued)."
-    return head + await _trim_to_pool(picks, state)
+    trim = await _trim_to_pool(picks, state)
+    if "NOTHING was sent" in trim or "refused the trim" in trim:  # #4051 undelivered picks don't count
+        try:
+            await _post("/api/playback/pool/forget", {"track_ids": picks})
+        except Exception:
+            pass
+    return head + trim
 
 
 @mcp.tool()
@@ -4424,7 +4446,7 @@ async def dj_pool_status() -> str:
     lines = [
         f"Pool status (spec {status.get('spec_id')}):",
         f"  Balance: {status.get('balance_mode')}, Ahead: {status.get('ahead')}",
-        f"  Total tracks: {status.get('eligible_count')}, Played this session: {status.get('played_this_session_count')}",
+        f"  Total tracks: {status.get('eligible_count')}, Queued this session: {status.get('played_this_session_count')}",
         "Lanes:",
     ]
     for lane in status.get("lanes", []):
