@@ -376,9 +376,10 @@ _MUSIC_WORDS = re.compile(  # #3249
 )
 ANNOUNCE_REFUSAL = (  # #3249
     "REFUSED (announce first): Todd's rule is that a persona announces before any "
-    "music starts, so he can pause his audiobook or YouTube. Nothing was sent. Do "
+    "music starts, so he can pause YouTube or anything else. Nothing was sent. Do "
     "this now: say() one line such as \"Starting the music in ten seconds, Boss: "
-    "first up <title> by <artist>. Pause your book.\" Wait about ten seconds, then "
+    "first up <title> by <artist>.\" (An Audiplex book pauses and bookmarks itself; "
+    "don't tell him to pause it, #4052.) Wait about ten seconds, then "
     "call this tool again. Keep it to ten seconds; he notices when it runs long."
 )
 
@@ -611,7 +612,13 @@ def _is_yes(result: str) -> bool:  # #2843: may a tool's prose say it's playing?
 
 def _guard_text(data) -> str:  # #7335: queue_guard drops and moves, named for the caller
     notes = data.get("guard_notes") if isinstance(data, dict) else None  # #7335
-    return "".join(f"\nQueue guard: {note}" for note in notes or [])  # #7335
+    text = "".join(f"\nQueue guard: {note}" for note in notes or [])  # #7335
+    book = data.get("book_paused") if isinstance(data, dict) else None  # #4052
+    if book:  # #4052
+        b = book.get("book") or {}  # #4052
+        text += (f"\nBook paused and bookmarked: {b.get('title') or 'his audiobook'}, chapter "  # #4052
+                 f"{int(book.get('chapter_index') or 0) + 1}. Don't tell him to pause it.")  # #4052
+    return text
 
 
 async def _result(data: dict, asked: int, wait_ack: bool = True) -> str:  # #ride0928
@@ -757,9 +764,12 @@ async def _enqueue(cmd_type: str, payload: dict) -> str:
     if cmd_type in _CHUNKABLE and len(kept) > QUEUE_CHUNK:
         payload = {**payload, "track_ids": kept[:QUEUE_CHUNK]}
         rest = kept[QUEUE_CHUNK:]
+    book = await _pause_book_first(cmd_type)  # #4052
     data = await _enqueue_raw(cmd_type, payload)
     if not isinstance(data, dict):
         return data
+    if book:  # #4052
+        data["book_paused"] = book
     chunks, sent = 1, len(payload.get("track_ids") or [])
     guard_notes = list(data.get("notes") or [])  # #7335: queue_guard, per chunk
     sent = data.get("kept", sent) if data.get("kept") is not None else sent  # #7335: what the server kept
@@ -779,6 +789,21 @@ async def _enqueue(cmd_type: str, payload: dict) -> str:
     if dropped:
         data["dropped_missing"] = dropped
     return data
+
+
+MUSIC_REPLACES_BOOK = {"play_now", "play_stream"}  # #4052
+
+
+async def _pause_book_first(cmd_type: str) -> dict | None:  # #4052
+    """Pause + bookmark a playing audiobook before music replaces it. The server
+    call is a no-op without a book. Fail-open: a failed bookmark never blocks music."""
+    if cmd_type not in MUSIC_REPLACES_BOOK:
+        return None
+    try:
+        res = await _post("/api/playback/pause-book", {"source": _caller_source()})
+    except Exception:
+        return None
+    return res if isinstance(res, dict) and res.get("paused") else None
 
 
 async def _device_lacks_replace_upcoming() -> bool:  # #3249

@@ -23,3 +23,24 @@ def test_dj_skip_marks_todd_asked(monkeypatch):
     asyncio.run(mcp_server.dj_skip())
     asyncio.run(mcp_server.dj_skip(todd_asked=True))
     assert sent == [("skip", {}), ("skip", {"by": "todd"})]
+
+
+def test_music_start_pauses_a_playing_book_first(monkeypatch):
+    """#4052: play_now/play_stream bookmark a playing book before music replaces it."""
+    calls = []
+
+    async def fake_post(path, body):
+        calls.append(path)
+        return {"paused": True, "book": {"title": "Dune"}, "chapter_index": 2}
+
+    monkeypatch.setattr(mcp_server, "_post", fake_post)
+    got = asyncio.run(mcp_server._pause_book_first("play_now"))
+    assert calls == ["/api/playback/pause-book"] and got["paused"]
+    assert asyncio.run(mcp_server._pause_book_first("queue")) is None and len(calls) == 1
+    assert "Dune, chapter 3" in mcp_server._guard_text({"book_paused": got})
+
+    async def boom(path, body):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(mcp_server, "_post", boom)
+    assert asyncio.run(mcp_server._pause_book_first("play_stream")) is None

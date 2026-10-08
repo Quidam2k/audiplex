@@ -95,7 +95,7 @@ def test_idle_player_unannounced_is_refused(wire, tmp_path, monkeypatch):
     monkeypatch.setenv("DJ_PANTHEON_DB", str(db))
     out = _enq("play_now", {"track_ids": [1]})
     assert out.startswith("REFUSED (announce first)")
-    assert "say()" in out and "Pause your book" in out
+    assert "say()" in out and "pauses and bookmarks itself" in out  # #4052
     assert sent == []
 
 

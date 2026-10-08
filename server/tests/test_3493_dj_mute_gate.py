@@ -57,6 +57,8 @@ def wire(monkeypatch, tmp_path):
     async def fake_post(path, body):
         if path == "/api/playback/tracks/playable":
             return {"playable": body["track_ids"], "missing": []}
+        if path == "/api/playback/pause-book":  # #4052: no book playing here
+            return {"paused": False}
         sent.append(("POST " + path, body))
         return {}
 
