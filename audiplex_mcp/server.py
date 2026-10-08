@@ -4487,7 +4487,35 @@ async def dj_pool_set(
             await _post("/api/playback/pool/forget", {"track_ids": picks})
         except Exception:
             pass
+        return head + trim
+    if body["prime_current_id"] == 0:  # #4056 the pool starts the music: its first song's notes come with it
+        trim += await _first_up_notes(picks[0])
     return head + trim
+
+
+async def _first_up_notes(track_id: int) -> str:  # #4056
+    """' First up: <song>. SOURCED FACTS: ...' for the song a pool starts with, from
+    Radio Free Luna's notes store via Pantheon's song_notes (the same lookup the
+    [DJ BRIDGE] uses), so the bike-start intro has facts with no extra step.
+    The song alone when there are no notes; '' on any error."""
+    try:
+        t = await _get(f"/api/music/tracks/{track_id}")
+        item = {"title": t.get("title"), "artist": t.get("artist_name")}
+        src = _pantheon_src()
+        if not src.is_dir():
+            return ""
+        if str(src) not in sys.path:
+            sys.path.append(str(src))  # append: Pantheon names must not shadow ours
+        import song_notes
+        notes = song_notes.rfl_notes(item, max_facts=2)
+        text = f" First up: {song_notes.song(item)}."
+        if notes:
+            text += (" SOURCED FACTS (weave in 1, nothing beyond these): "
+                     + "; ".join(f"{n['text']} ({n['source']})" for n in notes) + ".")
+        return text
+    except Exception as e:
+        print(f"[first-up notes] {track_id}: {e!r}", file=sys.stderr, flush=True)
+        return ""
 
 
 @mcp.tool()

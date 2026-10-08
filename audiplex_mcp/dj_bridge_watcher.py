@@ -342,11 +342,30 @@ def fetch_callouts(client, base_url, token, ids):  # #3912
         return {}
 
 
+def fetch_profile(client, base_url, token, track_id):  # #4056
+    """{intro_quiet_s, outro_fade_s} from the track's loudness profile, so the
+    bridge can size its talk to the real intro and fade. Unmeasured or any
+    failure = {} and the bridge keeps its fixed timing."""
+    if not isinstance(track_id, int) or track_id <= 0:
+        return {}
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        r = client.get(f"{base_url}/api/playback/track-profile/{track_id}", headers=headers, timeout=FACTS_TIMEOUT_S)
+        r.raise_for_status()
+        profile = r.json().get("profile") or {}
+    except Exception as exc:
+        log_line(f"profile fetch failed for {track_id}: {exc!r}")
+        return {}
+    return {k: float(profile[k]) for k in ("intro_quiet_s", "outro_fade_s")
+            if isinstance(profile.get(k), (int, float)) and profile[k] > 0}
+
+
 def enrich_payload(payload, client, base_url, token):  # #5986
     for key in ("now", "next"):
         item = payload.get(key)
         if item:
             item["facts"] = fetch_facts(client, base_url, token, item.get("id"))
+            item.update(fetch_profile(client, base_url, token, item.get("id")))  # #4056
     beats = [payload.get(k) for k in ("prev", "now", "next", "after") if payload.get(k)]  # #3912
     calls = fetch_callouts(client, base_url, token, list(dict.fromkeys(b.get("id") for b in beats)))  # #3912
     for item in beats:  # #3912

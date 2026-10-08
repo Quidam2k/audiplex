@@ -286,3 +286,18 @@ def test_enrich_without_callouts_keeps_old_payload(monkeypatch, tmp_path):  # #3
     monkeypatch.setenv("DJ_BRIDGE_LOG", str(tmp_path / "bridge.log"))  # not the live log
     p = dbw.enrich_payload({"now": {"id": 2}, "next": {"id": 3}}, _CalloutClient(fail=True), "http://x", "")
     assert "callout" not in p["now"] and "callout" not in p["next"]
+
+
+class _ProfileClient(_CalloutClient):  # #4056
+    def get(self, url, headers=None, timeout=None, params=None):
+        if "/track-profile/2" in url:
+            return _Resp({"measured": True, "profile": {"intro_quiet_s": 12.5, "outro_fade_s": 0, "duration_s": 200}})
+        if "/track-profile/" in url:
+            return _Resp({"measured": False, "profile": None})
+        return super().get(url, headers, timeout, params)
+
+
+def test_enrich_adds_measured_intro_and_fade():  # #4056
+    p = dbw.enrich_payload({"now": {"id": 2}, "next": {"id": 3}}, _ProfileClient(), "http://x", "")
+    assert p["now"]["intro_quiet_s"] == 12.5 and "outro_fade_s" not in p["now"]
+    assert "intro_quiet_s" not in p["next"]
