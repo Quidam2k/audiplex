@@ -4406,8 +4406,16 @@ async def dj_pool_set(
                 listed = await _get("/api/playback/mix-specs")
             except Exception:
                 listed = []
-            sets = [s for s in (listed if isinstance(listed, list) else [])
-                    if isinstance(s, dict) and len(s.get("sources") or []) >= 2]
+            listed = [s for s in (listed if isinstance(listed, list) else []) if isinstance(s, dict)]
+            for s in listed:  # #4054 a server older than the list-with-sources: read each spec
+                if "sources" not in s and s.get("name"):
+                    try:
+                        got = await _get_spec(s["name"])
+                    except Exception:
+                        continue
+                    if isinstance(got, dict):
+                        s["sources"] = got.get("sources")
+            sets = [s for s in listed if len(s.get("sources") or []) >= 2]
             if sets and not (replace_set and replace_reason.strip()):
                 names = ", ".join(f"'{s.get('name')}'" for s in sets[:5])
                 return (f"REFUSED, pool not started: one inline source would replace the whole mix, and "

@@ -277,6 +277,15 @@ def test_patch_on_active_spec_resyncs_lanes(client, specs):
     assert [s["label"] for s in client.get("/api/playback/mix-specs/ride").json()["sources"]] == ["A", "B"]
 
 
+def test_list_specs_includes_sources(client, specs):  # #4054 the MCP's one-lane guard counts these
+    srcs = [{"kind": "folder", "query": "A", "label": "A"}, {"kind": "bucket", "query": "B", "label": "B"}]
+    client.post("/api/playback/mix-specs", json={"name": "ride", "sources": srcs})
+    client.post("/api/playback/mix-specs", json={"name": "empty", "sources": []})
+    listed = {s["name"]: s for s in client.get("/api/playback/mix-specs").json()}
+    assert listed["ride"]["sources"] == srcs
+    assert listed["empty"]["sources"] == []
+
+
 def test_patch_other_spec_leaves_pool_alone(client, specs):
     client.post("/api/playback/mix-specs", json={"name": "one", "sources": []})
     other = client.post("/api/playback/mix-specs", json={"name": "two", "sources": []}).json()

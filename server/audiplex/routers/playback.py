@@ -1472,9 +1472,11 @@ def list_mix_specs(
     """List all saved mix specs."""
     from sqlalchemy import text
 
-    result = db.execute(text("SELECT id, name, request_text, balance, ahead FROM dj_mix_specs ORDER BY name"))
+    result = db.execute(text(
+        "SELECT id, name, request_text, balance, ahead, sources_json FROM dj_mix_specs ORDER BY name"))
     return [
-        {"id": row[0], "name": row[1], "request_text": row[2], "balance": row[3], "ahead": row[4]}
+        {"id": row[0], "name": row[1], "request_text": row[2], "balance": row[3], "ahead": row[4],
+         "sources": json.loads(row[5]) if row[5] else []}  # #4054 the one-lane guard counts lanes from this
         for row in result
     ]
 

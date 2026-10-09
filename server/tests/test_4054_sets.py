@@ -20,8 +20,10 @@ def specs(monkeypatch):
 
     async def fake_get(path, *a, **k):
         calls.append(("GET", path))
-        if path == "/api/playback/mix-specs":
-            return [RIDE]
+        if path == "/api/playback/mix-specs":  # #4054 a pre-fix server: the list has no sources
+            return [{k: v for k, v in RIDE.items() if k != "sources"}]
+        if path == "/api/playback/mix-specs/todd-ride-mix":
+            return RIDE
         raise AssertionError(f"unexpected GET {path}")
 
     monkeypatch.setattr(mcp_server, "_get", fake_get)
@@ -33,6 +35,37 @@ def test_single_inline_source_refused_while_a_set_exists(specs):
     assert out.startswith("REFUSED")
     assert "todd-ride-mix" in out and "replace_set=True" in out  # names the override: no retry loop
     assert ("GET", "/api/playback/mix-specs") in specs
+    assert ("GET", "/api/playback/mix-specs/todd-ride-mix") in specs  # #4054 found the lanes via the detail
+
+
+def test_list_with_sources_needs_no_detail_call(monkeypatch):
+    calls = []
+
+    async def fake_get(path, *a, **k):
+        calls.append(path)
+        if path == "/api/playback/mix-specs":
+            return [RIDE]
+        raise AssertionError(f"unexpected GET {path}")
+
+    monkeypatch.setattr(mcp_server, "_get", fake_get)
+    out = asyncio.run(mcp_server.dj_pool_set(sources=[{"kind": "bucket", "query": "whole albums"}]))
+    assert out.startswith("REFUSED") and calls == ["/api/playback/mix-specs"]
+
+
+def test_fallback_encodes_the_spec_name(monkeypatch):  # #4054 Codex: '#' must not cut the URL
+    calls = []
+
+    async def fake_get(path, *a, **k):
+        calls.append(path)
+        if path == "/api/playback/mix-specs":
+            return [{"id": 3, "name": "ride #2"}]
+        if path == "/api/playback/mix-specs/ride%20%232":
+            return dict(RIDE, name="ride #2")
+        raise AssertionError(f"unexpected GET {path}")
+
+    monkeypatch.setattr(mcp_server, "_get", fake_get)
+    out = asyncio.run(mcp_server.dj_pool_set(sources=[{"kind": "bucket", "query": "whole albums"}]))
+    assert out.startswith("REFUSED") and "'ride #2'" in out
 
 
 def test_replace_set_without_a_reason_still_refused(specs):
