@@ -696,8 +696,12 @@ def get_track_profile(track_id: int, db: Session = Depends(get_db), user: User =
             "integrated_lufs": row.integrated_lufs, "intro_quiet_s": row.intro_quiet_s,
             "outro_fade_s": row.outro_fade_s, "duration_s": row.duration_s,
             "analyzed_at": row.analyzed_at, "analyzer_version": row.analyzer_version,
+            # #3981 informational: the phone's LoudnessGain (#7109) attenuate-only trim, never applied here
+            "norm_gain_db": (round(min(0.0, get_settings().music_target_lufs - row.integrated_lufs), 2)
+                             if row.integrated_lufs is not None else None),  # #3981
         },
-        "dips": [{"start_s": d.start_s, "end_s": d.end_s, "depth_db": d.depth_db, "kind": d.kind}
+        "dips": [{"start_s": d.start_s, "end_s": d.end_s, "depth_db": d.depth_db, "kind": d.kind,
+                  "texture": d.texture, "texture_conf": d.texture_conf}  # #3981
                  for d in dips],
     }
 

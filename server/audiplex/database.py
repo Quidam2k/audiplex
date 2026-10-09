@@ -381,6 +381,11 @@ def _migrate_track_audio_profile(engine):  # #7335 / #3981
                 " depth_db FLOAT NOT NULL, kind VARCHAR(10) NOT NULL)"
             ))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_track_dips_track_id ON track_dips (track_id)"))
+        dip_columns = {r[1] for r in conn.execute(text("PRAGMA table_info(track_dips)"))}  # #3981
+        if "texture" not in dip_columns:  # #3981
+            conn.execute(text("ALTER TABLE track_dips ADD COLUMN texture VARCHAR(24)"))  # #3981
+        if "texture_conf" not in dip_columns:  # #3981
+            conn.execute(text("ALTER TABLE track_dips ADD COLUMN texture_conf FLOAT"))  # #3981
 
 
 def init_db(database_url: str | None = None):

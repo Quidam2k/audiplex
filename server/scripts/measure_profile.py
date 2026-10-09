@@ -38,6 +38,7 @@ BELOW_NORMAL = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)  #
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import measure_energy as me
+import dip_texture  # #3981
 
 _PTS_RE = re.compile(r"pts_time:([-0-9.einfa]+)")
 _VALUE_RE = re.compile(r"lavfi\.r128\.(M|S|I)=(\S+)")
@@ -171,6 +172,10 @@ def ensure_tables(con):
         );
         CREATE INDEX IF NOT EXISTS ix_track_dips_track ON track_dips (track_id);
     """)
+    columns = {row[1] for row in con.execute("PRAGMA table_info(track_dips)")}  # #3981
+    for name, kind in (("texture", "TEXT"), ("texture_conf", "REAL")):  # #3981
+        if name not in columns:  # #3981
+            con.execute(f"ALTER TABLE track_dips ADD COLUMN {name} {kind}")  # #3981
 
 
 def store(con, track_id, profile):
@@ -185,9 +190,10 @@ def store(con, track_id, profile):
               profile["analyzer_version"]))
         con.execute("DELETE FROM track_dips WHERE track_id=?", (track_id,))
         con.executemany("""
-            INSERT INTO track_dips (track_id, start_s, end_s, depth_db, kind)
-            VALUES (?, ?, ?, ?, ?)
-        """, [(track_id, d["start_s"], d["end_s"], d["depth_db"], d["kind"])
+            INSERT INTO track_dips (track_id, start_s, end_s, depth_db, kind, texture, texture_conf)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, [(track_id, d["start_s"], d["end_s"], d["depth_db"], d["kind"],
+               d.get("texture"), d.get("texture_conf"))  # #3981
               for d in profile["dips"]])
         if profile["integrated_lufs"] is not None:
             con.execute("UPDATE tracks SET loudness_lufs=? WHERE id=?",
@@ -236,19 +242,60 @@ def talk_busy(speech_state_path: str) -> str:
     return "can't read Pantheon speech state"
 
 
+def texture_of(path, dip, ffmpeg) -> tuple:
+    """#3981: (texture, conf) for one dip window, (None, None) if it can't be decoded."""
+    try:
+        out = dip_texture.label_window(
+            dip_texture.decode_window(path, dip["start_s"], dip["end_s"], ffmpeg))
+        return out["texture"], out["texture_conf"]
+    except Exception:
+        return None, None
+
+
+def wait_idle(busy, log, sleeper, poll_s, now) -> float:
+    """Block while busy() names a reason; returns seconds waited."""
+    waited, previous = 0.0, None
+    while reason := busy():
+        if reason != previous:
+            log(f"waiting: {reason}")
+            previous = reason
+        start = now()
+        sleeper(poll_s)
+        waited += max(0.0, now() - start)
+    return waited
+
+
+def backfill_textures(con, *, ffmpeg, poll_s, busy, log, sleeper=time.sleep,
+                      now=time.monotonic) -> dict:
+    """#3981: label dips stored before dip_texture existed (texture IS NULL)."""
+    ensure_tables(con)
+    rows = con.execute("""
+        SELECT d.id, d.start_s, d.end_s, t.file_path FROM track_dips AS d
+        JOIN tracks AS t ON t.id = d.track_id
+        WHERE d.texture IS NULL ORDER BY d.track_id, d.start_s
+    """).fetchall()
+    summary = dict(dips=len(rows), labeled=0, failed=0, waited_s=0.0)
+    for dip_id, start_s, end_s, path in rows:
+        summary["waited_s"] += wait_idle(busy, log, sleeper, poll_s, now)
+        texture, conf = (texture_of(path, {"start_s": start_s, "end_s": end_s}, ffmpeg)
+                         if path and Path(path).is_file() else (None, None))
+        if texture is None:
+            summary["failed"] += 1
+            continue
+        with con:
+            con.execute("UPDATE track_dips SET texture=?, texture_conf=? WHERE id=?",
+                        (texture, conf, dip_id))
+        summary["labeled"] += 1
+    summary["waited_s"] = round(summary["waited_s"], 2)
+    return summary
+
+
 def run_batch(rows, *, con, ffmpeg, dry_run, sleep_ratio, poll_s, busy, log,
               sleeper=time.sleep, now=time.monotonic) -> dict:
     summary = dict(checked=0, analyzed=0, skipped_missing=0, failed=0, waited_s=0.0)
     for track_id, title, path in rows:
         summary["checked"] += 1
-        previous = None
-        while reason := busy():
-            if reason != previous:
-                log(f"waiting: {reason}")
-                previous = reason
-            start = now()
-            sleeper(poll_s)
-            summary["waited_s"] += max(0.0, now() - start)
+        summary["waited_s"] += wait_idle(busy, log, sleeper, poll_s, now)
         if not path or not Path(path).is_file():
             log(f"missing file: {track_id} {path}")
             summary["skipped_missing"] += 1
@@ -256,6 +303,8 @@ def run_batch(rows, *, con, ffmpeg, dry_run, sleep_ratio, poll_s, busy, log,
         try:
             start = now()
             profile = analyze_file(path, ffmpeg)
+            for dip in profile["dips"]:  # #3981
+                dip["texture"], dip["texture_conf"] = texture_of(path, dip, ffmpeg)
             elapsed = max(0.0, now() - start)
             log(f"ok id={track_id} title={title} I={profile['integrated_lufs']} LU "
                 f"intro={profile['intro_quiet_s']} outro={profile['outro_fade_s']} "
@@ -294,6 +343,11 @@ def main(argv=None) -> int:
     parser.add_argument("--token", default=os.environ.get("AUDIPLEX_TOKEN"))
     parser.add_argument("--bike-state", default=DEFAULT_BIKE_STATE)
     parser.add_argument("--speech-state", default=DEFAULT_SPEECH_STATE)
+    parser.add_argument("--textures-only", action="store_true",
+                        help="#3981: only label stored dips that have no texture yet")
+    parser.add_argument("--watch", action="store_true",
+                        help="#3981: never exit; re-check for new tracks and unlabeled dips")
+    parser.add_argument("--watch-s", type=float, default=900.0)
     parser.add_argument("--skip-busy-check", action="store_true",
                         help="tests only, never use against the live server")
     args = parser.parse_args(argv)
@@ -315,7 +369,6 @@ def main(argv=None) -> int:
         if "loudness_lufs" not in {r[1] for r in con.execute("PRAGMA table_info(tracks)")}:
             print("restart the server once to migrate", file=sys.stderr)
             return 2
-        rows = select_rows(con, ids, args.limit)
         log_path = Path(args.log)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as handle:
@@ -333,11 +386,20 @@ def main(argv=None) -> int:
                     return me.CANT_VERIFY
                 return reason or talk_busy(args.speech_state)
 
-            summary = run_batch(
-                rows, con=con, ffmpeg=args.ffmpeg, dry_run=args.dry_run,
-                sleep_ratio=args.sleep_ratio, poll_s=args.poll_s, busy=busy, log=log)
-            log("summary: " + json.dumps(summary, sort_keys=True))
-    return 0
+            while True:  # #3981 --watch: picks up new ingests
+                if not args.textures_only:
+                    summary = run_batch(
+                        select_rows(con, ids, args.limit), con=con, ffmpeg=args.ffmpeg,
+                        dry_run=args.dry_run, sleep_ratio=args.sleep_ratio,
+                        poll_s=args.poll_s, busy=busy, log=log)
+                    log("summary: " + json.dumps(summary, sort_keys=True))
+                if not args.dry_run and (args.textures_only or args.watch):
+                    summary = backfill_textures(con, ffmpeg=args.ffmpeg, poll_s=args.poll_s,
+                                                busy=busy, log=log)
+                    log("textures: " + json.dumps(summary, sort_keys=True))
+                if not args.watch:
+                    return 0
+                time.sleep(args.watch_s)
 
 
 if __name__ == "__main__":

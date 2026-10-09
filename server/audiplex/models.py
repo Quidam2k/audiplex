@@ -416,6 +416,8 @@ class TrackDip(Base):
     end_s: Mapped[float] = mapped_column(Float, nullable=False)
     depth_db: Mapped[float] = mapped_column(Float, nullable=False)
     kind: Mapped[str] = mapped_column(String(10), nullable=False)
+    texture: Mapped[str | None] = mapped_column(String(24), nullable=True)  # #3981 scripts/dip_texture.py hint
+    texture_conf: Mapped[float | None] = mapped_column(Float, nullable=True)  # #3981
 
 
 class MusicVideoJob(Base):

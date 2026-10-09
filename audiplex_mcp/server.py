@@ -1478,7 +1478,8 @@ async def _profile_line(track_id) -> str:  # #3981
         bits.append(f"intro quiet {intro:.0f}s")  # #3981
     if outro is not None and outro >= 1:  # #3981
         bits.append(f"fade {outro:.0f}s")  # #3981
-    dips = [f"{_mmss(d['start_s'])}-{_mmss(d['end_s'])} (-{d['depth_db']:.0f} dB, {d['kind']})"  # #3981
+    dips = [f"{_mmss(d['start_s'])}-{_mmss(d['end_s'])} (-{d['depth_db']:.0f} dB, {d['kind']}"  # #3981
+            + (f", sounds like {d['texture'].replace('_', ' ')}?" if d.get("texture") else "") + ")"  # #3981 heuristic hint
             for d in (data.get("dips") or [])[:2]]  # #3981
     if dips:  # #3981
         bits.append("dips " + "; ".join(dips))  # #3981
