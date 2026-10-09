@@ -67,6 +67,7 @@ from pathlib import Path
 from typing import Any, Deque, Optional
 
 from audiplex import queue_guard  # #7335
+from audiplex import loudness_live  # #3504
 
 # How long after the last poll we still consider a device connected. The client
 # re-issues its long-poll immediately after each 25s timeout, so anything past
@@ -121,6 +122,8 @@ DIAG_LOG_PATH = Path(
     os.environ.get("AUDIPLEX_DIAG_LOG")
     or Path(__file__).resolve().parent.parent / "data" / "playback-diag.jsonl"
 )
+# #3504: measure queued tracks that have no loudness_lufs (loudness_live). Tests turn it off.
+LIVE_LOUDNESS = True  # #3504
 # #3601: the last real music queue each renderer reported, so a queue the DJ
 # built survives the phone app being killed (it lives only in phone RAM) and a
 # server restart. One small JSON doc, written atomically.
@@ -283,6 +286,8 @@ class PlaybackBus:
         refusal = self._todd_stop_refusal(type, payload, source)  # #4011
         if refusal:  # #4011
             self._refuse(rec, refusal)  # #4011
+        elif LIVE_LOUDNESS and type in queue_guard.GUARDED_OPS and isinstance(payload, dict):  # #3504
+            loudness_live.schedule(payload.get("track_ids") or [], _pool_session)  # #3504
         self._commands[rec.id] = rec
         while len(self._commands) > COMMAND_HISTORY_CAPACITY:
             self._commands.popitem(last=False)
@@ -693,9 +698,17 @@ class PlaybackBus:
                 "duration_ms": state.get("duration_ms"),
                 "queue_index": state.get("queue_index"),
                 "queue_length": state.get("queue_length"),
+                "volume": state.get("volume"),  # #3504
             })
             if prev is not None and prev[0].get("playing") and not state.get("playing"):
                 _append_diag("pause_observed", self._pause_cause(device_key))  # #3552
+        elif _volume_moved(prev[0].get("volume"), state.get("volume")):  # #3504 gain audit: ducks + per-track gain
+            track = state.get("track") or {}  # #3504
+            _append_diag("volume", {  # #3504
+                "device": device_key, "volume": state.get("volume"),  # #3504
+                "track_id": track.get("id") if isinstance(track, dict) else None,  # #3504
+                "position_ms": state.get("position_ms"),  # #3504
+            })  # #3504
 
 
         self._maybe_save_queue(state, device_key)  # #3601
@@ -1015,6 +1028,13 @@ def _state_key(state: dict[str, Any]) -> tuple:
     track = state.get("track") or {}
     tid = track.get("id") if isinstance(track, dict) else None
     return (bool(state.get("playing")), tid, state.get("queue_index"))
+
+
+def _volume_moved(before: Any, after: Any) -> bool:  # #3504
+    """A reported player volume changed by more than 1% of full scale."""  # #3504
+    if not isinstance(after, (int, float)):  # #3504
+        return False  # #3504
+    return not isinstance(before, (int, float)) or abs(after - before) > 0.01  # #3504
 
 
 def _cmd_diag(rec: PlaybackCommandRecord) -> dict[str, Any]:

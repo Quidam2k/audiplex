@@ -405,6 +405,8 @@ def isolated_client_logs(tmp_path, monkeypatch):
     monkeypatch.setattr(
         playback_bus, "DIAG_LOG_PATH", tmp_path / "playback-diag.jsonl"
     )
+    # #3504: no background ffmpeg loudness threads against test DBs.
+    monkeypatch.setattr(playback_bus, "LIVE_LOUDNESS", False)  # #3504
     # #3601: the resume snapshot too, or a test run overwrites Todd's queue.
     monkeypatch.setattr(
         playback_bus, "LAST_QUEUE_PATH", tmp_path / "last_queue.json"
