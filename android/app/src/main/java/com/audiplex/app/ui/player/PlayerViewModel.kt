@@ -111,6 +111,9 @@ class PlayerViewModel @Inject constructor(
         }
     }
 
+    /** #7528: re-read the live session (the fallback mini-player's tap). */
+    fun refreshSession() = playbackManager.refreshFromController()
+
     fun seekTo(positionMs: Long) {
         playbackManager.seekTo(positionMs)
     }

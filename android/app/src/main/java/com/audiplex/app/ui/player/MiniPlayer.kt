@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
@@ -68,7 +69,8 @@ fun MiniPlayer(
                     coverUrl = if (item.albumHasCover)
                         AudiplexApi.musicCoverUrl(viewModel.getBaseUrl(), item.albumId) else null,
                     fallbackIcon = Icons.Default.MusicNote,
-                    effectiveDuration = if (durationMs > 0) durationMs else (item.track.durationSeconds * 1000).toLong()
+                    effectiveDuration = if (durationMs > 0) durationMs else (item.track.durationSeconds * 1000).toLong(),
+                    upNext = m.items.getOrNull(m.currentIndex + 1)?.track?.title  // #7528
                 )
             }
         }
@@ -100,9 +102,9 @@ fun MiniPlayer(
             effectiveDuration = durationMs
         )
     } ?: return
-    // The full player can't render without local state, so the fallback row's
-    // tap toggles playback instead of opening a blank screen.
-    val rowClick: () -> Unit = if (info == null) ({ viewModel.togglePlayPause() }) else onClick
+    // #7528: the fallback row opens the player too, re-reading the session
+    // first so the queue loads in (it used to only toggle play/pause).
+    val rowClick: () -> Unit = if (info == null) ({ viewModel.refreshSession(); onClick() }) else onClick
 
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -169,8 +171,22 @@ fun MiniPlayer(
                             overflow = TextOverflow.Ellipsis
                         )
                     }
+                    shown.upNext?.let {
+                        Text(
+                            text = "Up next: $it",  // #7528
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
 
+                if (kind == PlayerKind.Music) {
+                    IconButton(onClick = rowClick) {  // #7528: the queue is one tap away
+                        Icon(Icons.AutoMirrored.Filled.QueueMusic, contentDescription = "Queue")
+                    }
+                }
                 IconButton(onClick = { viewModel.togglePlayPause() }) {
                     Icon(
                         if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
@@ -187,5 +203,6 @@ private data class MiniInfo(
     val subtitle: String?,
     val coverUrl: String?,
     val fallbackIcon: ImageVector,
-    val effectiveDuration: Long
+    val effectiveDuration: Long,
+    val upNext: String? = null
 )

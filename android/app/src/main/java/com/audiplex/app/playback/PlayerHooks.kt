@@ -36,4 +36,15 @@ object PlayerHooks {
     fun cancelStopAfterCurrent() {
         exoPlayer?.pauseAtEndOfMediaItems = false
     }
+
+    /** #7528: the service's focus manager, so a level change can reach a duck. */
+    @Volatile
+    var focusManager: AudioFocusManager? = null
+
+    /**
+     * #7528: while ducked (or restoring), make [volume] the level the restore
+     * lands on, and return true; the caller must not set the volume itself,
+     * which would un-duck a Talk. False when not ducked. Main thread.
+     */
+    fun retargetRestore(volume: Float): Boolean = focusManager?.retargetRestore(volume) ?: false
 }

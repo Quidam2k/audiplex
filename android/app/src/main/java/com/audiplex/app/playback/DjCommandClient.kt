@@ -525,7 +525,7 @@ class DjCommandClient @Inject constructor(
             }
             "volume" -> {
                 val volume = cmd.payload?.volume ?: return badPayload("volume")
-                withContext(Dispatchers.Main) { playbackManager.setPlayerVolume(volume) }
+                playbackManager.setChannelVolume(volume)  // #7528: the saved dial, not the raw player
             }
             "play_stream" -> {
                 val url = cmd.payload?.url ?: return badPayload("url")

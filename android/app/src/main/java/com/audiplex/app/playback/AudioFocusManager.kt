@@ -142,6 +142,22 @@ class AudioFocusManager(
         wasPlaying = false
     }
 
+    /**
+     * #7528: a new dial/track level arrived. Ducked: remember it as the restore
+     * level. Mid-restore: re-aim the rising ramp at it. Returns false when
+     * neither, so the caller sets the volume as usual.
+     */
+    fun retargetRestore(volume: Float): Boolean =
+        when (FocusPolicy.retargetFor(preDuckVolume, restoringTo)) {
+            FocusPolicy.Retarget.PRE_DUCK -> { preDuckVolume = volume; true }
+            FocusPolicy.Retarget.RESTORE_RAMP -> {
+                restoringTo = volume
+                rampTo(volume, DuckRamp.RESTORE_MS, DuckRamp::restoreLevel) { restoringTo = null }
+                true
+            }
+            FocusPolicy.Retarget.NONE -> false
+        }
+
     private fun applyAction(action: FocusPolicy.FocusAction) {
         when (action) {
             is FocusPolicy.FocusAction.Duck -> {

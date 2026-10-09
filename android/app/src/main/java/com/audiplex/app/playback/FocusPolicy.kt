@@ -44,6 +44,15 @@ object FocusPolicy {
         val isSpeech: Boolean = false,
     )
 
+    /** #7528: where a level change goes while the duck owns the volume. */
+    enum class Retarget { NONE, PRE_DUCK, RESTORE_RAMP }
+
+    fun retargetFor(preDuckVolume: Float?, restoringTo: Float?): Retarget = when {
+        preDuckVolume != null -> Retarget.PRE_DUCK
+        restoringTo != null -> Retarget.RESTORE_RAMP
+        else -> Retarget.NONE
+    }
+
     /**
      * Determine the action to take when audio focus changes.
      *

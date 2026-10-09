@@ -132,7 +132,8 @@ fun AppNavigation(navController: NavHostController) {
                 onMostPlayedClick = { navController.navigate(Routes.MUSIC_MOST_PLAYED) },
                 onLikelySkipsClick = { navController.navigate(Routes.MUSIC_LIKELY_SKIPS) },
                 onRecentlyPlayedClick = { navController.navigate(Routes.MUSIC_RECENTLY_PLAYED) },
-                onSettingsClick = { navController.navigate(Routes.SETTINGS) }
+                onSettingsClick = { navController.navigate(Routes.SETTINGS) },
+                onPlayerClick = { navController.navigate(Routes.PLAYER) }  // #7528
             )
         }
 

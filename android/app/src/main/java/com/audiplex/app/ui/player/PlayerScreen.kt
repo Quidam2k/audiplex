@@ -10,12 +10,13 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -86,7 +87,10 @@ fun PlayerScreen(
     val sleepBeds by viewModel.sleepBeds.collectAsState()
     val sleepBedsError by viewModel.sleepBedsError.collectAsState()
     val defaultSleepBedId by viewModel.defaultSleepBedId.collectAsState()
+    val controllerMeta by viewModel.controllerMetadata.collectAsState()
     var showSleep by remember { mutableStateOf(false) }
+    // #7528: a queue gets the room under the controls (the cover shrinks for it).
+    val queue = music?.takeIf { kind == PlayerKind.Music && it.items.size > 1 }
 
     if (showSleep) {
         SleepDialog(
@@ -136,7 +140,11 @@ fun PlayerScreen(
 
         if (kind == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Nothing playing", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                // #7528: the session is playing something this screen hasn't loaded yet.
+                Text(
+                    controllerMeta?.title?.let { "Loading the queue for \"$it\"…" } ?: "Nothing playing",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
             return
         }
@@ -169,9 +177,10 @@ fun PlayerScreen(
                 CoverArt(
                     coverUrl = coverUrl,
                     contentDescription = track?.track?.title ?: "",
-                    fallbackIcon = Icons.Default.MusicNote
+                    fallbackIcon = Icons.Default.MusicNote,
+                    widthFraction = if (queue != null) 0.4f else 0.7f  // #7528
                 )
-                Spacer(Modifier.height(24.dp))
+                Spacer(Modifier.height(if (queue != null) 12.dp else 24.dp))
                 TitleBlock(
                     title = track?.track?.title ?: "",
                     subtitle = track?.track?.artistName,
@@ -204,7 +213,7 @@ fun PlayerScreen(
             null -> Unit
         }
 
-        Spacer(Modifier.weight(1f))
+        if (queue == null) Spacer(Modifier.weight(1f)) else Spacer(Modifier.height(12.dp))
 
         // Seek bar — for music, scoped to current track; for audiobook, scoped to whole book.
         // A stream is endless/live with no known duration, so it has no seek bar (Slider is
@@ -326,16 +335,17 @@ fun PlayerScreen(
 
         // Visible queue (#3105/#993): the DJ session Todd walks up to should
         // show what is queued and where he is in it, and let him jump around.
-        val q = music
-        if (kind == PlayerKind.Music && q != null && q.items.size > 1) {
-            Spacer(Modifier.height(20.dp))
+        // #7528: right under the controls, filling the rest of the screen.
+        if (queue != null) {
+            Spacer(Modifier.height(12.dp))
             UpNextQueue(
-                queue = q,
+                queue = queue,
                 onTrackClick = { viewModel.seekToTrack(it) },
+                modifier = Modifier.weight(1f),
             )
         }
 
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(if (queue != null) 8.dp else 24.dp))
     }
 }
 
@@ -343,15 +353,19 @@ fun PlayerScreen(
  * The now-playing queue, current track marked, every row tappable to jump
  * straight there (#3105/#993). Header doubles as the "8/11" position readout
  * Todd was missing. Scrolls internally so it never pushes the transport
- * controls off-screen.
+ * controls off-screen. #7528: opens on the current song (a DJ queue 18 songs in
+ * used to show song 1 first) and follows it as the songs change.
  */
 @Composable
 private fun UpNextQueue(
     queue: MusicQueueState,
     onTrackClick: (Int) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = queue.currentIndex)
+    LaunchedEffect(queue.currentIndex) { listState.animateScrollToItem(queue.currentIndex) }
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
     ) {
@@ -362,9 +376,8 @@ private fun UpNextQueue(
             modifier = Modifier.padding(start = 8.dp, bottom = 4.dp)
         )
         LazyColumn(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = 220.dp)
+            state = listState,
+            modifier = Modifier.fillMaxWidth()
         ) {
             itemsIndexed(queue.items) { index, item ->
                 val isCurrent = index == queue.currentIndex
@@ -420,21 +433,26 @@ private fun UpNextQueue(
 }
 
 @Composable
-private fun CoverArt(coverUrl: String?, contentDescription: String, fallbackIcon: ImageVector) {
+private fun CoverArt(
+    coverUrl: String?,
+    contentDescription: String,
+    fallbackIcon: ImageVector,
+    widthFraction: Float = 0.7f,
+) {
     if (coverUrl != null) {
         AsyncImage(
             model = coverUrl,
             contentDescription = contentDescription,
             contentScale = ContentScale.Crop,
             modifier = Modifier
-                .fillMaxWidth(0.7f)
+                .fillMaxWidth(widthFraction)
                 .aspectRatio(1f)
                 .clip(RoundedCornerShape(16.dp))
         )
     } else {
         Box(
             modifier = Modifier
-                .fillMaxWidth(0.7f)
+                .fillMaxWidth(widthFraction)
                 .aspectRatio(1f)
                 .clip(RoundedCornerShape(16.dp)),
             contentAlignment = Alignment.Center

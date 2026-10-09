@@ -71,6 +71,7 @@ class PlaybackService : MediaSessionService() {
         val focusManager = AudioFocusManager(this, player)
         audioFocusManager = focusManager
         PlayerHooks.exoPlayer = player  // #6913
+        PlayerHooks.focusManager = focusManager  // #7528
         player.addListener(object : Player.Listener {
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                 if (playWhenReady) {
@@ -120,6 +121,7 @@ class PlaybackService : MediaSessionService() {
 
     override fun onDestroy() {
         audioFocusManager?.abandonFocus()
+        if (PlayerHooks.focusManager === audioFocusManager) PlayerHooks.focusManager = null  // #7528
         audioFocusManager = null
         mediaSession?.run {
             if (PlayerHooks.exoPlayer === player) PlayerHooks.exoPlayer = null  // #6913

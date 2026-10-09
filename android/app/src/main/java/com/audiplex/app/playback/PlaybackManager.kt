@@ -173,20 +173,12 @@ class PlaybackManager @Inject constructor(
 
     /**
      * #7109: fetch music loudness normalization settings and levels from server.
-     * Called when music playback starts. Stores settings for use in gainFor() on each track change.
+     * #7528: at every track change, not only at queue load, so a server target
+     * change applies from the next song. Reapplies the gain when they changed.
      */
     private fun fetchMusicLevels() {
         scope.launch {
-            try {
-                val api = apiHolder.api
-                if (api != null) {
-                    musicLevels = api.getMusicLevels()
-                    withContext(Dispatchers.Main) { reapplyTrackGain() }  // the first track too
-                }
-            } catch (e: Exception) {
-                // Silently fail and use defaults (normalize_music=false, gain=1.0)
-                musicLevels = null
-            }
+            if (levelsSource.refresh()) withContext(Dispatchers.Main) { reapplyTrackGain() }
         }
     }
 
@@ -202,8 +194,10 @@ class PlaybackManager @Inject constructor(
         if (musicLevels?.normalizeMusic != true) return
         val applied = _playerVolume.value
         val expected = effectiveMusicVolume(volumeForKind(PlayerKind.Music))
-        if (applied < expected * DUCKED_FRACTION) return
         updateCurrentTrackGain()
+        // #7528: mid-duck, move the level the restore lands on instead.
+        if (PlayerHooks.retargetRestore(effectiveMusicVolume(volumeForKind(PlayerKind.Music)))) return
+        if (applied < expected * DUCKED_FRACTION) return  // e.g. a sleep fade: leave it be
         applyVolumeForCurrentKind()
     }
 
@@ -232,8 +226,24 @@ class PlaybackManager @Inject constructor(
      */
     private fun applyVolumeForCurrentKind() {
         val kind = _playerKind.value ?: return
-        val sliderVolume = volumeForKind(kind)
-        setPlayerVolume(effectiveMusicVolume(sliderVolume))
+        val target = effectiveMusicVolume(volumeForKind(kind))
+        if (PlayerHooks.retargetRestore(target)) return  // #7528: ducked; the restore lands on it
+        setPlayerVolume(target)
+    }
+
+    /**
+     * #7528: the DJ "volume" command sets the playing channel's saved dial, so
+     * it sticks across tracks and per-track gain, and a duck restores to it.
+     */
+    fun setChannelVolume(volume: Float) {
+        val clamped = volume.coerceIn(0f, 1f)
+        scope.launch {
+            if (channelForVolumeCommand(_playerKind.value) == PlayerKind.Audiobook) {
+                settingsStore.setAudiobookVolume(clamped)
+            } else {
+                settingsStore.setMusicVolume(clamped)
+            }
+        }
     }
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var controller: MediaController? = null
@@ -299,7 +309,8 @@ class PlaybackManager @Inject constructor(
     val controllerMetadata: StateFlow<ControllerMetadata?> = _controllerMetadata
 
     // #7109: per-track music loudness normalization settings and current track gain
-    private var musicLevels: MusicLevelsResponse? = null
+    private val levelsSource = MusicLevelsSource { apiHolder.api?.getMusicLevels() }
+    private val musicLevels: MusicLevelsResponse? get() = levelsSource.current
     private var currentMusicGain: Float = 1.0f
     /** #7109: below this share of the expected level the player is ducked (ducks go to ~5%). */
     private val DUCKED_FRACTION = 0.5f
@@ -547,6 +558,7 @@ class PlaybackManager @Inject constructor(
             }
             _currentMusic.value = music.copy(currentIndex = newIndex)
             reapplyTrackGain()  // #7109
+            fetchMusicLevels()  // #7528: a changed server target applies from this song
             // Report start of new track
             music.items.getOrNull(newIndex)?.let { current ->
                 postPlayStat(current.track.id, "start", 0.0)
@@ -755,7 +767,9 @@ class PlaybackManager @Inject constructor(
         albumHasCover = false,
     )
 
-    private var restoreTried = false  // #3601: once per process
+    // #3601/#7528: one attempt at a time. Retried on every foreground while
+    // nothing is loaded; it used to be once per process, so a miss stayed missed.
+    private var restoreInFlight = false
 
     /**
      * Put the last DJ-built queue back, PAUSED, when the app comes up with
@@ -768,10 +782,10 @@ class PlaybackManager @Inject constructor(
      * only if he turned that on in Settings, so by default they behave as before.
      */
     private fun restoreLastQueueIfIdle(ctrl: MediaController) {
-        if (restoreTried) return
+        if (restoreInFlight) return
         if (_playerKind.value != null || _currentMusic.value != null || _currentBook.value != null) return
         if (ctrl.mediaItemCount > 0) return
-        restoreTried = true
+        restoreInFlight = true
         scope.launch {
             try {
                 val api = apiHolder.api ?: return@launch
@@ -812,6 +826,8 @@ class PlaybackManager @Inject constructor(
                 throw e
             } catch (e: Exception) {
                 // 404 = nothing saved; anything else just means no restore.
+            } finally {
+                restoreInFlight = false
             }
         }
     }

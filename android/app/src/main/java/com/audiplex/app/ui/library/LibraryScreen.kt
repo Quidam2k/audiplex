@@ -59,6 +59,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.audiplex.app.ui.player.NowPlayingCard
 import coil3.compose.AsyncImage
 import com.audiplex.app.data.api.AudiplexApi
 import com.audiplex.app.data.api.BookSummary
@@ -91,6 +92,8 @@ fun LibraryScreen(
                 }
             }
         )
+
+        NowPlayingCard(viewModel = hiltViewModel(), onOpen = onPlayerClick)  // #7528
 
         when (val state = uiState) {
             is LibraryUiState.Loading -> {
