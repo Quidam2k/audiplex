@@ -83,3 +83,27 @@ def test_measure_lufs_on_a_real_file(tmp_path):
         w.writeframes(pcm.tobytes())
     lufs = loudness_live.measure_lufs(str(path))
     assert lufs is not None and -20 < lufs < -10
+
+
+def test_music_target_matches_the_persona_voices():
+    """#3504 Todd msg 42748: music sits level with the voices (~-20 LUFS)."""
+    from audiplex.config import Settings
+    assert Settings.model_fields["music_target_lufs"].default == -20.0
+
+
+def test_dj_volume_refuses_without_todds_words(monkeypatch):
+    import asyncio
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from audiplex_mcp import server as srv
+
+    sent = []
+
+    async def fake_enqueue(cmd, payload):
+        sent.append(cmd)
+        return {"id": 1}
+
+    monkeypatch.setattr(srv, "_enqueue", fake_enqueue)
+    out = asyncio.run(srv.dj_volume(100))
+    assert out.startswith("REFUSED") and sent == []

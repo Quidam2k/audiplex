@@ -17,7 +17,7 @@ def test_levels_endpoint_default_off(client, db_session, sample_album):
     assert response.status_code == 200
     data = response.json()
     assert data["normalize_music"] is get_settings().normalize_music  # #7389
-    assert data["target_lufs"] == -24.0
+    assert data["target_lufs"] == -20.0  # #3504 matches the persona voices
     assert data["fallback_lufs"] is None
 
 

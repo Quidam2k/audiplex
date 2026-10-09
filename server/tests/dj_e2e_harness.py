@@ -566,12 +566,12 @@ async def run_scenario(dev: SimulatedDevice, dj, ids: dict, rep: Report, tts: "F
     rep.check(dev.position_ms == 120_000,
               "dj_seek converted seconds -> ms", f"position_ms={dev.position_ms}")
 
-    await step(dj.dj_volume(30), "dj_volume")
+    await step(dj.dj_volume(30, "e2e: turn it down"), "dj_volume")  # #3504
     rep.check(abs((dev.volume or 0) - 0.30) < 1e-6,
               "dj_volume converted 0-100 -> 0.0-1.0", f"volume={dev.volume}")
     np = await dj.dj_now_playing()
     rep.check("volume: 30%" in np, "dj_now_playing reports volume back as a percentage")
-    bad = await dj.dj_volume(150)
+    bad = await dj.dj_volume(150, "e2e")  # #3504
     rep.check("must be 0-100" in bad, "dj_volume rejects out-of-range levels", bad)
 
     print("\n-- MCP-side name resolution ----------------------------------")

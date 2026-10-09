@@ -143,7 +143,7 @@ def test_pool_that_would_start_is_refused_before_saving(wire, tmp_path, monkeypa
 @pytest.mark.parametrize("tool,args,cmd", [
     ("dj_pause", (), "pause"),
     ("dj_skip", (), "skip"),
-    ("dj_volume", (40,), "volume"),
+    ("dj_volume", (40, "turn it down"), "volume"),  # #3504 todd_quote
     ("dj_seek", (30,), "seek"),
     ("dj_bed_stop", (), "bed_stop"),
 ])

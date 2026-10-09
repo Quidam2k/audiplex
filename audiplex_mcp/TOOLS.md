@@ -23,7 +23,7 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_skip` / `dj_previous` — next / previous item in the queue. Pass `dj_skip(todd_asked=True)` only when Todd asked for the skip: those count against the song when the DJ learns from the ride (#4057).
 - `dj_pause` / `dj_resume` — pause / resume (resume is talk-guarded).
 - `dj_seek` — jump to a position in the current track.
-- `dj_volume` — app player volume 0-100.
+- `dj_volume` — app player volume 0-100, only when Todd asks (todd_quote required, #3504).
 - `dj_reorder` — move a queued item by index (indices from dj_now_playing).
 - `dj_upcoming` — the upcoming queue in order, with each track's `#index` and mix source.
 - `dj_remove` / `dj_insert` / `dj_swap` — edit what's still to come by `#index` (from dj_upcoming) or track id; one replace_upcoming, the current song is never touched.

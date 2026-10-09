@@ -935,10 +935,17 @@ async def dj_seek(position_seconds: int) -> str:
 
 
 @mcp.tool()
-async def dj_volume(level: int) -> str:
-    """Set the Audiplex app's player volume, 0-100. This is Media3 player
-    volume, which multiplies with the phone's device volume — it does NOT
-    change the device/stream volume."""
+async def dj_volume(level: int, todd_quote: str = "") -> str:
+    """Set the Audiplex app's player volume, 0-100, ONLY when Todd asks.
+
+    Music volume is Todd's (#3504, Todd msg 42748: "you let me fuck with the
+    volume"); per-song normalization keeps music level with your voice, so a
+    DJ never adjusts it on its own. todd_quote is REQUIRED: his exact words
+    asking for the change. This is Media3 player volume, which multiplies with
+    the phone's device volume; until the phone build that persists it, it lasts
+    one song (the next song's normalization resets it)."""
+    if not (todd_quote or "").strip():  # #3504
+        return "REFUSED: music volume is Todd's. Pass todd_quote=<his words> only when he asks."  # #3504
     if not 0 <= level <= 100:
         return f"level must be 0-100 (got {level})."
     data = await _enqueue("volume", {"volume": level / 100.0})
