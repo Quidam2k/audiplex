@@ -66,7 +66,16 @@ _QUALIFIER_WORDS = {
     "cut",
 }
 
+# #3992: these mark a version only as the FIRST word of a dash tail. Anywhere in
+# the tail they eat real titles: "K/DA - VILLAIN ft. ...", "- Notes From The ...".
+_LEAD_QUALIFIER_WORDS = {
+    "from", "feat", "ft", "featuring", "official", "video", "lyrics", "lyric",
+    "audio", "vevo", "visualizer",
+}
+
+_PIPE_SUFFIX = re.compile(r"\s+[|｜].*$")  # "Song | Live From Vevo Studios" (#3992)
 _BRACKETED = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
+_UNCLOSED_BRACKET = re.compile(r"\s*[\(\[][^\)\]]*$")  # 30-char ID3v1 cut: "Song (In Our" (#3992)
 _DASH_SUFFIX = re.compile(r"\s+[-–—]\s+(?P<tail>[^-–—]+)$")
 _PUNCT = re.compile(r"[^\w\s]", re.UNICODE)
 _SPACES = re.compile(r"\s+")
@@ -105,11 +114,13 @@ def strip_qualifiers(title: str | None) -> str:
     """
     if not title:
         return ""
-    stripped = _BRACKETED.sub("", title).strip()
+    stripped = _PIPE_SUFFIX.sub("", title)
+    stripped = _BRACKETED.sub("", stripped)
+    stripped = _UNCLOSED_BRACKET.sub("", stripped).strip()
     match = _DASH_SUFFIX.search(stripped)
     if match:
-        tail_words = set(normalize(match.group("tail")).split())
-        if tail_words & _QUALIFIER_WORDS:
+        tail_words = normalize(match.group("tail")).split()
+        if set(tail_words) & _QUALIFIER_WORDS or tail_words[:1] and tail_words[0] in _LEAD_QUALIFIER_WORDS:
             stripped = stripped[: match.start()].strip()
     normalized = normalize(stripped)
     return normalized or normalize(title)
