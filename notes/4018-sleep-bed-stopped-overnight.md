@@ -27,6 +27,11 @@
 2. Wait for the book to fade (about 75 s) and the bed to come up.
 3. Swipe Audiplex away from Recents, then lock the phone.
    - TODAY (1.0.60): the bed stops within seconds or minutes. This reproduces last night.
-   - AFTER the fix (1.0.61): the bed keeps playing, a "Sleep bed" notification stays up, and it is still playing 15 min later.
+   - AFTER the fix (1.0.61): the bed keeps playing, the (paused) book's media notification stays up, and it is still playing 15 min later.
 4. Unlock and open Audiplex: it should say the bed is playing (or "stopped" + Restart bed if it is not). Move the bed volume slider: the bed gets louder/quieter and the book's volume does not change.
 5. Tap Stop bed, then play the book: it resumes from where it faded.
+
+## Shipped (2026-10-10, 6c15edb, APK 1.0.61 served)
+- All 6 items in. Extra: Media3 1.4.1's late-artwork path (MediaNotificationManager.onNotificationUpdated) re-decides foreground without onUpdateNotification, so PlaybackService wraps the notification provider and re-routes that update while a bed plays.
+- Pure rules in playback/SleepBedRules.kt (+13 JVM tests); 147/147 JVM tests green.
+- Not verified on a device: no phone/emulator attached. The daytime test above is the device check.
