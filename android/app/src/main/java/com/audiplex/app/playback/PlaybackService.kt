@@ -2,6 +2,7 @@ package com.audiplex.app.playback
 
 import android.app.PendingIntent
 import android.content.Intent
+import android.os.Bundle
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -13,9 +14,13 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.CacheBitmapLoader
+import androidx.media3.session.CommandButton
+import androidx.media3.session.DefaultMediaNotificationProvider
+import androidx.media3.session.MediaNotification
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.audiplex.app.MainActivity
+import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.MoreExecutors
 import dagger.hilt.android.AndroidEntryPoint
 import okhttp3.OkHttpClient
@@ -107,12 +112,60 @@ class PlaybackService : MediaSessionService() {
             .setCallback(MultiTapMediaSessionCallback(forwardingPlayer))
             .setBitmapLoader(bitmapLoader)
             .build()
+
+        // #4018: Media3 re-decides foreground on its own when artwork arrives late
+        // (MediaNotificationManager.onNotificationUpdated), bypassing
+        // onUpdateNotification. While a bed plays, send that late update back
+        // through onUpdateNotification instead; the artwork is cached by then.
+        val notificationProvider = DefaultMediaNotificationProvider.Builder(this).build()
+        setMediaNotificationProvider(object : MediaNotification.Provider {
+            override fun createNotification(
+                session: MediaSession,
+                customLayout: ImmutableList<CommandButton>,
+                actionFactory: MediaNotification.ActionFactory,
+                onNotificationChangedCallback: MediaNotification.Provider.Callback,
+            ): MediaNotification = notificationProvider.createNotification(session, customLayout, actionFactory) { late ->
+                if (SleepBedRules.foregroundRequired(false, PlayerHooks.bedState)) {
+                    onUpdateNotification(session, mediaForegroundRequired(session.player))
+                } else {
+                    onNotificationChangedCallback.onNotificationChanged(late)
+                }
+            }
+
+            override fun handleCustomCommand(session: MediaSession, action: String, extras: Bundle): Boolean =
+                notificationProvider.handleCustomCommand(session, action, extras)
+        })
+
+        // #4018: a bed starting or stopping re-decides foreground with the book unchanged.
+        PlayerHooks.onBedStateChanged = {
+            mediaSession?.let { onUpdateNotification(it, mediaForegroundRequired(it.player)) }
+        }
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? =
         mediaSession
 
+    /**
+     * #4018: the sleep bed is a private player outside the session, so when the
+     * sleep fade pauses the book Media3 would drop foreground and Android kills
+     * the process (and the bed) minutes later. Stay foreground while it plays.
+     */
+    @OptIn(UnstableApi::class)
+    override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
+        super.onUpdateNotification(
+            session,
+            SleepBedRules.foregroundRequired(startInForegroundRequired, PlayerHooks.bedState),
+        )
+    }
+
+    /** #4018: the book's own need for foreground, mirroring Media3's rule (playing or about to). */
+    private fun mediaForegroundRequired(player: Player): Boolean =
+        player.playWhenReady &&
+            (player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_BUFFERING)
+
     override fun onTaskRemoved(rootIntent: Intent?) {
+        // #4018: swiping Audiplex away must not kill a playing sleep bed.
+        if (SleepBedRules.foregroundRequired(false, PlayerHooks.bedState)) return
         val player = mediaSession?.player
         if (player == null || !player.playWhenReady || player.mediaItemCount == 0) {
             stopSelf()
@@ -120,6 +173,7 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        PlayerHooks.onBedStateChanged = null  // #4018
         audioFocusManager?.abandonFocus()
         if (PlayerHooks.focusManager === audioFocusManager) PlayerHooks.focusManager = null  // #7528
         audioFocusManager = null

@@ -10,7 +10,9 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Player.DiscontinuityReason
+import android.net.Uri
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -47,6 +49,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext  // #7109
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -141,6 +144,8 @@ class PlaybackManager @Inject constructor(
     // applyAudioAttributesFor — no cross-thread hazard, so no @Volatile needed.
     private var musicVolume: Float = 1f
     private var audiobookVolume: Float = 1f
+    // #4018: the sleep bed's own level (the sleep dialog's slider), independent of the book.
+    private var sleepBedLevel: Float = SleepBedRules.DEFAULT_VOLUME
 
     init {
         scope.launch {
@@ -156,6 +161,7 @@ class PlaybackManager @Inject constructor(
                 if (_playerKind.value == PlayerKind.Audiobook) applyVolumeForCurrentKind()
             }
         }
+        scope.launch { settingsStore.sleepBedVolume.collect { sleepBedLevel = it } }  // #4018
     }
 
     /** #997: the base volume for [kind]. Music and Stream share the music dial. */
@@ -256,8 +262,20 @@ class PlaybackManager @Inject constructor(
     // MediaSession — it has no lock-screen UI, so it cannot touch the
     // existing single-stream session (Audiobook/Music/Stream) at all.
     private var bedPlayer: ExoPlayer? = null
-    private val _bedPlaying = MutableStateFlow(false)
-    val bedPlaying: StateFlow<Boolean> = _bedPlaying
+    // #4018: the bed follows its real player, so a bed that died overnight
+    // reads Stopped (with Restart) instead of "playing" forever.
+    private val _bedState = MutableStateFlow(BedState.Off)
+    val bedState: StateFlow<BedState> = _bedState
+    private var bedWanted = false
+    private var bedUrl: String? = null          // the bed asked for
+    private var bedFallbackUrl: String? = null  // the brown-noise bed, played from its local copy
+    private var bedOnFallback = false
+    private var bedFailures = 0
+    private var bedStartedAtMs = 0L
+    private var bedRecovering = false
+    private var bedRetryJob: Job? = null
+    private var bedCurrentVolume = 0f           // survives a restart of the bed player
+    private val bedDownloads = mutableSetOf<String>()
     private var sleepTimerJob: Job? = null
     // #3714: when the armed sleep fade STARTS (wall clock), null when none is
     // armed or it has finished; the app's sleep button reads it, whoever armed it.
@@ -1337,13 +1355,31 @@ class PlaybackManager @Inject constructor(
      * REPEAT_MODE_ONE until [bedStop] is called; the auth'd OkHttp client
      * matches PlaybackService so a catalog stream URL (not just an external
      * one) works here too.
+     *
+     * #4018: it plays a LOCAL copy once one is downloaded (no network needed
+     * overnight), holds a wake + Wi-Fi lock, retries errors at 10/30/60 s and
+     * then falls back to the local brown-noise bed. While it plays,
+     * PlaybackService keeps the process foreground (PlayerHooks.bedState).
      */
-    @OptIn(UnstableApi::class)
     fun bedPlay(url: String, volume: Float) {
-        releaseBedPlayer()
-        val mediaSourceFactory = DefaultMediaSourceFactory(OkHttpDataSource.Factory(okHttpClient))
+        bedRetryJob?.cancel()
+        bedWanted = true
+        bedUrl = url
+        bedOnFallback = false
+        bedFailures = 0
+        startBedPlayer(url, volume)
+        cacheBed(url)
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun startBedPlayer(url: String, volume: Float) {
+        bedPlayer?.release()
+        val local = bedCacheFile(url).takeIf { it.exists() }
+        // DefaultDataSource reads the file:// local copy and hands http(s) to the auth'd client.
+        val dataSourceFactory = DefaultDataSource.Factory(context, OkHttpDataSource.Factory(okHttpClient))
         val player = ExoPlayer.Builder(context)
-            .setMediaSourceFactory(mediaSourceFactory)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+            .setWakeMode(C.WAKE_MODE_NETWORK)  // #4018: CPU + Wi-Fi stay up with the screen off
             .build()
         bedPlayer = player
         player.setAudioAttributes(
@@ -1357,26 +1393,146 @@ class PlaybackManager @Inject constructor(
             // the mic.
             /* handleAudioFocus = */ false
         )
+        player.addListener(object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (bedPlayer === player) refreshBedState()
+            }
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (bedPlayer === player) refreshBedState()
+            }
+            override fun onPlayerError(error: PlaybackException) {
+                if (bedPlayer === player) onBedError(url, local != null, error)
+            }
+        })
         player.repeatMode = Player.REPEAT_MODE_ONE
-        player.volume = volume.coerceIn(0f, 1f)
-        player.setMediaItem(MediaItem.fromUri(url))
+        bedCurrentVolume = volume.coerceIn(0f, 1f)
+        player.volume = bedCurrentVolume
+        player.setMediaItem(MediaItem.fromUri(local?.let { Uri.fromFile(it) } ?: Uri.parse(url)))
         player.prepare()
         player.play()
-        _bedPlaying.value = true
+        bedStartedAtMs = System.currentTimeMillis()
+        bedRecovering = false
+        refreshBedState()
+    }
+
+    /** #4018: retry, fall back to the local brown-noise bed, or give up; each step is logged. */
+    private fun onBedError(url: String, wasLocal: Boolean, error: PlaybackException) {
+        if (System.currentTimeMillis() - bedStartedAtMs >= SleepBedRules.HEALTHY_RESET_MS) bedFailures = 0
+        bedFailures++
+        val fallback = bedFallbackUrl?.takeIf {
+            SleepBedRules.cacheFileName(it) != SleepBedRules.cacheFileName(url) && bedCacheFile(it).exists()
+        }
+        val action = SleepBedRules.recoveryFor(bedFailures, bedOnFallback, fallback != null)
+        bedPlayer?.release()
+        bedPlayer = null
+        val detail = mapOf(
+            "url" to url, "local" to wasLocal.toString(), "failures" to bedFailures.toString(),
+            "error" to error.errorCodeName, "action" to action.toString(),
+        )
+        when (action) {
+            is SleepBedRules.Recovery.Retry -> {
+                clientLog.report("error", "bed_error", "sleep bed failed; retrying in ${action.delayMs / 1000}s", detail)
+                bedRecovering = true
+                bedRetryJob = scope.launch {
+                    delay(action.delayMs)
+                    if (bedWanted) startBedPlayer(url, bedCurrentVolume)
+                }
+            }
+            SleepBedRules.Recovery.Fallback -> {
+                clientLog.report("error", "bed_fallback", "sleep bed failed; playing the local brown-noise bed", detail)
+                bedOnFallback = true
+                bedFailures = 0
+                startBedPlayer(fallback!!, bedCurrentVolume)
+                return
+            }
+            SleepBedRules.Recovery.GiveUp -> {
+                clientLog.report("error", "bed_stopped", "sleep bed gave up after retries", detail)
+                bedRecovering = false
+            }
+        }
+        refreshBedState()
+    }
+
+    private fun refreshBedState() {
+        val player = bedPlayer
+        val state = SleepBedRules.stateFor(
+            bedWanted, bedRecovering,
+            player?.playWhenReady ?: false, player?.playbackState ?: Player.STATE_IDLE,
+        )
+        if (state == _bedState.value) return
+        _bedState.value = state
+        PlayerHooks.setBedState(state)
+        if (state == BedState.Stopped) {
+            clientLog.report("error", "bed_state", "sleep bed stopped", mapOf("url" to (bedUrl ?: "")))
+        }
     }
 
     fun bedStop() {
         releaseBedPlayer()
     }
 
+    /** #4018: the dialog's one-tap Restart bed: same bed, same volume. */
+    fun restartBed() {
+        val url = bedUrl ?: return
+        bedPlay(url, bedCurrentVolume.takeIf { it > 0f } ?: sleepBedLevel)
+    }
+
     fun bedVolume(volume: Float) {
-        bedPlayer?.volume = volume.coerceIn(0f, 1f)
+        bedCurrentVolume = volume.coerceIn(0f, 1f)
+        bedPlayer?.volume = bedCurrentVolume
+    }
+
+    /** #4018: the slider. Saved, and applied live unless a crossfade is still waiting to bring the bed up. */
+    fun setSleepBedLevel(level: Float) {
+        sleepBedLevel = level.coerceIn(0f, 1f)
+        scope.launch { settingsStore.setSleepBedVolume(sleepBedLevel) }
+        if (_sleepEndsAtMs.value != null) {
+            if (sleepBedFadeTo != null) sleepBedFadeTo = sleepBedLevel
+        } else if (bedWanted) {
+            bedVolume(sleepBedLevel)
+        }
+    }
+
+    /** #4018: the bed to fall back to overnight; its local copy is fetched now, while the network is up. */
+    fun setBedFallback(url: String?) {
+        bedFallbackUrl = url
+        if (url != null) cacheBed(url)
+    }
+
+    private fun bedCacheFile(url: String): File =
+        File(File(context.filesDir, "sleep_beds"), SleepBedRules.cacheFileName(url))
+
+    /** #4018: download the bed once; the next (re)start plays the local copy. */
+    private fun cacheBed(url: String) {
+        val file = bedCacheFile(url)
+        if (file.exists() || !bedDownloads.add(file.name)) return
+        scope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                file.parentFile?.mkdirs()
+                val part = File(file.parentFile, file.name + ".part")
+                okHttpClient.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+                    check(resp.isSuccessful) { "HTTP ${resp.code}" }
+                    part.outputStream().use { out -> resp.body!!.byteStream().copyTo(out) }
+                }
+                check(part.renameTo(file)) { "rename failed" }
+                file.length()
+            }
+            withContext(Dispatchers.Main) { bedDownloads.remove(file.name) }
+            result
+                .onSuccess { clientLog.report("info", "bed_cached", "sleep bed saved locally", mapOf("url" to url, "bytes" to it.toString())) }
+                .onFailure { clientLog.report("error", "bed_cache_failed", it.message ?: it.javaClass.simpleName, mapOf("url" to url)) }
+        }
     }
 
     private fun releaseBedPlayer() {
+        bedWanted = false
+        bedRetryJob?.cancel()
+        bedRetryJob = null
+        bedRecovering = false
         bedPlayer?.release()
         bedPlayer = null
-        _bedPlaying.value = false
+        bedCurrentVolume = 0f
+        refreshBedState()
     }
 
     /**
@@ -1398,9 +1554,9 @@ class PlaybackManager @Inject constructor(
             val done = SleepFade.runTimer(  // #3953: the loop lives in SleepFade so it is unit-tested
                 minutes, fadeSeconds, bedFadeTo,
                 mainVolume = { controller?.volume },
-                bedVolume = { bedPlayer?.volume ?: 0f },
+                bedVolume = { if (bedWanted) bedCurrentVolume else 0f },
                 setMain = { setPlayerVolume(it) },
-                setBed = { bedPlayer?.volume = it },
+                setBed = { if (bedWanted) bedVolume(it) },
                 pause = {
                     PlayerHooks.notePause("sleep_timer")  // #3552
                     controller?.pause()
@@ -1421,13 +1577,13 @@ class PlaybackManager @Inject constructor(
     /**
      * The app's sleep button (#3714): keep the current book playing (resuming
      * it where it is if paused), then after [minutes] fade it out INTO [bedUrl]
-     * (silent until the fade, then up to [SleepFade.BED_VOLUME]), or into
+     * (silent until the fade, then up to the bed slider's level, #4018), or into
      * silence when [bedUrl] is null. Same engine as dj_sleep_start.
      */
     fun startSleepMode(minutes: Float, bedUrl: String?, fadeSeconds: Int = SleepFade.DEFAULT_FADE_SECONDS) {
         if (!isPlaying.value) resume()
         if (bedUrl != null) bedPlay(SleepFade.resolveUrl(bedUrl, apiHolder.baseUrl), 0f)
-        startSleepTimer(minutes, fadeSeconds, if (bedUrl != null) SleepFade.BED_VOLUME else null)
+        startSleepTimer(minutes, fadeSeconds, if (bedUrl != null) sleepBedLevel else null)
     }
 
     /** Push the armed fade [minutes] later, undoing any fade already under way. */
@@ -1436,14 +1592,14 @@ class PlaybackManager @Inject constructor(
         val leftMin = (endsAt - System.currentTimeMillis()).coerceAtLeast(0) / 60_000f
         val bedTo = sleepBedFadeTo
         cancelSleepTimer()
-        if (bedTo != null) bedPlayer?.volume = 0f
+        if (bedTo != null && bedWanted) bedVolume(0f)
         startSleepTimer(leftMin + minutes, sleepFadeSeconds, bedTo)
     }
 
     /** Cancel the sleep button's timer; a bed still waiting silently for the crossfade goes too. */
     fun cancelSleepMode() {
         cancelSleepTimer()
-        if (bedPlayer?.volume == 0f) bedStop()
+        if (bedWanted && bedCurrentVolume == 0f) bedStop()
     }
 
     /** [source] says who asked (#3552): it rides the pause_source client log. */

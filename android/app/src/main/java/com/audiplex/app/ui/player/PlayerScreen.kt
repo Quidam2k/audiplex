@@ -64,6 +64,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import coil3.compose.AsyncImage
 import com.audiplex.app.data.api.AudiplexApi
+import com.audiplex.app.playback.BedState
 import com.audiplex.app.playback.MusicQueueState
 import com.audiplex.app.playback.PlayerKind
 
@@ -83,7 +84,8 @@ fun PlayerScreen(
     val durationMs by viewModel.durationMs.collectAsState()
     val chapterIndex by viewModel.currentChapterIndex.collectAsState()
     val sleepMinutesLeft by viewModel.sleepMinutesLeft.collectAsState()
-    val bedPlaying by viewModel.bedPlaying.collectAsState()
+    val bedState by viewModel.bedState.collectAsState()
+    val sleepBedLevel by viewModel.sleepBedLevel.collectAsState()
     val sleepBeds by viewModel.sleepBeds.collectAsState()
     val sleepBedsError by viewModel.sleepBedsError.collectAsState()
     val defaultSleepBedId by viewModel.defaultSleepBedId.collectAsState()
@@ -98,12 +100,15 @@ fun PlayerScreen(
             defaultBedId = defaultSleepBedId,
             bedsError = sleepBedsError,
             minutesLeft = sleepMinutesLeft,
-            bedPlaying = bedPlaying,
+            bedState = bedState,
+            bedLevel = sleepBedLevel,
+            onBedLevel = { viewModel.setSleepBedLevel(it) },
             onRetryBeds = { viewModel.loadSleepBeds() },
             onStart = { minutes, bed, fadeSeconds -> viewModel.startSleep(minutes, bed, fadeSeconds) },
             onExtend = { viewModel.extendSleep() },
             onCancel = { viewModel.cancelSleep() },
             onStopBed = { viewModel.stopSleepBed() },
+            onRestartBed = { viewModel.restartSleepBed() },
             onDismiss = { showSleep = false },
         )
     }
@@ -126,7 +131,9 @@ fun PlayerScreen(
                         Icon(
                             Icons.Default.Bedtime,
                             contentDescription = "Sleep",
-                            tint = if (sleepMinutesLeft != null || bedPlaying)
+                            tint = if (bedState == BedState.Stopped)
+                                MaterialTheme.colorScheme.error  // #4018: the bed died
+                            else if (sleepMinutesLeft != null || bedState != BedState.Off)
                                 MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.onSurfaceVariant
                         )

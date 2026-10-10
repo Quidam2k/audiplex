@@ -8,10 +8,12 @@ import com.audiplex.app.data.api.BookDetail
 import com.audiplex.app.data.api.ChapterSchema
 import com.audiplex.app.data.api.SleepBed
 import com.audiplex.app.data.api.TrackRatingCreate
+import com.audiplex.app.playback.BedState
 import com.audiplex.app.playback.ControllerMetadata
 import com.audiplex.app.playback.MusicQueueState
 import com.audiplex.app.playback.PlaybackManager
 import com.audiplex.app.playback.PlayerKind
+import com.audiplex.app.playback.SleepBedRules
 import com.audiplex.app.playback.SleepFade
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -151,7 +153,11 @@ class PlayerViewModel @Inject constructor(
 
     // ----- #3714: the sleep button -----
 
-    val bedPlaying: StateFlow<Boolean> = playbackManager.bedPlaying
+    val bedState: StateFlow<BedState> = playbackManager.bedState
+
+    /** #4018: the bed's own level for the slider (persisted, independent of the book). */
+    val sleepBedLevel: StateFlow<Float> = settingsStore.sleepBedVolume
+        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000), SleepBedRules.DEFAULT_VOLUME)
 
     private val _sleepBeds = MutableStateFlow<List<SleepBed>>(emptyList())
     val sleepBeds: StateFlow<List<SleepBed>> = _sleepBeds.asStateFlow()
@@ -182,7 +188,14 @@ class PlayerViewModel @Inject constructor(
                 return@launch
             }
             runCatching { api.getSleepBeds() }
-                .onSuccess { _sleepBeds.value = it; _sleepBedsError.value = null }
+                .onSuccess { beds ->
+                    _sleepBeds.value = beds
+                    _sleepBedsError.value = null
+                    // #4018: the overnight fallback; its local copy downloads now, while the network is up.
+                    playbackManager.setBedFallback(
+                        SleepBedRules.pickFallback(beds.map { it.title to SleepFade.resolveUrl(it.streamUrl, apiHolder.baseUrl) })
+                    )
+                }
                 .onFailure { _sleepBedsError.value = it.message ?: it.javaClass.simpleName }
         }
     }
@@ -194,6 +207,8 @@ class PlayerViewModel @Inject constructor(
     fun extendSleep() = playbackManager.extendSleepMode(15f)
     fun cancelSleep() = playbackManager.cancelSleepMode()
     fun stopSleepBed() = playbackManager.bedStop()
+    fun restartSleepBed() = playbackManager.restartBed()
+    fun setSleepBedLevel(level: Float) = playbackManager.setSleepBedLevel(level)
 
     fun formatTime(ms: Long): String {
         val totalSeconds = ms / 1000

@@ -14,12 +14,15 @@ import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -27,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.audiplex.app.data.api.SleepBed
+import com.audiplex.app.playback.BedState
 import com.audiplex.app.playback.SleepFade
 
 private const val TEST_MINUTES = 1
@@ -39,14 +43,19 @@ fun SleepDialog(
     defaultBedId: Int?,
     bedsError: String?,
     minutesLeft: Int?,
-    bedPlaying: Boolean,
+    bedState: BedState,
+    bedLevel: Float,
+    onBedLevel: (Float) -> Unit,
     onRetryBeds: () -> Unit,
     onStart: (minutes: Int, bed: SleepBed?, fadeSeconds: Int) -> Unit,
     onExtend: () -> Unit,
     onCancel: () -> Unit,
     onStopBed: () -> Unit,
+    onRestartBed: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val bedRunning = bedState == BedState.Playing || bedState == BedState.Recovering
+
     var minutes by rememberSaveable { mutableStateOf(30) }
     // Keyed on the default bed (last used, else first; #3953): the list loads
     // after the dialog opens, and the default must follow it instead of
@@ -70,7 +79,19 @@ fun SleepDialog(
                     )
                 }
 
-                bedPlaying -> Text("Sleep bed is playing.")
+                bedRunning -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        if (bedState == BedState.Recovering) "Sleep bed dropped out. Restarting it..."
+                        else "Sleep bed is playing."
+                    )
+                    BedVolumeRow(bedLevel, onBedLevel)
+                }
+
+                // #4018: a bed that died says so, with a one-tap restart.
+                bedState == BedState.Stopped -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Sleep bed stopped.", color = MaterialTheme.colorScheme.error)
+                    BedVolumeRow(bedLevel, onBedLevel)
+                }
 
                 else -> {
                     Column(
@@ -149,6 +170,8 @@ fun SleepDialog(
                                 Text("Silence")
                             }
                         }
+
+                        if (beds.any { it.id == selectedBedId }) BedVolumeRow(bedLevel, onBedLevel)
                     }
                 }
             }
@@ -161,7 +184,13 @@ fun SleepDialog(
                     }
                 }
 
-                bedPlaying -> {
+                bedState == BedState.Stopped -> {
+                    TextButton(onClick = onRestartBed) {
+                        Text("Restart bed")
+                    }
+                }
+
+                bedRunning -> {
                     TextButton(
                         onClick = {
                             onStopBed()
@@ -203,6 +232,20 @@ fun SleepDialog(
                         Text("Close")
                     }
                 }
+            } else if (bedState == BedState.Stopped) {
+                Row {
+                    TextButton(
+                        onClick = {
+                            onStopBed()
+                            onDismiss()
+                        }
+                    ) {
+                        Text("Stop bed")
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text("Close")
+                    }
+                }
             } else {
                 TextButton(onClick = onDismiss) {
                     Text("Close")
@@ -210,4 +253,24 @@ fun SleepDialog(
             }
         },
     )
+}
+
+/** #4018: the bed's own volume, independent of the book; moves the playing bed live. */
+@Composable
+private fun BedVolumeRow(level: Float, onLevel: (Float) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        // Local while dragging: the saved level comes back a beat later and would make the thumb stutter.
+        var value by remember { mutableStateOf(level) }
+        Text("Bed volume")
+        Slider(
+            value = value,
+            onValueChange = { value = it; onLevel(it) },
+            valueRange = 0f..1f,
+            modifier = Modifier.weight(1f),
+        )
+    }
 }

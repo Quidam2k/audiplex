@@ -47,4 +47,20 @@ object PlayerHooks {
      * which would un-duck a Talk. False when not ducked. Main thread.
      */
     fun retargetRestore(volume: Float): Boolean = focusManager?.retargetRestore(volume) ?: false
+
+    /**
+     * #4018: the sleep bed's state, so PlaybackService keeps the process
+     * foreground while the bed plays with the book paused. The service sets
+     * [onBedStateChanged] to re-run its notification update. Main thread.
+     */
+    @Volatile
+    var bedState: BedState = BedState.Off
+        private set
+
+    var onBedStateChanged: (() -> Unit)? = null
+
+    fun setBedState(state: BedState) {
+        bedState = state
+        onBedStateChanged?.invoke()
+    }
 }

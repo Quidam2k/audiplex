@@ -56,6 +56,7 @@ class SettingsStore @Inject constructor(
     private val musicVolumeKey = floatPreferencesKey("music_volume")
     private val audiobookVolumeKey = floatPreferencesKey("audiobook_volume")
     private val lastSleepBedIdKey = intPreferencesKey("last_sleep_bed_id")  // #3953
+    private val sleepBedVolumeKey = floatPreferencesKey("sleep_bed_volume")  // #4018
 
     override val serverUrl: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[serverUrlKey] ?: ""
@@ -148,6 +149,15 @@ class SettingsStore @Inject constructor(
 
     suspend fun setLastSleepBedId(id: Int) {
         context.dataStore.edit { prefs -> prefs[lastSleepBedIdKey] = id }
+    }
+
+    /** #4018: the sleep bed's own level, independent of the book's dial. */
+    val sleepBedVolume: Flow<Float> = context.dataStore.data.map { prefs ->
+        prefs[sleepBedVolumeKey] ?: com.audiplex.app.playback.SleepBedRules.DEFAULT_VOLUME
+    }
+
+    suspend fun setSleepBedVolume(volume: Float) {
+        context.dataStore.edit { prefs -> prefs[sleepBedVolumeKey] = volume.coerceIn(0f, 1f) }
     }
 
     suspend fun setServerUrl(url: String) {
