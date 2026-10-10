@@ -8,9 +8,11 @@ import org.junit.Test
 class DuckRampTest {
     @Test
     fun `duck and restore take hundreds of ms in many small steps`() {
-        assertEquals(16, DuckRamp.steps(DuckRamp.DUCK_MS))
-        assertEquals(20, DuckRamp.steps(DuckRamp.RESTORE_MS))  // Pantheon #2187: 500 ms
-        assertTrue(DuckRamp.DUCK_MS in 300L..800L && DuckRamp.RESTORE_MS in 300L..800L)
+        assertEquals(8, DuckRamp.steps(DuckRamp.DUCK_MS))  // Pantheon #7622: 80 ms in 10 ms steps
+        assertEquals(50, DuckRamp.steps(DuckRamp.RESTORE_MS))  // Pantheon #2187: 500 ms
+        assertTrue(DuckRamp.DUCK_MS in 60L..150L && DuckRamp.RESTORE_MS in 300L..800L)  // Pantheon #7622
+        // Pantheon #7622: Pantheon's phone opens the BT mic 120 ms after Talk-ON; the duck must be done by then
+        assertTrue(DuckRamp.DUCK_MS <= 120L)
         assertEquals(1, DuckRamp.steps(0L))
     }
 

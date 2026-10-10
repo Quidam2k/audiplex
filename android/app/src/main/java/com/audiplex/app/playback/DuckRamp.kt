@@ -5,9 +5,11 @@ package com.audiplex.app.playback
  * 5% in one step). Duck and restore now ramp linearly. Pure, for JVM tests.
  */
 object DuckRamp {
-    const val DUCK_MS = 400L     // #3597 down: fast enough to clear the HFP mic switch
+    // Pantheon #7622: 400 -> 80 ms. Pantheon's phone waited the whole ramp out before opening the
+    // BT mic, so 10/10 Talk-ON on a headset took 1.2 s; it now waits 120 ms.
+    const val DUCK_MS = 80L      // #3597 down: fast enough to clear the HFP mic switch
     const val RESTORE_MS = 500L  // #3597 up; Pantheon #2187: 500 ms on an equal-loudness curve (restoreLevel)
-    const val STEP_MS = 25L
+    const val STEP_MS = 10L      // Pantheon #7622 was 25: an 80 ms duck still gets 8 steps, not a cliff
 
     fun steps(durationMs: Long): Int = (durationMs / STEP_MS).toInt().coerceAtLeast(1)
 
