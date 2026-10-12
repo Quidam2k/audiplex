@@ -142,6 +142,36 @@ def test_learn_endpoint(client, db_engine, monkeypatch):
         "track_id": a, "weight": 0.5, "reason": "fast-skipped by you (<5 s)", "ride_id": "api1", "skip_rides": 1}
 
 
+def test_replayed_ride_through_endpoint_moves_weights(client, db_engine, monkeypatch):
+    """#7382 cold check (notes/2026-10-09-dj-open-checks.md step 3): a 10/8-shaped ride
+    replayed through POST /api/dj/learn moves each weight; replaying it again does not."""
+    from sqlalchemy.orm import sessionmaker
+
+    s = playback.get_settings().model_copy(update={"dj_owner_username": "testuser"})
+    monkeypatch.setattr(playback, "get_settings", lambda: s)
+    monkeypatch.setattr(dj_learn, "agent_advance_times", lambda since, until: [])
+    client.app.include_router(dj_learn_router.router)
+    db = sessionmaker(bind=db_engine)()
+    fast, again, through, loved = _tracks(db, 4)
+    uid = _owner(db)
+    db.add(DjTrackWeight(track_id=again, weight=0.5, skip_rides=1))  # skipped on an earlier ride
+    db.add(TrackRating(user_id=uid, track_id=loved, rating=5, updated_at=T0 + timedelta(minutes=20)))
+    db.commit()
+    for tid, event, played, offset in [(fast, "skip", 2.0, 60), (again, "skip", 3.0, 400),
+                                       (through, "complete", 200, 700)]:
+        _stat(db, uid, tid, event, played, T0 + timedelta(seconds=offset))
+    body = {"since": T0.isoformat(), "until": (T0 + timedelta(hours=1)).isoformat(), "ride_id": "replay-1008"}
+
+    r = client.post("/api/dj/learn", json=body)
+    assert r.status_code == 200, r.text
+    assert len(r.json()["note"].splitlines()) == 3
+    weights = {w["track_id"]: w["weight"] for w in client.get("/api/dj/weights").json()}
+    assert weights == {fast: 0.5, again: 0.0, through: 1.1, loved: 1.3}
+
+    assert client.post("/api/dj/learn", json=body).json()["already_learned"] is True
+    assert {w["track_id"]: w["weight"] for w in client.get("/api/dj/weights").json()} == weights
+
+
 def test_pause_book_bookmarks_for_the_owner_and_pauses(client, db_engine, sample_book, monkeypatch):
     """#4052: the DJ pauses a playing book and saves the owner's place first."""
     from sqlalchemy.orm import sessionmaker
