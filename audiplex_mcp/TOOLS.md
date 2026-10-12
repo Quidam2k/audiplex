@@ -77,6 +77,10 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_track_ratings` — his own 1-5 star ratings from the phone.
 - `dj_track_stats` — completion rates and where skips land, with each track's loudness line (intro quiet, fade, dips) when measured. #3981
 - `dj_pair_note` / `dj_pair_notes` — write / read DJ notes on a track or a track_a -> track_b pairing (kept across rides).
+- `dj_song_context` — everything stored about one song (JSON): sourced facts, measured bpm/key/energy, his stars/loved/tags, pair notes. Love words never included. (#3984)
+- `dj_plays_well_after` — "what plays well after this, and why": library songs with stored-evidence reasons (pair note, shared writer, sample/cover link, shared theme, tag/bucket, key+tempo, energy, release year); "never after" notes veto. (#3984)
+- `dj_theme_songs` — songs about a theme ("war", "hope", "robots"): his tags, bucket names, then sourced song notes. (#3984)
+- Queue-time notes (#3984): dj_play_now / dj_queue / dj_play_next / dj_queue_by / dj_mix end with a CONTEXT block of sourced facts for the first 5 queued songs and any stored link between neighbours (CAUTION on a vetoed pair). Omitted when slow (>1.5 s), unknown, or the queue guard dropped tracks.
 - `dj_what_was_that` — Todd asked "what was that?": names the last (or current) song and has the DJ name it the next 3 plays (#3912).
 - `dj_callouts` — which songs a DJ bridge names: whole-album deep cuts yes, Todd's faster/slower picks and hits no; show or set per pool lane (#3912).
 

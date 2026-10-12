@@ -77,6 +77,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from audiplex_mcp import dj_bridge_watcher, dj_clip_bank, dj_persona, tts_backend  # #2858 dj_patter, #3917 bank
+from audiplex_mcp import song_context  # #3984 song memory: sourced notes, plays-well-after, theme search
 from audiplex_mcp.mix_balance import balance_order, describe_head  # #5463
 
 AUDIPLEX_URL = os.environ.get("AUDIPLEX_URL", "http://localhost:8100").rstrip("/")  # #3886 prod port; :8000 was the dev default
@@ -179,7 +180,7 @@ async def dj_play_now(track_ids: list[int]) -> str:
     head = result + head  # #ride0928
     # Never claim "it's playing" — say whether anything is listening, so a dead
     # player reads as a failure instead of a success (#2961).
-    note = await _repeat_note(track_ids)
+    note = await _repeat_note(track_ids) + await _song_context_note(data, track_ids)  # #3984
     if not _is_yes(result):  # #2843: no "should pick this up" over a NO/UNCONFIRMED
         return head + pool_msg + (" " + _describe_device(device) if device else "") + note
     if not device:
@@ -873,7 +874,7 @@ async def dj_queue(track_ids: list[int]) -> str:
         f"Queued {_sent_count(data, len(track_ids))} track(s) to the end "
         f"(command #{data.get('id')}, {data.get('pending')} pending). "
         "Appended when the device next polls."
-    ) + _missing_note(data) + await _repeat_note(track_ids)  # #3249
+    ) + _missing_note(data) + await _repeat_note(track_ids) + await _song_context_note(data, track_ids)  # #3249 #3984
 
 
 @mcp.tool()
@@ -891,7 +892,7 @@ async def dj_play_next(track_ids: list[int]) -> str:
     return await _result(data, len(track_ids)) + (  # #ride0928
         f"Inserted {_sent_count(data, len(track_ids))} track(s) to play next "
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
-    ) + _missing_note(data) + await _repeat_note(track_ids)  # #3249
+    ) + _missing_note(data) + await _repeat_note(track_ids) + await _song_context_note(data, track_ids)  # #3249 #3984
 
 
 @mcp.tool()
@@ -1593,6 +1594,57 @@ async def dj_pair_notes(track_a: int = 0, track_b: int = 0, limit: int = 20) -> 
     )
 
 
+SONG_TOOL_TIMEOUT_S = 10  # #3984
+
+
+async def _song_memory(fn, *args, **kw):  # #3984 read-only lookups off the event loop, bounded
+    try:  # #3984
+        return await asyncio.wait_for(asyncio.to_thread(fn, *args, **kw), SONG_TOOL_TIMEOUT_S)  # #3984
+    except Exception as e:  # #3984
+        print(f"[song memory] {getattr(fn, '__name__', fn)}: {e!r}", file=sys.stderr, flush=True)  # #3984
+        return None  # #3984
+
+
+@mcp.tool()
+async def dj_song_context(track_id: int) -> str:
+    """Everything stored about one song, as JSON (#3984): sourced facts (story,
+    history, theme, writers, samples - verbatim, each with its source), measured
+    bpm/key/energy, Todd's stars / loved / tags, and DJ pair notes. Weave facts
+    in; never add to them. His love words are private and never included."""
+    ctx = await _song_memory(song_context.context, track_id)  # #3984
+    if not ctx:  # #3984
+        return f"No song memory for track {track_id} (unknown id, or the notes are unreachable)."  # #3984
+    return json.dumps(ctx, ensure_ascii=False, indent=1)  # #3984
+
+
+@mcp.tool()
+async def dj_plays_well_after(track_id: int, n: int = 8, exclude_ids: list[int] | None = None) -> str:
+    """'What plays well after this, and why' (#3984): up to n library songs as
+    JSON [{track_id, title, artist, score, reasons: [{kind, text, source, url}]}].
+    Every reason is stored evidence, never a guess: a DJ pair note, a shared
+    songwriter, a sample/cover link, a shared theme (with the matched phrase),
+    a shared tag or bucket, compatible measured key+tempo, close energy, or the
+    same release year. A pair note like 'never after X' vetoes the pairing.
+    Banned songs, repeats from the last 12 h, and exclude_ids are left out.
+    Empty = no stored link (then pick by ear, not by invention)."""
+    picks = await _song_memory(song_context.after, track_id, max(1, min(n, 25)), exclude_ids or ())  # #3984
+    if not picks:  # #3984
+        return f"No stored links from track {track_id}."  # #3984
+    return json.dumps(picks, ensure_ascii=False, indent=1)  # #3984
+
+
+@mcp.tool()
+async def dj_theme_songs(query: str, n: int = 25) -> str:
+    """Songs in the library about a theme (#3984): 'war', 'hope', 'robots',
+    'trains'... JSON [{track_id, title, artist, why: {kind, text, source, url}}].
+    Matches Todd's tags first, then bucket names, then the sourced song notes
+    (whole-word). One entry per song; banned songs left out."""
+    hits = await _song_memory(song_context.theme, query, max(1, min(n, 100)))  # #3984
+    if not hits:  # #3984
+        return f"No library songs found for theme {query!r}."  # #3984
+    return json.dumps(hits, ensure_ascii=False, indent=1)  # #3984
+
+
 WHAT_WAS_THAT_RECENT_S = 45  # #3912: this early into a song, "what was that?" means the last one
 
 
@@ -2011,6 +2063,29 @@ def _describe_suppression(item: dict) -> str:
     return f"    {label or ('track ' + str(item['track_id']))} — {item['detail']}"
 
 
+SONG_CONTEXT_TIMEOUT_S = 1.5  # #3984 a slow notes DB can never delay a queue call by more than this
+
+
+async def _song_context_note(data, track_ids) -> str:  # #3984
+    """The queue-time hook: sourced notes for what was ACTUALLY queued, so the DJ
+    gets each song's story without having to ask. '' when nothing was queued,
+    the queue guard dropped any of it (we can't tell which), or anything is slow
+    or wrong - this never blocks or breaks the queue call it rides on."""
+    try:  # #3984
+        if not isinstance(data, dict) or not data.get("id"):  # #3984 held/stopped/refused: nothing queued
+            return ""  # #3984
+        dropped = {int(t) for t in data.get("dropped_missing") or []}  # #3984
+        ids = [int(t) for t in track_ids if int(t) not in dropped]  # #3984
+        kept = data.get("kept")  # #3984
+        if not ids or (kept is not None and kept != len(ids)):  # #3984
+            return ""  # #3984
+        return await asyncio.wait_for(asyncio.to_thread(song_context.queue_context, ids),  # #3984
+                                      SONG_CONTEXT_TIMEOUT_S)  # #3984
+    except Exception as e:  # #3984 includes the timeout
+        print(f"[song context] skipped: {e!r}", file=sys.stderr, flush=True)  # #3984
+        return ""  # #3984
+
+
 async def _repeat_note(track_ids: list[int]) -> str:
     """Advisory line for a queueing command: did this just play? (#948)
 
@@ -2233,7 +2308,7 @@ async def dj_queue_by(
     return await _result(data, len(track_ids)) + (  # #ride0928
         f"{verb} {_sent_count(data, len(track_ids))} track(s) from {label} "
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
-    ) + _missing_note(data)  # #3249
+    ) + _missing_note(data) + await _song_context_note(data, track_ids)  # #3249 #3984
 
 
 
@@ -2603,7 +2678,8 @@ async def dj_mix(
         if isinstance(data, str):
             return _held_result(data)  # #ride0928
         return (await _result(data, len(upcoming))  # #ride0928
-                + head + f" Nothing was loaded, so it was sent to start now (command #{data.get('id')})." + _missing_note(data))  # #3249 #2843
+                + head + f" Nothing was loaded, so it was sent to start now (command #{data.get('id')})." + _missing_note(data)  # #3249 #2843
+                + await _song_context_note(data, upcoming))  # #3984
 
     if not await _device_lacks_replace_upcoming():  # #3249: don't re-send a known failure
         # Only the first chunk rides replace_upcoming; the rest is appended once
@@ -2619,9 +2695,9 @@ async def dj_mix(
             return head + (
                 f" Sent replace_upcoming (command #{data['id']}) after the current song;"
                 " no ack yet — check dj_command_status." + tail_note
-            )
+            ) + await _song_context_note(data, first)  # #3984
         if ack.get("ack_status") == "ok":
-            return head + f" Queued after the current song (command #{data['id']}){tail_note}."
+            return head + f" Queued after the current song (command #{data['id']}){tail_note}." + await _song_context_note(data, first)  # #3984
         if ack.get("ack_status") != "unknown_type":
             return head + f" The phone refused it: {ack.get('ack_status')} {ack.get('ack_detail') or ''}".rstrip()
 
