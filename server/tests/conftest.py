@@ -450,6 +450,15 @@ def isolated_dj_pool(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_live_song_memory(monkeypatch):
+    """#4056: pool picks must never read the real song-memory DBs in a test.
+    test_4056_context_picks builds its own ContextTilt with a stub after()."""
+    from audiplex import dj_context_picks, dj_pool
+
+    monkeypatch.setattr(dj_pool, "_context_tilt", lambda: dj_context_picks.ContextTilt(False))
+
+
+@pytest.fixture(autouse=True)
 def isolated_book_handoff(monkeypatch):
     """The phone-book handoff lookup (#2680) must never open the real DB.
     Tests that exercise it patch _book_session to a test-engine session."""

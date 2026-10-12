@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     # so -20, not #7136's -24 (4 LU under, which he found too quiet at max volume).
     normalize_music: bool = False
     music_target_lufs: float = -20.0  # #3504
+    # #4056: pool picks lean on song memory (#3984): a linked song weighs 2x
+    # inside its lane. Rotation is untouched. False is the rollback.
+    dj_context_picks: bool = True
 
     @model_validator(mode="after")
     def _ensure_jwt_secret(self):

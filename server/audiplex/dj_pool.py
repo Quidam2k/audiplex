@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from audiplex import taste
+from audiplex import dj_context_picks, taste
 from audiplex.identity import build_identity_map
 
 
@@ -32,6 +32,17 @@ def _weighted_pick(ids: list[int], weights: dict[int, float]) -> int:
     from audiplex.dj_learn import weighted_pick
 
     return weighted_pick(ids, weights)
+
+def _context_tilt() -> dj_context_picks.ContextTilt:
+    """#4056: on unless settings.dj_context_picks is False; a settings fault leaves it off."""
+    try:
+        from audiplex.config import get_settings
+
+        enabled = bool(get_settings().dj_context_picks)
+    except Exception:
+        enabled = False
+    return dj_context_picks.ContextTilt(enabled)
+
 
 # #7108: a lane that has played all its tracks recycles them, but never one
 # picked within the last this-many picks (about two hours of songs).
@@ -278,6 +289,7 @@ class DJPool:
             "played_this_session_count": len(self.state.get("played_this_session", [])),
             "last_topup_at": self.state.get("last_topup_at"),
             "dropped_by_learning": self.state.get("dropped_by_learning", []),  # #4057: as of the last top-up
+            "context_picks": self.state.get("context_picks"),  # #4056: as of the last top-up
             "lanes": lane_details,
             "source_counts": self._count_sources(),  # Backward compat
             "starvation_config": self.state.get("starvation_config", {}),
@@ -514,6 +526,19 @@ class DJPool:
         picks: list[int] = list(cue_picks)
         to_pick = max(len(cue_picks), to_fill)
 
+        # #4056: what plays just before the next pick: the last pick, else the queue's end.
+        tilt = _context_tilt()
+        queue_end = next((t for t in reversed(upcoming_track_ids) if isinstance(t, int) and t > 0), current_track_id)
+        context_reasons: list[str] = []
+
+        def pick_from(candidates: list[int]) -> int:
+            seed = picks[-1] if picks else queue_end
+            tilted, hits = tilt.weights(seed, candidates, weights)  # #4056
+            pick = _weighted_pick(candidates, tilted)  # #4057
+            if pick in hits:
+                context_reasons.append(f"#{pick} " + dj_context_picks.reason_text(seed, hits[pick]))
+            return pick
+
         # #7108: the order picks will play in, oldest first, for the no-repeat
         # window a recycled pick must stay out of.
         window = int(self.state.get("no_repeat_picks", NO_REPEAT_PICKS))
@@ -578,7 +603,7 @@ class DJPool:
             ids = lane.get("track_ids", [])
             fresh = [t for t in ids if eligible(t)]
             if fresh:
-                pick = _weighted_pick(fresh, weights)  # #4057
+                pick = pick_from(fresh)  # #4057 #4056
             else:
                 recent = recent_window()
                 recent_recs = {r for r in map(recording_of, recent) if r is not None}
@@ -591,7 +616,7 @@ class DJPool:
                         f"all {len(ids)} track(s) already played or queued, and no other lane "
                         "has fresh tracks left to recycle alongside")
                     continue
-                pick = _weighted_pick(again, weights)  # #4057
+                pick = pick_from(again)  # #4057 #4056
             lane["why_empty"] = None
 
             picks.append(pick)
@@ -630,6 +655,8 @@ class DJPool:
             dropped.intersection(t for d in self.state.get("lanes", {}).values() for t in d.get("track_ids", [])))
 
         self.state["last_topup_current_track_id"] = current_track_id
+        self.state["context_picks"] = {  # #4056: shown by status()
+            "enabled": tilt.enabled, "reasons": context_reasons, "skipped": tilt.gave_up}
         if not picks:
             self._persist()
             return {"picks": [], "reason": "no eligible candidates", "pending_cues": pending_cues,
@@ -647,6 +674,7 @@ class DJPool:
             "per_lane_details": lane_details,
             "pending_cues": pending_cues,
             "next_picks_preview": picks[:3],
+            "context_reasons": context_reasons,  # #4056
         }
 
     def add_cue(
