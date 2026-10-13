@@ -1,0 +1,235 @@
+diff --git a/android/app/src/main/java/com/audiplex/app/data/api/ApiModels.kt b/android/app/src/main/java/com/audiplex/app/data/api/ApiModels.kt
+--- a/android/app/src/main/java/com/audiplex/app/data/api/ApiModels.kt
++++ b/android/app/src/main/java/com/audiplex/app/data/api/ApiModels.kt
+@@ -128,6 +128,17 @@
+     @Json(name = "versionName") val versionName: String,
+     @Json(name = "sizeBytes") val sizeBytes: Long,
+     @Json(name = "mtime") val mtime: Long
+ )
+ 
++// #4222: per-item playback gain; books may require a limiter.
++@JsonClass(generateAdapter = true)
++data class GainResponse(
++    val kind: String,
++    val id: Int,
++    val lufs: Double?,
++    @Json(name = "target_lufs") val targetLufs: Double,
++    @Json(name = "gain_db") val gainDb: Double?,
++    val mode: String
++)
++
+ // ----- Music Levels (#7109) -----
+diff --git a/android/app/src/main/java/com/audiplex/app/data/api/AudiplexApi.kt b/android/app/src/main/java/com/audiplex/app/data/api/AudiplexApi.kt
+--- a/android/app/src/main/java/com/audiplex/app/data/api/AudiplexApi.kt
++++ b/android/app/src/main/java/com/audiplex/app/data/api/AudiplexApi.kt
+@@ -166,6 +166,10 @@
+         @Query("limit") limit: Int = 25,
+         @Query("min_skips") minSkips: Int = 2
+     ): List<SkipSuspectSchema>
+ 
++    // #4222: audiobook gain, including boosts that need a limiter.
++    @GET("api/playback/gain/{kind}/{id}")
++    suspend fun getGain(@Path("kind") kind: String, @Path("id") id: Int): GainResponse
++
+     // ----- DJ playback command bus (remote control) -----
+ 
+diff --git a/android/app/src/main/java/com/audiplex/app/playback/PlaybackManager.kt b/android/app/src/main/java/com/audiplex/app/playback/PlaybackManager.kt
+--- a/android/app/src/main/java/com/audiplex/app/playback/PlaybackManager.kt
++++ b/android/app/src/main/java/com/audiplex/app/playback/PlaybackManager.kt
+@@ -2,6 +2,7 @@
+ 
+ import android.content.ComponentName
+ import android.content.Context
++import android.media.audiofx.LoudnessEnhancer  // #4222
+ import androidx.annotation.OptIn
+ import androidx.media3.common.AudioAttributes
+ import androidx.media3.common.C
+@@ -47,7 +48,9 @@
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.StateFlow
+ import kotlinx.coroutines.launch
++import kotlinx.coroutines.isActive  // #4222
+ import kotlinx.coroutines.withContext  // #7109
++import kotlin.math.pow  // #4222
+ import okhttp3.OkHttpClient
+ import okhttp3.Request
+ import javax.inject.Inject
+@@ -144,6 +147,17 @@
+     // applyAudioAttributesFor — no cross-thread hazard, so no @Volatile needed.
+     private var musicVolume: Float = 1f
+     private var audiobookVolume: Float = 1f
++    // #4222: gain belongs to the current book and the service's actual audio session.
++    private var currentBookGainDb: Double? = null
++    private var bookGainJob: Job? = null
++    private var bookGainPlayer: ExoPlayer? = null
++    private var bookEnhancer: LoudnessEnhancer? = null
++    private var bookEnhancerSessionId = C.AUDIO_SESSION_ID_UNSET
++    private val bookAudioSessionListener = object : Player.Listener {
++        override fun onAudioSessionIdChanged(audioSessionId: Int) {
++            applyBookEnhancer()
++        }
++    }
+     // #4018: the sleep bed's own level (the sleep dialog's slider), independent of the book.
+     private var sleepBedLevel: Float = SleepBedRules.DEFAULT_VOLUME
+ 
+@@ -232,9 +246,80 @@
+      */
+     private fun applyVolumeForCurrentKind() {
+         val kind = _playerKind.value ?: return
+-        val target = effectiveMusicVolume(volumeForKind(kind))
++        // #4222: positive book gain uses the limiter; only attenuation changes player volume.
++        val target = if (kind == PlayerKind.Audiobook) {
++            applyBookEnhancer()
++            (audiobookVolume * 10.0.pow((currentBookGainDb ?: 0.0).coerceAtMost(0.0) / 20.0)).toFloat()
++        } else effectiveMusicVolume(volumeForKind(kind))
+         if (PlayerHooks.retargetRestore(target)) return  // #7528: ducked; the restore lands on it
+         setPlayerVolume(target)
++    }
++
++    // #4222: a failed/offline request leaves the current book's gain unchanged.
++    private fun fetchBookGain(bookId: Int) {
++        bookGainJob?.cancel()
++        bookGainJob = scope.launch {
++            try {
++                val gain = apiHolder.api?.getGain("book", bookId) ?: return@launch
++                if (!isActive || _playerKind.value != PlayerKind.Audiobook ||
++                    _currentBook.value?.id != bookId) return@launch
++                if (gain.gainDb != null && !gain.gainDb.isFinite()) return@launch
++                currentBookGainDb = gain.gainDb
++                applyVolumeForCurrentKind()
++            } catch (e: CancellationException) {
++                throw e
++            } catch (_: Exception) { }
++        }
++    }
++
++    // #4222: MediaController has no audio session id; use the existing service player hook.
++    @OptIn(UnstableApi::class)
++    private fun applyBookEnhancer() {
++        try {
++            val player = PlayerHooks.exoPlayer
++            if (bookGainPlayer !== player) {
++                bookGainPlayer?.removeListener(bookAudioSessionListener)
++                releaseBookEnhancer()
++                bookGainPlayer = player
++                player?.addListener(bookAudioSessionListener)
++            }
++            val gainDb = currentBookGainDb ?: 0.0
++            val sessionId = player?.audioSessionId ?: C.AUDIO_SESSION_ID_UNSET
++            if (_playerKind.value != PlayerKind.Audiobook || gainDb <= 0.0 ||
++                sessionId == C.AUDIO_SESSION_ID_UNSET) {
++                releaseBookEnhancer()
++                return
++            }
++            if (bookEnhancer == null || bookEnhancerSessionId != sessionId) {
++                releaseBookEnhancer()
++                bookEnhancer = LoudnessEnhancer(sessionId)
++                bookEnhancerSessionId = sessionId
++            }
++            // #4222: LoudnessEnhancer's built-in limiter handles boosts above unity.
++            bookEnhancer?.setTargetGain((gainDb * 100).toInt())  // millibels
++            bookEnhancer?.enabled = true
++        } catch (_: Exception) {
++            releaseBookEnhancer()
++        }
++    }
++
++    // #4222: devices can throw even while disabling or releasing an audio effect.
++    private fun releaseBookEnhancer() {
++        val enhancer = bookEnhancer
++        bookEnhancer = null
++        bookEnhancerSessionId = C.AUDIO_SESSION_ID_UNSET
++        try { enhancer?.enabled = false } catch (_: Exception) { }
++        try { enhancer?.release() } catch (_: Exception) { }
++    }
++
++    // #4222: cancel stale responses and detach from the old player when leaving a book.
++    private fun resetBookGain() {
++        bookGainJob?.cancel()
++        bookGainJob = null
++        currentBookGainDb = null
++        releaseBookEnhancer()
++        try { bookGainPlayer?.removeListener(bookAudioSessionListener) } catch (_: Exception) { }
++        bookGainPlayer = null
+     }
+ 
+     /**
+@@ -329,6 +414,7 @@
+     // #7109: per-track music loudness normalization settings and current track gain
+     private val levelsSource = MusicLevelsSource { apiHolder.api?.getMusicLevels() }
+     private val musicLevels: MusicLevelsResponse? get() = levelsSource.current
++    // #4222: the server also serves gain_db on TrackSchema; keep the #3504 step 3 music math.
+     private var currentMusicGain: Float = 1.0f
+     /** #7109: below this share of the expected level the player is ducked (ducks go to ~5%). */
+     private val DUCKED_FRACTION = 0.5f
+@@ -659,7 +745,9 @@
+         // ~5% during a transient focus loss and restores to whatever the dial
+         // was (it records the pre-duck volume, never a hardcoded 1.0).
+         // Via setPlayerVolume so the DJ-report volume snapshot stays coherent.
+-        setPlayerVolume(volumeForKind(kind))
++        // #4222: apply book gain as its audio attributes become active.
++        if (kind == PlayerKind.Audiobook) applyVolumeForCurrentKind()
++        else setPlayerVolume(volumeForKind(kind))
+     }
+ 
+     private fun ensureController(onReady: (MediaController) -> Unit) {
+@@ -906,6 +994,7 @@
+      * no queue semantics apply to a stream item (endless, no duration/seek).
+      */
+     fun playStreamUrl(url: String, title: String) {
++        resetBookGain()  // #4222
+         finalizeMusicIfActive()
+         _currentMusic.value = null
+         _currentBook.value = null
+@@ -935,6 +1024,7 @@
+     private var localFilePath: String? = null
+ 
+     fun play(book: BookDetail, baseUrl: String, startSeconds: Double = 0.0) {
++        if (_currentBook.value?.id != book.id) resetBookGain()  // #4222
+         _currentMusic.value = null
+         _currentStreamTitle.value = null
+         lastReportedTrackIndex = -1
+@@ -967,6 +1057,7 @@
+                     ctrl.setMediaItem(buildMediaItem(uri, book, book.title), startMs)
+                 }
+                 ctrl.prepare()
++                fetchBookGain(book.id)  // #4222
+                 ctrl.play()
+                 startProgressSync()
+             }
+@@ -1188,6 +1279,7 @@
+         val music = _currentMusic.value
+         if (music == null || _playerKind.value != PlayerKind.Music) {
+             // Nothing to break between — just speak it.
++            resetBookGain()  // #4222
+             finalizeMusicIfActive()
+             _currentBook.value = null
+             progressSyncJob?.cancel()
+@@ -1261,6 +1353,7 @@
+     ) {
+         if (items.isEmpty()) return
+         PlayerHooks.cancelStopAfterCurrent()  // #3505: a new queue is a fresh start
++        resetBookGain()  // #4222
+         // Clear audiobook state, post final stop for any prior music
+         finalizeMusicIfActive()
+         _currentBook.value = null
+@@ -1639,6 +1732,10 @@
+     fun cancelStopAfterCurrent() = PlayerHooks.cancelStopAfterCurrent()
+ 
+     fun resume() {
++        // #4222: refresh the gain when a paused audiobook is activated again.
++        if (_playerKind.value == PlayerKind.Audiobook) {
++            _currentBook.value?.let { fetchBookGain(it.id) }
++        }
+         controller?.play()
+     }
+ 
+@@ -1855,6 +1952,7 @@
+     }
+ 
+     fun release() {
++        resetBookGain()  // #4222
+         if (_currentBook.value != null) {
+             scope.launch { syncProgress() }
+         }
+
