@@ -38,7 +38,7 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_crossfade` — overlap song ends 0-12 s (0 = off). PC speaker renderer only; the phone answers that it can't. Never for books, streams, clips. (#2806)
 
 ## Rolling pool, specs, cues (a whole ride)
-- `dj_pool_set` — start the server-side rolling pool from a saved spec or inline sources; arms its cues.
+- `dj_pool_set` — start the server-side rolling pool from a saved spec or inline sources; arms its cues. `start_now=True` also skips to the first pick and resumes in the same call (#4114: the ride start, no gap between tools).
 - `dj_pool_status` — lanes, pending cues, chime and outro state.
 - `dj_pool_stop` — stop the pool (what's queued keeps playing).
 - `dj_pool_lane` — pause, resume or remove one lane of the running pool.

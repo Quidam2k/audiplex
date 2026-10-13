@@ -4384,6 +4384,26 @@ def _pool_start_kept_ids(state: dict) -> list[int]:
     return [t for t in ids[: idx + 1] if isinstance(t, int)]
 
 
+TRIM_OK = " The queue after the current song is now the pool's"  # #4114: start_now keys on it
+
+
+async def _start_pool_now(trim: str, state: dict) -> str:  # #4114
+    """start_now: jump to the pool's first pick and play it in THIS call. On 10/9 an
+    LLM turn between dj_pool_set, dj_skip and dj_resume cost 38 s of a ride start.
+    Only after the trim landed: a failed or unconfirmed replace sends nothing."""
+    if not trim.startswith(TRIM_OK):
+        return "\nstart_now: the queue trim did not land, so NO skip or resume was sent."
+    skip = await _acked(await _enqueue("skip", {}), "skip to the pool's first pick")
+    if not skip.startswith("DONE"):
+        return f"\nstart_now: {skip} No resume was sent."
+    if state.get("playing"):
+        return f"\nstart_now: {skip}"
+    data = await _enqueue("resume", {})
+    if isinstance(data, str):
+        return f"\nstart_now: {skip}\n" + _held_result(data)
+    return f"\nstart_now: {skip}\n" + await _result(data, 0)
+
+
 async def _trim_to_pool(picks: list[int], state: dict) -> str:
     """One-time queue trim when a pool starts (#5495): the pool's first picks
     replace whatever was queued after the current song. Same delivery as
@@ -4405,7 +4425,7 @@ async def _trim_to_pool(picks: list[int], state: dict) -> str:
             return (f" Sent replace_upcoming (command #{data['id']}) after the current song;"
                     " no ack yet - check dj_command_status." + tail_note)
         if ack.get("ack_status") == "ok":
-            return (f" The queue after the current song is now the pool's {len(picks)} track(s)"
+            return (f"{TRIM_OK} {len(picks)} track(s)"  # #4114
                     f" (command #{data['id']}{tail_note}).")
         if ack.get("ack_status") != "unknown_type":
             return f" The phone refused the trim: {ack.get('ack_status')} {ack.get('ack_detail') or ''}".rstrip()
@@ -4438,6 +4458,7 @@ async def dj_pool_set(
     no_repeat_picks: int | None = None,
     replace_set: bool = False,
     replace_reason: str = "",
+    start_now: bool = False,  # #4114
 ) -> str:
     """Start (or replace) the rolling DJ pool from a saved spec or inline sources.
 
@@ -4467,6 +4488,10 @@ async def dj_pool_set(
                           bucket to the mix use dj_bucket_load / dj_spec_add instead.
                           Only a deliberate one-lane pool passes replace_set=True
                           with a reason.
+    start_now:            True = play the pool's first pick NOW, in this same call
+                          (skip + resume after the queue trim lands; #4114). Use it
+                          for a ride start instead of separate dj_skip / dj_resume.
+                          If the trim fails, nothing else is sent.
     Picks within a lane are shuffled.
     """
     try:
@@ -4582,6 +4607,10 @@ async def dj_pool_set(
         return head + trim
     if body["prime_current_id"] == 0:  # #4056 the pool starts the music: its first song's notes come with it
         trim += await _first_up_notes(picks[0])
+    elif start_now:  # #4114
+        trim += await _start_pool_now(trim, state)
+        if "DONE: skip" in trim:  # the first pick is up: its notes come with it, as #4056
+            trim += await _first_up_notes(picks[0])
     return head + trim
 
 
