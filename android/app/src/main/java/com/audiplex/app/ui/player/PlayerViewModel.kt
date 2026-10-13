@@ -15,6 +15,7 @@ import com.audiplex.app.playback.PlaybackManager
 import com.audiplex.app.playback.PlayerKind
 import com.audiplex.app.playback.SleepBedRules
 import com.audiplex.app.playback.SleepFade
+import com.audiplex.app.playback.SkipInterval  // #4220
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -120,12 +121,20 @@ class PlayerViewModel @Inject constructor(
         playbackManager.seekTo(positionMs)
     }
 
+    /** #4220: skip size in seconds, long-press to change; persisted. */
+    val skipSeconds: StateFlow<Int> = settingsStore.skipSeconds
+        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, SkipInterval.DEFAULT_S)
+
+    fun setSkipSeconds(seconds: Int) {  // #4220
+        viewModelScope.launch { settingsStore.setSkipSeconds(seconds) }
+    }
+
     fun skipForward() {
-        playbackManager.skipForward()
+        playbackManager.skipForward(skipSeconds.value * 1000L)  // #4220
     }
 
     fun skipBack() {
-        playbackManager.skipBack()
+        playbackManager.skipBack(skipSeconds.value * 1000L)  // #4220
     }
 
     fun nextChapter() {

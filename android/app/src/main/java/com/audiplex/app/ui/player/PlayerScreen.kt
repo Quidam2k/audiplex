@@ -67,6 +67,17 @@ import com.audiplex.app.data.api.AudiplexApi
 import com.audiplex.app.playback.BedState
 import com.audiplex.app.playback.MusicQueueState
 import com.audiplex.app.playback.PlayerKind
+import com.audiplex.app.playback.ChapterSeek  // #4219
+import com.audiplex.app.playback.SkipInterval  // #4220
+import com.audiplex.app.ui.common.SettingsAction  // #4221
+import androidx.compose.foundation.ExperimentalFoundationApi  // #4220
+import androidx.compose.foundation.combinedClickable  // #4220
+import androidx.compose.material.icons.filled.FastForward  // #4220
+import androidx.compose.material.icons.filled.Forward10  // #4220
+import androidx.compose.material.icons.filled.Replay  // #4220
+import androidx.compose.material.icons.filled.Replay30  // #4220
+import androidx.compose.material3.DropdownMenu  // #4220
+import androidx.compose.material3.DropdownMenuItem  // #4220
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -83,6 +94,7 @@ fun PlayerScreen(
     val positionMs by viewModel.positionMs.collectAsState()
     val durationMs by viewModel.durationMs.collectAsState()
     val chapterIndex by viewModel.currentChapterIndex.collectAsState()
+    val skipSeconds by viewModel.skipSeconds.collectAsState()  // #4220
     val sleepMinutesLeft by viewModel.sleepMinutesLeft.collectAsState()
     val bedState by viewModel.bedState.collectAsState()
     val sleepBedLevel by viewModel.sleepBedLevel.collectAsState()
@@ -139,6 +151,7 @@ fun PlayerScreen(
                         )
                     }
                 }
+                SettingsAction()  // #4221
             },
             colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = MaterialTheme.colorScheme.surface
@@ -237,19 +250,28 @@ fun PlayerScreen(
         }
         var isSeeking by remember { mutableStateOf(false) }
         var seekPosition by remember { mutableFloatStateOf(0f) }
+        // #4219: an audiobook's bar spans the current chapter; seekPosition is then an
+        // offset into it. No usable chapter = whole book, as before.
+        var dragSpan by remember { mutableStateOf<ChapterSeek.Span?>(null) }
+        val liveSpan = if (kind == PlayerKind.Audiobook)
+            book?.let { ChapterSeek.span(it.chapters, chapterIndex, effectiveDuration) } else null
+        val chapterSpan = if (isSeeking) dragSpan else liveSpan  // a drag keeps the chapter it started in
+        val barPosition = chapterSpan?.offsetOf(positionMs) ?: positionMs
+        val barLength = chapterSpan?.lengthMs ?: effectiveDuration
 
         if (kind != PlayerKind.Stream) Column(modifier = Modifier.padding(horizontal = 24.dp)) {
             Slider(
-                value = if (isSeeking) seekPosition else positionMs.toFloat(),
+                value = if (isSeeking) seekPosition else barPosition.toFloat(),  // #4219
                 onValueChange = {
+                    if (!isSeeking) dragSpan = liveSpan  // #4219
                     isSeeking = true
                     seekPosition = it
                 },
                 onValueChangeFinished = {
-                    viewModel.seekTo(seekPosition.toLong())
+                    viewModel.seekTo(chapterSpan?.bookMsOf(seekPosition.toLong()) ?: seekPosition.toLong())  // #4219
                     isSeeking = false
                 },
-                valueRange = 0f..effectiveDuration.toFloat().coerceAtLeast(1f),
+                valueRange = 0f..barLength.toFloat().coerceAtLeast(1f),  // #4219
                 colors = SliderDefaults.colors(
                     thumbColor = MaterialTheme.colorScheme.primary,
                     activeTrackColor = MaterialTheme.colorScheme.primary
@@ -261,14 +283,24 @@ fun PlayerScreen(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = viewModel.formatTime(if (isSeeking) seekPosition.toLong() else positionMs),
+                    text = viewModel.formatTime(if (isSeeking) seekPosition.toLong() else barPosition),  // #4219
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = viewModel.formatTime(effectiveDuration),
+                    text = viewModel.formatTime(barLength),  // #4219
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (chapterSpan != null) {  // #4219: the whole book, as a second readout
+                val bookMs = if (isSeeking) chapterSpan.bookMsOf(seekPosition.toLong()) else positionMs
+                Text(
+                    text = "Book ${viewModel.formatTime(bookMs)} / ${viewModel.formatTime(effectiveDuration)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
                 )
             }
         }
@@ -293,13 +325,8 @@ fun PlayerScreen(
 
             // Skip controls only for audiobook
             if (kind == PlayerKind.Audiobook) {
-                IconButton(onClick = { viewModel.skipBack() }) {
-                    Icon(
-                        Icons.Default.Replay10,
-                        contentDescription = "Skip back 30s",
-                        modifier = Modifier.size(36.dp)
-                    )
-                }
+                SkipButton(back = true, seconds = skipSeconds,  // #4220
+                    onClick = { viewModel.skipBack() }, onPick = { viewModel.setSkipSeconds(it) })
                 Spacer(Modifier.width(16.dp))
             }
 
@@ -320,13 +347,8 @@ fun PlayerScreen(
 
             if (kind == PlayerKind.Audiobook) {
                 Spacer(Modifier.width(16.dp))
-                IconButton(onClick = { viewModel.skipForward() }) {
-                    Icon(
-                        Icons.Default.Forward30,
-                        contentDescription = "Skip forward 30s",
-                        modifier = Modifier.size(36.dp)
-                    )
-                }
+                SkipButton(back = false, seconds = skipSeconds,  // #4220
+                    onClick = { viewModel.skipForward() }, onPick = { viewModel.setSkipSeconds(it) })
             }
 
             Spacer(Modifier.width(8.dp))
@@ -546,6 +568,46 @@ private fun StarRating(rating: Double, onRate: (Double) -> Unit) {
                         MaterialTheme.colorScheme.primary
                     else
                         MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+
+/**
+ * #4220: tap skips by Todd's chosen size; long-press picks it (10 s, 30 s, 1 min,
+ * 5 min). The icon shows the size. Lock-screen and notification skips stay 30 s.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SkipButton(back: Boolean, seconds: Int, onClick: () -> Unit, onPick: (Int) -> Unit) {
+    var menu by remember { mutableStateOf(false) }
+    val icon = when {
+        back && seconds == 10 -> Icons.Default.Replay10
+        back && seconds == 30 -> Icons.Default.Replay30
+        back -> Icons.Default.Replay
+        seconds == 10 -> Icons.Default.Forward10
+        seconds == 30 -> Icons.Default.Forward30
+        else -> Icons.Default.FastForward
+    }
+    val what = if (back) "Skip back" else "Skip forward"
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .combinedClickable(onClick = onClick, onLongClick = { menu = true }),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(icon, contentDescription = "$what ${SkipInterval.label(seconds)}", modifier = Modifier.size(if (seconds >= 60) 28.dp else 36.dp))
+            if (seconds >= 60) Text(SkipInterval.label(seconds), style = MaterialTheme.typography.labelSmall)
+        }
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            SkipInterval.CHOICES_S.forEach { s ->
+                DropdownMenuItem(
+                    text = { Text(SkipInterval.label(s) + if (s == seconds) "  ✓" else "") },
+                    onClick = { menu = false; onPick(s) }
                 )
             }
         }

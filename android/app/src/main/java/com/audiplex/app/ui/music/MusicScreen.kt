@@ -29,7 +29,6 @@ import androidx.compose.material.icons.automirrored.filled.TrendingUp
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Warning
@@ -95,7 +94,6 @@ fun MusicScreen(
     onMostPlayedClick: () -> Unit,
     onLikelySkipsClick: () -> Unit,
     onRecentlyPlayedClick: () -> Unit,
-    onSettingsClick: () -> Unit,
     onPlayerClick: () -> Unit,
     viewModel: MusicViewModel = hiltViewModel()
 ) {
@@ -125,9 +123,6 @@ fun MusicScreen(
                         else
                             MaterialTheme.colorScheme.onSurface
                     )
-                }
-                IconButton(onClick = onSettingsClick) {
-                    Icon(Icons.Default.Settings, contentDescription = "Settings")
                 }
             }
         )

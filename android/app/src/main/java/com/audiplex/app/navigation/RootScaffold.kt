@@ -12,6 +12,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider  // #4221
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -21,6 +22,7 @@ import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.audiplex.app.ui.common.LocalOpenSettings  // #4221
 import com.audiplex.app.ui.player.MiniPlayer
 import com.audiplex.app.ui.player.PlayerViewModel
 
@@ -46,7 +48,8 @@ fun RootScaffold() {
     val showMiniPlayer = hasActive && currentRoute != Routes.PLAYER
     val showBottomBar = currentRoute in rootTabs.map { it.route }
 
-    Scaffold(
+    val openSettings = { navController.navigate(Routes.SETTINGS) { launchSingleTop = true } }  // #4221
+    CompositionLocalProvider(LocalOpenSettings provides openSettings) { Scaffold(  // #4221
         modifier = Modifier.fillMaxSize(),
         bottomBar = {
             if (showMiniPlayer) {
@@ -63,7 +66,7 @@ fun RootScaffold() {
         Box(modifier = Modifier.padding(innerPadding)) {
             AppNavigation(navController = navController)
         }
-    }
+    } }  // #4221
 }
 
 @Composable

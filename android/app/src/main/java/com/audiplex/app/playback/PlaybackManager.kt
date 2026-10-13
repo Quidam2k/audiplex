@@ -854,6 +854,9 @@ class PlaybackManager @Inject constructor(
         val coverUrl = if (book.hasCover) AudiplexApi.coverUrl(currentBaseUrl, book.id) else null
         return MediaItem.Builder()
             .setUri(uri)
+            // #4217: the stream cache keys on this; the size changes when a book's file
+            // is replaced, so a rescanned book never reuses a stale index.
+            .setCustomCacheKey("$uri@${book.fileSize}")
             .setMediaMetadata(
                 MediaMetadata.Builder()
                     .setTitle(displayTitle)
@@ -1672,22 +1675,22 @@ class PlaybackManager @Inject constructor(
         _positionMs.value = positionMs
     }
 
-    fun skipForward() {
+    fun skipForward(stepMs: Long = 30_000) {  // #4220: the step is Todd's pick
         if (isMusic()) {
             controller?.seekToNextMediaItem()
             return
         }
-        val target = (_positionMs.value + 30_000).coerceAtMost(_durationMs.value)
+        val target = (_positionMs.value + stepMs).coerceAtMost(_durationMs.value)
         seekToGlobalMs(target)
         _positionMs.value = target
     }
 
-    fun skipBack() {
+    fun skipBack(stepMs: Long = 30_000) {  // #4220
         if (isMusic()) {
             controller?.seekToPreviousMediaItem()
             return
         }
-        val target = (_positionMs.value - 30_000).coerceAtLeast(0)
+        val target = (_positionMs.value - stepMs).coerceAtLeast(0)
         seekToGlobalMs(target)
         _positionMs.value = target
     }
@@ -1736,6 +1739,14 @@ class PlaybackManager @Inject constructor(
     }
 
     private fun seekToGlobalMs(globalPositionMs: Long) {
+        seekControllerTo(globalPositionMs)
+        // #4219: the position loop only runs while playing, so a paused skip would leave
+        // the chapter-relative seek bar on the old chapter.
+        _positionMs.value = globalPositionMs.coerceAtLeast(0)
+        updateCurrentChapter()
+    }
+
+    private fun seekControllerTo(globalPositionMs: Long) {
         val ctrl = controller ?: return
         if (!isMisc()) {
             ctrl.seekTo(globalPositionMs)

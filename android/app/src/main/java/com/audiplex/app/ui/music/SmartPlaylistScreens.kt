@@ -40,6 +40,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.audiplex.app.data.ApiServiceHolder
+import com.audiplex.app.ui.common.SettingsAction  // #4221
 import com.audiplex.app.data.api.SkipSuspectSchema
 import com.audiplex.app.data.api.TrackSchema
 import com.audiplex.app.playback.PlaybackManager
@@ -164,6 +165,7 @@ fun MostPlayedScreen(
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                 }
             },
+            actions = { SettingsAction() },  // #4221
             colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = MaterialTheme.colorScheme.surface
             )
@@ -259,6 +261,7 @@ fun LikelySkipsScreen(
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                 }
             },
+            actions = { SettingsAction() },  // #4221
             colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = MaterialTheme.colorScheme.surface
             )

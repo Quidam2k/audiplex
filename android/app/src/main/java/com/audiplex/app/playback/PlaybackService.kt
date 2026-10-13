@@ -40,7 +40,8 @@ class PlaybackService : MediaSessionService() {
         super.onCreate()
 
         val dataSourceFactory = OkHttpDataSource.Factory(okHttpClient)
-        val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
+        // #4217: audio goes through the disk cache (artwork keeps the plain authed source).
+        val mediaSourceFactory = DefaultMediaSourceFactory(StreamCache.factory(this, dataSourceFactory))
 
         // Artwork (notification / lock screen) is fetched by the MediaSession's
         // BitmapLoader, which otherwise uses an unauthenticated HTTP data source and

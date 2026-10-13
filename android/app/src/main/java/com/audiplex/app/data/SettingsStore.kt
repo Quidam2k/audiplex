@@ -57,6 +57,7 @@ class SettingsStore @Inject constructor(
     private val audiobookVolumeKey = floatPreferencesKey("audiobook_volume")
     private val lastSleepBedIdKey = intPreferencesKey("last_sleep_bed_id")  // #3953
     private val sleepBedVolumeKey = floatPreferencesKey("sleep_bed_volume")  // #4018
+    private val skipSecondsKey = intPreferencesKey("skip_seconds")  // #4220
 
     override val serverUrl: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[serverUrlKey] ?: ""
@@ -142,6 +143,15 @@ class SettingsStore @Inject constructor(
         context.dataStore.edit { prefs ->
             prefs[audiobookVolumeKey] = volume.coerceIn(0f, 1f)
         }
+    }
+
+    /** #4220: the audiobook skip buttons' size, picked by long-press. */
+    val skipSeconds: Flow<Int> = context.dataStore.data.map { prefs ->
+        com.audiplex.app.playback.SkipInterval.coerce(prefs[skipSecondsKey])
+    }
+
+    suspend fun setSkipSeconds(seconds: Int) {  // #4220
+        context.dataStore.edit { prefs -> prefs[skipSecondsKey] = com.audiplex.app.playback.SkipInterval.coerce(seconds) }
     }
 
     /** #3953: the sleep bed last started, so the sleep dialog preselects it next time. */
