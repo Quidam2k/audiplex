@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, computed_field, field_validator, model_validator  # #4222 gain_db
 
 
 class ChapterSchema(BaseModel):
@@ -92,6 +92,13 @@ class TrackSchema(BaseModel):
     duration_seconds: float
     loudness_lufs: float | None = None  # #7109: EBU R128 integrated loudness for per-track gain
     model_config = {"from_attributes": True}
+
+    @computed_field  # #3504 #4222: the server's attenuate-only gain, same math as the phone
+    @property
+    def gain_db(self) -> float | None:
+        from audiplex.config import get_settings
+        from audiplex.gain import music_gain_db
+        return music_gain_db(self.loudness_lufs, get_settings().music_target_lufs)
 
 
 class AlbumSummary(BaseModel):

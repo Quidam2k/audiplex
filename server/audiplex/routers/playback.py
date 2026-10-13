@@ -674,6 +674,33 @@ def get_owner_track_identity(
     return identity
 
 
+@router.get("/gain/{kind}/{item_id}")  # #3504 / #4222
+def get_gain(kind: str, item_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Playback gain for one track or book, in dB (audiplex/gain.py).
+
+    Music: attenuate-only to music_target_lufs, the phone's current math.
+    Book: raised to book_target_lufs (clamped), mode=boost_needs_limiter, which
+    the app does not apply yet (#4222 post-trip). gain_db=null when unmeasured.
+    """
+    from audiplex.gain import book_gain_db, music_gain_db
+    from audiplex.models import Book, Track
+    s = get_settings()
+    if kind == "track":
+        row = db.get(Track, item_id)
+        target, mode = s.music_target_lufs, "attenuate_only"
+    elif kind == "book":
+        row = db.get(Book, item_id)
+        target, mode = s.book_target_lufs, "boost_needs_limiter"
+    else:
+        raise HTTPException(status_code=400, detail="kind must be track or book")
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"{kind} not found")
+    gain = (music_gain_db(row.loudness_lufs, target) if kind == "track"
+            else book_gain_db(row.loudness_lufs, target, s.book_max_boost_db))
+    return {"kind": kind, "id": item_id, "lufs": row.loudness_lufs,
+            "target_lufs": target, "gain_db": gain, "mode": mode}
+
+
 @router.get("/track-profile/{track_id}")  # #7335 / #3981
 def get_track_profile(track_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Loudness profile and dips for one track (scripts/measure_profile.py).

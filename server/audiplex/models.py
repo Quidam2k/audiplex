@@ -43,6 +43,8 @@ class Book(Base):
     file_hash: Mapped[str | None] = mapped_column(String(64))
     added_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+    # #4222: sampled EBU R128 loudness (LUFS), filled by scripts/measure_book_loudness.py.
+    loudness_lufs: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     chapters: Mapped[list["Chapter"]] = relationship(
         back_populates="book", cascade="all, delete-orphan", order_by="Chapter.index"
