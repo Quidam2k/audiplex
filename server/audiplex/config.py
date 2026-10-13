@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     music_target_lufs: float = -20.0  # #3504
     # #4222 Todd 10/9: voices are never cut; books are RAISED to the voice level.
     # Served by GET /api/playback/gain/book/{id}; the app applies it post-trip.
+    # The voices' FILE level; as heard they get up to +9.5 dB from TtsBoost, so
+    # raise this to the heard level post-trip or most books get no raise (#4222).
     book_target_lufs: float = -20.0
     book_max_boost_db: float = 12.0  # gain above 1.0 needs a limiter on the phone
     # #4056: pool picks lean on song memory (#3984): a linked song weighs 2x

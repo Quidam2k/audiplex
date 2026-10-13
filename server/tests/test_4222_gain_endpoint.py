@@ -13,7 +13,7 @@ def test_music_gain_is_attenuate_only_like_the_phone():
 def test_book_gain_raises_to_the_voice_and_clamps():
     assert book_gain_db(-26.0, -20.0, 12.0) == 6.0
     assert book_gain_db(-40.0, -20.0, 12.0) == 12.0
-    assert book_gain_db(-17.0, -20.0, 12.0) == -3.0
+    assert book_gain_db(-17.0, -20.0, 12.0) == 0.0  # louder than target: never cut
     assert book_gain_db(None, -20.0, 12.0) is None
 
 

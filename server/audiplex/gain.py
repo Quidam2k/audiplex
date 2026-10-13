@@ -1,7 +1,7 @@
 """Per-item playback gain in dB (#3504 / #4222), served by GET /api/playback/gain.
 
 Music is attenuate-only, the same math as the phone's LoudnessGain (#7109), so
-serving it changes nothing. Books are RAISED to the voice level (Todd 10/9:
+serving it changes nothing. Books are RAISED (never cut) to the voice level (Todd 10/9:
 voice gain is never cut), up to a clamp, because a gain above 1.0 needs a
 limiter on the phone. Unmeasured items get None: no gain change (#7387).
 """
@@ -18,6 +18,10 @@ def music_gain_db(lufs: float | None, target: float) -> float | None:
 
 
 def book_gain_db(lufs: float | None, target: float, max_boost_db: float) -> float | None:
+    """Raise-only (#4222): a book is never cut. Books measure ~-16 LUFS, above
+    the voices' -20 FILE level, yet sound quieter because the Pantheon app
+    boosts speech up to +9.5 dB (TtsBoost), so book_target_lufs has to be the
+    voice's level as heard, not -20, before this raises anything."""
     if lufs is None:
         return None
-    return round(max(MIN_GAIN_DB, min(max_boost_db, target - lufs)), 2)
+    return round(max(0.0, min(max_boost_db, target - lufs)), 2)
