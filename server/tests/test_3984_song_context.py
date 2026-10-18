@@ -10,6 +10,7 @@ and the queue hook is fail-open and time-bounded.
 import asyncio
 import importlib.util
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -205,6 +206,20 @@ def test_queue_context_block(dbs):
     assert SECRET_LOVE not in block and SECRET_RATING not in block
     assert "CAUTION Seed Song -> Never Next" in sc.queue_context([1, 9])
     assert len(sc.queue_context(list(TRACKS))) <= 1200
+
+
+def test_lyric_hook_and_on_demand_lyrics(dbs):  # #8201
+    assert sc.context(1)["lyric_hook"] == ""  # no lyrics table yet: fail open
+    assert sc.lyrics(1)["found"] is False
+    plain = "Leaving home again tonight\n\nThe lighthouse keeps on turning round\nThe lighthouse keeps on turning round"
+    with sqlite3.connect(os.environ["RFL_DJ_NOTES_DB"]) as c:
+        c.execute("CREATE TABLE lyrics(song_key TEXT PRIMARY KEY, plain TEXT, status TEXT, source TEXT, lrclib_id INT)")
+        c.execute("INSERT INTO lyrics VALUES (?, ?, 'ok', 'lrclib', 7)", (_load_store().song_key("Alpha", "Seed Song"), plain))
+    sc._reset_cache()
+    assert sc.context(1)["lyric_hook"] == "The lighthouse keeps on turning round"
+    assert 'lyric hook (quote at most this): "The lighthouse keeps on turning round"' in sc.queue_context([1])
+    assert sc.lyrics(1)["plain"] == plain
+    assert sc.lyrics(1, verse="home")["verses"] == ["Leaving home again tonight"]
 
 
 def test_everything_fails_open_without_the_notes(dbs, monkeypatch):

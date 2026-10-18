@@ -280,6 +280,29 @@ def _facts(memory: _Memory, key: str) -> list[Fact]:
     return memory.fact_cache[key]
 
 
+def _lyric_row(memory: _Memory, key: str) -> sqlite3.Row | None:
+    """#8201: the RFL lyrics row for a song, or None (no table yet = None)."""
+    if memory.rfl is None:
+        return None
+    try:
+        return memory.rfl.execute(
+            "SELECT plain, status, source, lrclib_id FROM lyrics"
+            " WHERE song_key = ? AND status IN ('ok', 'instrumental')",
+            (key,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+
+
+def _lyric_hook(memory: _Memory, key: str) -> str:
+    """One short quotable line (#8201); full lyrics never reach a prompt."""
+    row = _lyric_row(memory, key)
+    pick = getattr(memory.store, "pick_phrase", None)
+    if row is None or not row["plain"] or pick is None:
+        return ""
+    return pick(row["plain"])
+
+
 def _tags(memory: _Memory, track_id: int) -> list[str]:
     if track_id not in memory.tag_cache:
         memory.tag_cache[track_id] = [
@@ -359,6 +382,7 @@ def _context(memory: _Memory, track_id: int) -> dict[str, Any] | None:
         "title": track["title"],
         "artist": track["artist"],
         "facts": facts,
+        "lyric_hook": _lyric_hook(memory, track["key"]),  # #8201
         "measured": measured,
         "todd": {
             "stars": float(rating["rating"]) if rating is not None else None,
@@ -791,6 +815,30 @@ def context(track_id: int) -> dict[str, Any] | None:
         return None
 
 
+def lyrics(track_id: int, verse: str = "") -> dict[str, Any] | None:
+    """#8201 on-demand: full stored lyrics (or the stanzas matching `verse`)."""
+    try:
+        with _memory() as memory:
+            track = memory.tracks.get(track_id)
+            if track is None:
+                return None
+            row = _lyric_row(memory, track["key"])
+            out: dict[str, Any] = {"track_id": track_id, "title": track["title"],
+                                   "artist": track["artist"], "found": row is not None}
+            if row is None:
+                return out
+            out.update(instrumental=row["status"] == "instrumental", source=row["source"])
+            find = getattr(memory.store, "find_verse", None)
+            if verse and find is not None:
+                out["verses"] = find(row["plain"] or "", verse)
+            else:
+                out["plain"] = row["plain"] or ""
+            return out
+    except Exception as exc:
+        _error("lyrics", exc)
+        return None
+
+
 def link(track_a: int, track_b: int) -> list[Fact]:
     """Return stored evidence for a transition, or a single explicit veto."""
     try:
@@ -956,6 +1004,9 @@ def queue_context(
                 line = f"- {item['title']} - {item['artist']}:"
                 if prose:
                     line += " " + prose
+                if item["lyric_hook"]:  # #8201
+                    has_evidence = True
+                    line += f' | lyric hook (quote at most this): "{item["lyric_hook"]}"'
                 lines.append(line)
 
             for index in range(len(ids) - 1):

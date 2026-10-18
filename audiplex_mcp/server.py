@@ -1454,6 +1454,10 @@ async def dj_break_brief() -> str:
         for role, tr in (('Previous', prev), ('Now', t), ('Next', nxt)):  # #3981
             if tr and (tr.get('id') or 0) > 0:  # #3981
                 lines.append(f'  {role} loudness: {await _profile_line(tr["id"])}')  # #3981
+        ids = [tr["id"] for tr in (t, nxt) if tr and (tr.get("id") or 0) > 0]  # #8201 top facts + lyric hook
+        note = await _song_memory(song_context.queue_context, ids, 2, 2) if ids else ""  # #8201
+        if note:  # #8201
+            lines.append(note.lstrip("\n"))  # #8201
     else:
         lines += ["", "Nothing is playing right now."]
 
@@ -1615,6 +1619,20 @@ async def dj_song_context(track_id: int) -> str:
     if not ctx:  # #3984
         return f"No song memory for track {track_id} (unknown id, or the notes are unreachable)."  # #3984
     return json.dumps(ctx, ensure_ascii=False, indent=1)  # #3984
+
+
+@mcp.tool()
+async def dj_lyrics(track_id: int, verse: str = "") -> str:
+    """Stored lyrics for one song, ON DEMAND only (#8201): answer a question like
+    'the verse where they sing about X' (pass verse='X' for just the matching
+    stanzas). For your own understanding: on air, quote at most one short line
+    (dj_song_context's lyric_hook), never sing or read the lyrics."""
+    got = await _song_memory(song_context.lyrics, track_id, verse)  # #8201
+    if not got:  # #8201
+        return f"No lyrics lookup for track {track_id} (unknown id, or the notes are unreachable)."  # #8201
+    if not got.get("found"):  # #8201
+        return f"No stored lyrics for {got['title']} - {got['artist']} yet."  # #8201
+    return json.dumps(got, ensure_ascii=False, indent=1)  # #8201
 
 
 @mcp.tool()
