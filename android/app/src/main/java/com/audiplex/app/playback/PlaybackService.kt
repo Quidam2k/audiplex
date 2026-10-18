@@ -1,17 +1,23 @@
 package com.audiplex.app.playback
 
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
+import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSourceBitmapLoader
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.CacheBitmapLoader
 import androidx.media3.session.CommandButton
@@ -35,6 +41,13 @@ class PlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
     private var audioFocusManager: AudioFocusManager? = null
 
+    // #8197 song <-> DJ-clip fades: the sink multiplies its output volume by the edge
+    // level, which a main-thread ticker recomputes while playing.
+    private var clipEdgeSink: ClipEdgeSink? = null
+    private var lastClipEdge = 1f
+    private val clipEdgeHandler = Handler(Looper.getMainLooper())
+    private var clipEdgeTick: Runnable? = null
+
     @OptIn(UnstableApi::class)
     override fun onCreate() {
         super.onCreate()
@@ -54,7 +67,14 @@ class PlaybackService : MediaSessionService() {
             )
         )
 
-        val player = ExoPlayer.Builder(this)
+        val renderersFactory = object : DefaultRenderersFactory(this) {
+            override fun buildAudioSink(
+                context: Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean,
+            ): AudioSink? = super.buildAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams)
+                ?.let { ClipEdgeSink(it).also { sink -> clipEdgeSink = sink } }  // #8197
+        }
+
+        val player = ExoPlayer.Builder(this, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -78,7 +98,21 @@ class PlaybackService : MediaSessionService() {
         audioFocusManager = focusManager
         PlayerHooks.exoPlayer = player  // #6913
         PlayerHooks.focusManager = focusManager  // #7528
+        val tick = object : Runnable {
+            override fun run() {
+                updateClipEdge(player)
+                clipEdgeHandler.postDelayed(this, ClipEdgeFade.TICK_MS)
+            }
+        }
+        clipEdgeTick = tick
         player.addListener(object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) {  // #8197
+                clipEdgeHandler.removeCallbacks(tick)
+                if (isPlaying) tick.run()
+            }
+
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) = updateClipEdge(player)  // #8197
+
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                 if (playWhenReady) {
                     // Every play re-requests (idempotent); denied focus means we
@@ -143,6 +177,22 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
+    /** #8197: fade the song next to a DJ clip. Sends only on change, onto the playback thread. */
+    @OptIn(UnstableApi::class)
+    private fun updateClipEdge(player: ExoPlayer) {
+        val count = player.mediaItemCount
+        fun clipAt(i: Int) = i in 0 until count && ClipEdgeFade.isClip(player.getMediaItemAt(i).mediaId)
+        val current = player.currentMediaItemIndex
+        val level = if (current !in 0 until count) 1f else ClipEdgeFade.level(
+            clipAt(player.previousMediaItemIndex), clipAt(current), clipAt(player.nextMediaItemIndex),
+            player.currentPosition, player.duration,
+        )
+        if (level == lastClipEdge) return
+        lastClipEdge = level
+        val sink = clipEdgeSink ?: return
+        player.createMessage { _, _ -> sink.setEdge(level) }.send()
+    }
+
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? =
         mediaSession
 
@@ -175,6 +225,7 @@ class PlaybackService : MediaSessionService() {
 
     override fun onDestroy() {
         PlayerHooks.onBedStateChanged = null  // #4018
+        clipEdgeTick?.let(clipEdgeHandler::removeCallbacks)  // #8197
         audioFocusManager?.abandonFocus()
         if (PlayerHooks.focusManager === audioFocusManager) PlayerHooks.focusManager = null  // #7528
         audioFocusManager = null

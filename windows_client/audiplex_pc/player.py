@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
 import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from pathlib import Path
 
 import vlc
 
@@ -13,6 +16,22 @@ from . import sleep_fade
 
 
 logger = logging.getLogger(__name__)
+
+# #8197: the song before a DJ clip fades out over its last CLIP_OUT_MS, the song
+# after one fades in over its first CLIP_IN_MS (equal power); the clip stays full.
+CLIP_OUT_MS = 2500
+CLIP_IN_MS = 1500
+
+
+def clip_edge_level(prev_clip: bool, cur_clip: bool, next_clip: bool, at_ms: int, length_ms: int) -> float:
+    if cur_clip:
+        return 1.0
+    level = 1.0
+    if next_clip and length_ms > 0 and length_ms - at_ms < CLIP_OUT_MS:
+        level = min(level, math.sin(max(0.0, (length_ms - at_ms) / CLIP_OUT_MS) * math.pi / 2))
+    if prev_clip and at_ms < CLIP_IN_MS:
+        level = min(level, math.sin(max(0, at_ms) / CLIP_IN_MS * math.pi / 2))
+    return level
 
 
 @dataclass
@@ -54,8 +73,10 @@ class Player:
         on_error: Callable[[str, str], None] | None = None,
         vlc_args: Iterable[str] = (),
         bed_aout: str | None = "directsound",
+        settings_path: Path | None = None,
     ) -> None:
         self.on_error = on_error
+        self._settings_path = settings_path  # #8197: remembers the crossfade setting
         # #2680: called (outside the lock) when a sleep fade finishes, BEFORE
         # the main player pauses, so the book's spot is saved first.
         self.on_sleep_end: Callable[[], None] | None = None
@@ -109,8 +130,12 @@ class Player:
         self._xfade_in: float | None = None  # incoming level, multiplies the main volume
         self._xfade_gen = 0
         self._xfade_watch: threading.Thread | None = None
+        self._edge_watch: threading.Thread | None = None  # #8197 clip-edge fades
 
         self._attach_events(self._player)
+        saved = self._load_settings().get("crossfade_seconds")
+        if isinstance(saved, (int, float)) and saved > 0:
+            self.set_crossfade(saved, persist=False)
 
     def play_now(
         self, items: Iterable[QueueItem], start_ms: int = 0, paused: bool = False
@@ -215,6 +240,7 @@ class Player:
 
             if play_now or ended_at_tail:
                 self._start(insert_at)
+            self._ensure_edge_watch()
 
     def move(self, from_index: int, to_index: int) -> None:
         with self._lock:
@@ -460,18 +486,74 @@ class Player:
         return self.volume if self._fade_volume is None else self._fade_volume
 
     def _apply_main_volume(self) -> None:
-        level = self._base_level() * (1.0 if self._xfade_in is None else self._xfade_in)
+        level = self._base_level() * (1.0 if self._xfade_in is None else self._xfade_in) * self._clip_edge()
         self._player.audio_set_volume(round(level * 100))
 
     # --- crossfade (#2806) ------------------------------------------------
 
-    def set_crossfade(self, seconds: float) -> None:
-        """0 turns it off. Applies from the next track change on."""
+    def set_crossfade(self, seconds: float, persist: bool = True) -> None:
+        """0 turns it off. Applies from the next track change on, and (#8197)
+        survives a restart of the PC app."""
         with self._lock:
             self.crossfade_ms = int(max(0.0, min(12.0, float(seconds))) * 1000)
             if self.crossfade_ms and (self._xfade_watch is None or not self._xfade_watch.is_alive()):
                 self._xfade_watch = threading.Thread(target=self._watch_crossfade, daemon=True)
                 self._xfade_watch.start()
+        if persist:
+            self._save_settings(crossfade_seconds=self.crossfade_ms / 1000)
+
+    def _load_settings(self) -> dict:
+        if self._settings_path is None or not self._settings_path.exists():
+            return {}
+        try:
+            loaded = json.loads(self._settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.warning("Could not read %s; using defaults", self._settings_path)
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    def _save_settings(self, **values: object) -> None:
+        if self._settings_path is None:
+            return
+        try:
+            self._settings_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._settings_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({**self._load_settings(), **values}), encoding="utf-8")
+            os.replace(tmp, self._settings_path)
+        except OSError:
+            logger.warning("Could not save %s", self._settings_path)
+
+    # --- clip-edge fades (#8197) -------------------------------------------
+
+    def _clip_edge(self) -> float:
+        """Level for the song next to a DJ clip; 1.0 everywhere else."""
+        if self.book is not None or not 0 <= self.index < len(self.queue):
+            return 1.0
+
+        def is_clip(i: int) -> bool:
+            return 0 <= i < len(self.queue) and self.queue[i].kind == "clip"
+
+        if not (is_clip(self.index - 1) or is_clip(self.index + 1)):
+            return 1.0
+        return clip_edge_level(is_clip(self.index - 1), is_clip(self.index), is_clip(self.index + 1),
+                               self._player.get_time(), self._player.get_length())
+
+    def _ensure_edge_watch(self) -> None:
+        if self._edge_watch is None or not self._edge_watch.is_alive():
+            self._edge_watch = threading.Thread(target=self._watch_edges, daemon=True)
+            self._edge_watch.start()
+
+    def _watch_edges(self) -> None:
+        """Re-applies the volume while a clip is queued; exits once none is left."""
+        while True:
+            with self._lock:
+                if not any(item.kind == "clip" for item in self.queue[max(0, self.index - 1):]):
+                    self._apply_main_volume()
+                    self._edge_watch = None  # still is_alive() for a moment; a new clip must start a fresh one
+                    return
+                if self._playing and not self._paused and self._xfade_old is None:
+                    self._apply_main_volume()
+            time.sleep(0.05)
 
     def _attach_events(self, player: vlc.MediaPlayer) -> None:
         events = player.event_manager()
@@ -693,6 +775,8 @@ class Player:
         if start_ms > 0:
             media.add_option(f":start-time={start_ms / 1000:.3f}")
         self._player.set_media(media)
+        if self.index > 0 and self.queue[self.index - 1].kind == "clip":
+            self._apply_main_volume()  # #8197: start the song after a clip silent, not at full
 
         self._ended = False
         self._paused = False

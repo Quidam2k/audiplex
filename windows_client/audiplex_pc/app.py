@@ -159,9 +159,10 @@ def _run(config: Config) -> None:
         # #7149: a smoke run against the live server that can never make sound
         # (no speakers for the main player, the bed or a crossfade).
         logger.warning("AUDIPLEX_PC_SILENT=1: audio goes to VLC's dummy output")
-        player = Player(vlc_args=["--aout=dummy"], bed_aout=None)
+        player = Player(vlc_args=["--aout=dummy"], bed_aout=None,
+                        settings_path=_app_directory() / "settings.json")
     else:
-        player = Player()
+        player = Player(settings_path=_app_directory() / "settings.json")  # #8197
     bus = BusClient(
         config.base_url,
         config.token,
