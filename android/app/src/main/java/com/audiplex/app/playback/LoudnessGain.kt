@@ -45,4 +45,23 @@ object LoudnessGain {
         // Clamp to [0.05, 1.0]: never boost, never silence from a bad measurement.
         return gainLinear.coerceIn(0.05f, 1.0f)
     }
+
+    /**
+     * #4118: the track's gain in dB, raised by at most [maxBoostDb] (0 = attenuate-only,
+     * same as [gainFor]). Mirrors the server's music_gain_db. A positive result needs
+     * the LoudnessEnhancer limiter; the player volume can only carry the cut.
+     */
+    fun gainDbFor(
+        trackLufs: Double?,
+        targetLufs: Double,
+        fallbackLufs: Double?,
+        maxBoostDb: Double
+    ): Double {
+        val lufs = trackLufs ?: fallbackLufs ?: return 0.0
+        if (!lufs.isFinite()) return 0.0
+        return (targetLufs - lufs).coerceIn(MIN_GAIN_DB, maxBoostDb.coerceAtLeast(0.0))
+    }
+
+    /** #4118: the 0.05 floor of [gainFor], in dB (about -26 dB). */
+    const val MIN_GAIN_DB = -26.0206
 }

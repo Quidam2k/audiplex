@@ -1132,6 +1132,7 @@ def get_music_levels(
     return MusicLevelsResponse(
         normalize_music=settings.normalize_music,
         target_lufs=settings.music_target_lufs,
+        max_boost_db=settings.music_max_boost_db,  # #4118
         fallback_lufs=None,
         median_lufs=fallback_lufs,
     )

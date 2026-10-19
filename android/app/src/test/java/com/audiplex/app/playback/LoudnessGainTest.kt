@@ -103,4 +103,26 @@ class LoudnessGainTest {
         val effective = (sliderVolume * trackGain).coerceIn(0f, 1f)
         assertEquals(1.0f, effective)
     }
+
+    // #4118: dB gain with a capped raise (mirrors the server's music_gain_db).
+    @Test
+    fun gainDbFor_raises_up_to_the_cap() {
+        assertEquals(3.0, LoudnessGain.gainDbFor(-17.0, -14.0, null, 6.0), 1e-9)
+        assertEquals(6.0, LoudnessGain.gainDbFor(-30.0, -14.0, null, 6.0), 1e-9)
+        assertEquals(-6.0, LoudnessGain.gainDbFor(-8.0, -14.0, null, 6.0), 1e-9)
+    }
+
+    @Test
+    fun gainDbFor_zero_cap_is_attenuate_only() {
+        assertEquals(0.0, LoudnessGain.gainDbFor(-25.0, -20.0, null, 0.0), 1e-9)
+        assertEquals(0.0, LoudnessGain.gainDbFor(-25.0, -20.0, null, -3.0), 1e-9)
+        assertEquals(LoudnessGain.MIN_GAIN_DB, LoudnessGain.gainDbFor(20.0, -20.0, null, 6.0), 1e-9)
+    }
+
+    @Test
+    fun gainDbFor_unmeasured_is_no_change() {
+        assertEquals(0.0, LoudnessGain.gainDbFor(null, -14.0, null, 6.0), 1e-9)
+        assertEquals(2.0, LoudnessGain.gainDbFor(null, -14.0, -16.0, 6.0), 1e-9)
+        assertEquals(0.0, LoudnessGain.gainDbFor(Double.NaN, -14.0, null, 6.0), 1e-9)
+    }
 }

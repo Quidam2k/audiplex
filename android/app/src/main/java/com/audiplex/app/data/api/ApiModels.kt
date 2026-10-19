@@ -130,13 +130,25 @@ data class AppVersionResponse(
     @Json(name = "mtime") val mtime: Long
 )
 
+// #4222: per-item playback gain; books may require a limiter.
+@JsonClass(generateAdapter = true)
+data class GainResponse(
+    val kind: String,
+    val id: Int,
+    val lufs: Double?,
+    @Json(name = "target_lufs") val targetLufs: Double,
+    @Json(name = "gain_db") val gainDb: Double?,
+    val mode: String
+)
+
 // ----- Music Levels (#7109) -----
 
 @JsonClass(generateAdapter = true)
 data class MusicLevelsResponse(
     @Json(name = "normalize_music") val normalizeMusic: Boolean,
     @Json(name = "target_lufs") val targetLufs: Double,
-    @Json(name = "fallback_lufs") val fallbackLufs: Double? = null
+    @Json(name = "fallback_lufs") val fallbackLufs: Double? = null,
+    @Json(name = "max_boost_db") val maxBoostDb: Double = 0.0  // #4118: 0 = attenuate-only
 )
 
 // ----- Music -----

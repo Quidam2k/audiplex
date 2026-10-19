@@ -16,6 +16,9 @@ object PlayerHooks {
     @Volatile
     var exoPlayer: ExoPlayer? = null
 
+    /** #4118: run by the service just before it releases [exoPlayer], so audio effects detach. Main thread. */
+    var onPlayerReleasing: (() -> Unit)? = null
+
     @Volatile
     private var pauseSource: String? = null
 

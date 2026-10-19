@@ -2,6 +2,7 @@ package com.audiplex.app.playback
 
 import android.content.ComponentName
 import android.content.Context
+import android.media.audiofx.LoudnessEnhancer  // #4222
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -47,7 +48,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive  // #4222
 import kotlinx.coroutines.withContext  // #7109
+import kotlin.math.pow  // #4222
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import javax.inject.Inject
@@ -144,10 +147,27 @@ class PlaybackManager @Inject constructor(
     // applyAudioAttributesFor — no cross-thread hazard, so no @Volatile needed.
     private var musicVolume: Float = 1f
     private var audiobookVolume: Float = 1f
+    // #4222: gain belongs to the current book and the service's actual audio session.
+    private var currentBookGainDb: Double? = null
+    private var bookGainJob: Job? = null
+    private var bookGainPlayer: ExoPlayer? = null
+    private var bookEnhancer: LoudnessEnhancer? = null
+    private var bookEnhancerSessionId = C.AUDIO_SESSION_ID_UNSET
+    private val bookAudioSessionListener = object : Player.Listener {
+        override fun onAudioSessionIdChanged(audioSessionId: Int) {
+            applyBoostEnhancer()
+        }
+    }
     // #4018: the sleep bed's own level (the sleep dialog's slider), independent of the book.
     private var sleepBedLevel: Float = SleepBedRules.DEFAULT_VOLUME
 
     init {
+        // #4118: the service is releasing its player; drop the effect bound to its session.
+        PlayerHooks.onPlayerReleasing = {
+            releaseBookEnhancer()
+            try { bookGainPlayer?.removeListener(bookAudioSessionListener) } catch (_: Exception) { }
+            bookGainPlayer = null
+        }
         scope.launch {
             settingsStore.musicVolume.collect { v ->
                 musicVolume = v
@@ -197,10 +217,14 @@ class PlaybackManager @Inject constructor(
      * the next change; the restore goes back to that pre-duck level.
      */
     private fun reapplyTrackGain() {
-        if (musicLevels?.normalizeMusic != true) return
+        if (musicLevels?.normalizeMusic != true) {
+            if (currentMusicBoostDb != 0.0) { currentMusicBoostDb = 0.0; applyBoostEnhancer() }  // #4118
+            return
+        }
         val applied = _playerVolume.value
         val expected = effectiveMusicVolume(volumeForKind(PlayerKind.Music))
         updateCurrentTrackGain()
+        applyBoostEnhancer()  // #4118: the raise rides on the limiter, duck or not
         // #7528: mid-duck, move the level the restore lands on instead.
         if (PlayerHooks.retargetRestore(effectiveMusicVolume(volumeForKind(PlayerKind.Music)))) return
         if (applied < expected * DUCKED_FRACTION) return  // e.g. a sleep fade: leave it be
@@ -215,13 +239,18 @@ class PlaybackManager @Inject constructor(
         val currentTrack = _currentMusic.value?.let { it.items.getOrNull(it.currentIndex)?.track }
         if (currentTrack == null || musicLevels == null || !musicLevels!!.normalizeMusic) {
             currentMusicGain = 1.0f
+            currentMusicBoostDb = 0.0
             return
         }
-        currentMusicGain = LoudnessGain.gainFor(
+        // #4118: the cut goes on the player volume, the raise on the limiter.
+        val gainDb = LoudnessGain.gainDbFor(
             currentTrack.loudnessLufs,
             musicLevels!!.targetLufs,
-            musicLevels!!.fallbackLufs
+            musicLevels!!.fallbackLufs,
+            musicLevels!!.maxBoostDb
         )
+        currentMusicGain = 10.0.pow(gainDb.coerceAtMost(0.0) / 20.0).toFloat()
+        currentMusicBoostDb = gainDb.coerceAtLeast(0.0)
     }
 
     /**
@@ -232,9 +261,85 @@ class PlaybackManager @Inject constructor(
      */
     private fun applyVolumeForCurrentKind() {
         val kind = _playerKind.value ?: return
-        val target = effectiveMusicVolume(volumeForKind(kind))
+        // #4222 #4118: positive gain uses the limiter; only attenuation changes player volume.
+        applyBoostEnhancer()
+        val target = if (kind == PlayerKind.Audiobook) {
+            (audiobookVolume * 10.0.pow((currentBookGainDb ?: 0.0).coerceAtMost(0.0) / 20.0)).toFloat()
+        } else effectiveMusicVolume(volumeForKind(kind))
         if (PlayerHooks.retargetRestore(target)) return  // #7528: ducked; the restore lands on it
         setPlayerVolume(target)
+    }
+
+    // #4222: a failed/offline request leaves the current book's gain unchanged.
+    private fun fetchBookGain(bookId: Int) {
+        bookGainJob?.cancel()
+        bookGainJob = scope.launch {
+            try {
+                val gain = apiHolder.api?.getGain("book", bookId) ?: return@launch
+                if (!isActive || _playerKind.value != PlayerKind.Audiobook ||
+                    _currentBook.value?.id != bookId) return@launch
+                if (gain.gainDb != null && !gain.gainDb.isFinite()) return@launch
+                currentBookGainDb = gain.gainDb
+                applyVolumeForCurrentKind()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) { }
+        }
+    }
+
+    // #4222: MediaController has no audio session id; use the existing service player hook.
+    @OptIn(UnstableApi::class)
+    private fun applyBoostEnhancer() {
+        try {
+            val player = PlayerHooks.exoPlayer
+            if (bookGainPlayer !== player) {
+                bookGainPlayer?.removeListener(bookAudioSessionListener)
+                releaseBookEnhancer()
+                bookGainPlayer = player
+                player?.addListener(bookAudioSessionListener)
+            }
+            val gainDb = when {  // #4118: music raises share the book's limiter
+                _playerKind.value == PlayerKind.Audiobook -> currentBookGainDb ?: 0.0
+                _playerKind.value == PlayerKind.Music && isMusic() -> currentMusicBoostDb
+                else -> 0.0
+            }
+            val sessionId = player?.audioSessionId ?: C.AUDIO_SESSION_ID_UNSET
+            if (gainDb <= 0.0 ||
+                sessionId == C.AUDIO_SESSION_ID_UNSET) {
+                releaseBookEnhancer()
+                return
+            }
+            if (bookEnhancer == null || bookEnhancerSessionId != sessionId) {
+                releaseBookEnhancer()
+                bookEnhancer = LoudnessEnhancer(sessionId)
+                bookEnhancerSessionId = sessionId
+            }
+            // #4222: LoudnessEnhancer's built-in limiter handles boosts above unity.
+            // #4118: hard ceiling here too, whatever the server sends (never blare).
+            bookEnhancer?.setTargetGain((gainDb.coerceAtMost(MAX_BOOST_DB) * 100).toInt())  // millibels
+            bookEnhancer?.enabled = true
+        } catch (_: Exception) {
+            releaseBookEnhancer()
+        }
+    }
+
+    // #4222: devices can throw even while disabling or releasing an audio effect.
+    private fun releaseBookEnhancer() {
+        val enhancer = bookEnhancer
+        bookEnhancer = null
+        bookEnhancerSessionId = C.AUDIO_SESSION_ID_UNSET
+        try { enhancer?.enabled = false } catch (_: Exception) { }
+        try { enhancer?.release() } catch (_: Exception) { }
+    }
+
+    // #4222: cancel stale responses and detach from the old player when leaving a book.
+    private fun resetBookGain() {
+        bookGainJob?.cancel()
+        bookGainJob = null
+        currentBookGainDb = null
+        releaseBookEnhancer()
+        try { bookGainPlayer?.removeListener(bookAudioSessionListener) } catch (_: Exception) { }
+        bookGainPlayer = null
     }
 
     /**
@@ -329,7 +434,11 @@ class PlaybackManager @Inject constructor(
     // #7109: per-track music loudness normalization settings and current track gain
     private val levelsSource = MusicLevelsSource { apiHolder.api?.getMusicLevels() }
     private val musicLevels: MusicLevelsResponse? get() = levelsSource.current
+    // #4222: the server also serves gain_db on TrackSchema; keep the #3504 step 3 music math.
     private var currentMusicGain: Float = 1.0f
+    private var currentMusicBoostDb: Double = 0.0  // #4118: applied by the LoudnessEnhancer
+    /** #4118: the most any boost may raise playback, books or music (Jarvis option B, 10/18). */
+    private val MAX_BOOST_DB = 6.0
     /** #7109: below this share of the expected level the player is ducked (ducks go to ~5%). */
     private val DUCKED_FRACTION = 0.5f
 
@@ -659,7 +768,9 @@ class PlaybackManager @Inject constructor(
         // ~5% during a transient focus loss and restores to whatever the dial
         // was (it records the pre-duck volume, never a hardcoded 1.0).
         // Via setPlayerVolume so the DJ-report volume snapshot stays coherent.
-        setPlayerVolume(volumeForKind(kind))
+        // #4222: apply book gain as its audio attributes become active.
+        if (kind == PlayerKind.Audiobook) applyVolumeForCurrentKind()
+        else setPlayerVolume(volumeForKind(kind))
     }
 
     private fun ensureController(onReady: (MediaController) -> Unit) {
@@ -909,6 +1020,7 @@ class PlaybackManager @Inject constructor(
      * no queue semantics apply to a stream item (endless, no duration/seek).
      */
     fun playStreamUrl(url: String, title: String) {
+        resetBookGain()  // #4222
         finalizeMusicIfActive()
         _currentMusic.value = null
         _currentBook.value = null
@@ -938,6 +1050,7 @@ class PlaybackManager @Inject constructor(
     private var localFilePath: String? = null
 
     fun play(book: BookDetail, baseUrl: String, startSeconds: Double = 0.0) {
+        if (_currentBook.value?.id != book.id) resetBookGain()  // #4222
         _currentMusic.value = null
         _currentStreamTitle.value = null
         lastReportedTrackIndex = -1
@@ -970,6 +1083,7 @@ class PlaybackManager @Inject constructor(
                     ctrl.setMediaItem(buildMediaItem(uri, book, book.title), startMs)
                 }
                 ctrl.prepare()
+                fetchBookGain(book.id)  // #4222
                 ctrl.play()
                 startProgressSync()
             }
@@ -1191,6 +1305,7 @@ class PlaybackManager @Inject constructor(
         val music = _currentMusic.value
         if (music == null || _playerKind.value != PlayerKind.Music) {
             // Nothing to break between — just speak it.
+            resetBookGain()  // #4222
             finalizeMusicIfActive()
             _currentBook.value = null
             progressSyncJob?.cancel()
@@ -1264,6 +1379,7 @@ class PlaybackManager @Inject constructor(
     ) {
         if (items.isEmpty()) return
         PlayerHooks.cancelStopAfterCurrent()  // #3505: a new queue is a fresh start
+        resetBookGain()  // #4222
         // Clear audiobook state, post final stop for any prior music
         finalizeMusicIfActive()
         _currentBook.value = null
@@ -1642,6 +1758,10 @@ class PlaybackManager @Inject constructor(
     fun cancelStopAfterCurrent() = PlayerHooks.cancelStopAfterCurrent()
 
     fun resume() {
+        // #4222: refresh the gain when a paused audiobook is activated again.
+        if (_playerKind.value == PlayerKind.Audiobook) {
+            _currentBook.value?.let { fetchBookGain(it.id) }
+        }
         controller?.play()
     }
 
@@ -1866,6 +1986,7 @@ class PlaybackManager @Inject constructor(
     }
 
     fun release() {
+        resetBookGain()  // #4222
         if (_currentBook.value != null) {
             scope.launch { syncProgress() }
         }

@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     # so -20, not #7136's -24 (4 LU under, which he found too quiet at max volume).
     normalize_music: bool = False
     music_target_lufs: float = -20.0  # #3504
+    # #4118: how far a quiet track may be RAISED toward the target. 0 = attenuate-only
+    # (old apps never raise; a raise needs the app's LoudnessEnhancer limiter).
+    music_max_boost_db: float = 0.0
     # #4222 Todd 10/9: voices are never cut; books are RAISED to the voice level.
     # Served by GET /api/playback/gain/book/{id}; the app applies it post-trip.
     # The voices' FILE level; as heard they get up to +9.5 dB from TtsBoost, so

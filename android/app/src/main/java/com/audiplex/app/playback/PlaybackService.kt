@@ -230,7 +230,10 @@ class PlaybackService : MediaSessionService() {
         if (PlayerHooks.focusManager === audioFocusManager) PlayerHooks.focusManager = null  // #7528
         audioFocusManager = null
         mediaSession?.run {
-            if (PlayerHooks.exoPlayer === player) PlayerHooks.exoPlayer = null  // #6913
+            if (PlayerHooks.exoPlayer === player) {
+                PlayerHooks.onPlayerReleasing?.invoke()  // #4118: free the boost effect
+                PlayerHooks.exoPlayer = null  // #6913
+            }
             player.release()
             release()
         }

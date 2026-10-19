@@ -378,6 +378,17 @@ def sample_playlist(db_session, sample_track):
 
 
 @pytest.fixture(autouse=True)
+def default_gain_settings(monkeypatch):
+    """#4118: gain tests use the code defaults, not the live config.yaml levels."""
+    from audiplex.config import Settings, get_settings
+
+    s = get_settings()
+    for name in ("music_target_lufs", "music_max_boost_db",
+                 "book_target_lufs", "book_max_boost_db"):
+        monkeypatch.setattr(s, name, Settings.model_fields[name].default)
+
+
+@pytest.fixture(autouse=True)
 def isolated_client_logs(tmp_path, monkeypatch):
     """Keep the two durable on-disk logs out of the real files.
 

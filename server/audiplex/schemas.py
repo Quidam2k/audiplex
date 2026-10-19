@@ -93,12 +93,13 @@ class TrackSchema(BaseModel):
     loudness_lufs: float | None = None  # #7109: EBU R128 integrated loudness for per-track gain
     model_config = {"from_attributes": True}
 
-    @computed_field  # #3504 #4222: the server's attenuate-only gain, same math as the phone
+    @computed_field  # #3504 #4222 #4118: the server's gain, same math as the phone
     @property
     def gain_db(self) -> float | None:
         from audiplex.config import get_settings
         from audiplex.gain import music_gain_db
-        return music_gain_db(self.loudness_lufs, get_settings().music_target_lufs)
+        s = get_settings()
+        return music_gain_db(self.loudness_lufs, s.music_target_lufs, s.music_max_boost_db)
 
 
 class AlbumSummary(BaseModel):
@@ -521,3 +522,4 @@ class MusicLevelsResponse(BaseModel):
     target_lufs: float
     fallback_lufs: float | None = None
     median_lufs: float | None = None  # #7387 informational; never applied as gain
+    max_boost_db: float = 0.0  # #4118: how far a quiet track may be raised (0 = attenuate-only)
