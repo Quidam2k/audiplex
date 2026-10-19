@@ -393,6 +393,37 @@ def pause_book(body: dict | None = None, db: Session = Depends(get_db), user: Us
             "command_id": cmd.id}
 
 
+@router.get("/book-position")  # #4059
+def book_position(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Where the owner is in an audiobook: the book on the device now, else the owner's last bookmark.
+
+    Read-only. Lets a persona join the position to the book's transcript even
+    while the book is paused (the caller is a service account, so /api/progress,
+    which is per-caller, has nothing for it). 404 when the owner has no book.
+    """
+    from audiplex.models import Book, PlaybackPosition
+
+    state = bus.get_state() or {}
+    book = state.get("book")
+    if book and book.get("id") is not None:
+        chapter = book.get("chapter_index")
+        return {"book_id": book["id"], "title": book.get("title"),
+                "position_s": round((state.get("position_ms") or 0) / 1000.0, 3),
+                "chapter_index": chapter if type(chapter) is int else None,
+                "playing": state.get("playing") is True, "updated_at": state.get("updated_at"),
+                "source": "device"}
+    owner = _resolve_owner(db)
+    row = (db.query(PlaybackPosition)
+           .filter(PlaybackPosition.user_id == owner.id, PlaybackPosition.is_finished == False)  # noqa: E712
+           .order_by(PlaybackPosition.updated_at.desc()).first())
+    if row is None:
+        raise HTTPException(status_code=404, detail="No audiobook position for the owner")
+    title = db.query(Book.title).filter(Book.id == row.book_id).scalar()
+    return {"book_id": row.book_id, "title": title, "position_s": row.position_seconds,
+            "chapter_index": row.chapter_index, "playing": False,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None, "source": "bookmark"}
+
+
 @router.post("/devices/{device_id}/activate")
 def activate_device(device_id: str, user: User = Depends(get_current_user)):
     """Transfer playback to `device_id` (Spotify-Connect handoff).
