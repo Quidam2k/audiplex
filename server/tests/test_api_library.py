@@ -205,6 +205,44 @@ class TestSeries:
         assert data[0]["name"] == "Lectures"
 
 
+class TestAudiobookOnlyScan:
+    """Pantheon #4464 — the narrow audiobook rescan "sync my Audible" fires."""
+
+    def test_passes_only_audiobook_clean_roots(self, client, tmp_path, monkeypatch):
+        from audiplex.config import LibraryRoot, Settings
+        from audiplex.routers import library
+        from audiplex.schemas import ScanResultSchema
+
+        settings = Settings(library_roots=[
+            LibraryRoot(path=str(tmp_path / "books"), category="audiobook_clean"),
+            LibraryRoot(path=str(tmp_path / "music"), category="music"),
+            LibraryRoot(path=str(tmp_path / "med"), category="meditation"),
+        ])
+        seen = {}
+
+        def fake_scan(db, roots, cover_dir):
+            seen["roots"] = [(r.category, r.path) for r in roots]
+            return ScanResultSchema(added=2, updated=0, removed=0, errors=[])
+
+        monkeypatch.setattr(library, "get_settings", lambda: settings)
+        monkeypatch.setattr(library, "scan_library", fake_scan)
+        r = client.post("/api/library/scan/audiobooks")
+        assert r.status_code == 200
+        assert r.json()["added"] == 2
+        assert seen["roots"] == [("audiobook_clean", str(tmp_path / "books"))]
+
+    def test_no_audiobook_root_is_a_noop(self, client, tmp_path, monkeypatch):
+        from audiplex.config import LibraryRoot, Settings
+        from audiplex.routers import library
+
+        settings = Settings(library_roots=[LibraryRoot(path=str(tmp_path), category="music")])
+        monkeypatch.setattr(library, "get_settings", lambda: settings)
+        monkeypatch.setattr(library, "scan_library", lambda *a: pytest.fail("must not scan"))
+        r = client.post("/api/library/scan/audiobooks")
+        assert r.status_code == 200
+        assert r.json()["errors"] == ["No audiobook_clean roots are configured."]
+
+
 class TestMusicOnlyScan:
     """#2947 — the narrow rescan the DJ service account may fire itself."""
 
