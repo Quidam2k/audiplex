@@ -18,6 +18,7 @@ import pystray
 from PIL import Image, ImageDraw, ImageFont
 
 from .bus import BusClient
+from .media_keys import MediaKeys
 from .player import Player
 from .proxy import AuthProxy
 
@@ -227,11 +228,26 @@ def _run(config: Config) -> None:
             if status_stop.wait(10):
                 break
 
+    def report_soon() -> None:
+        # #3921: tell the server about a local change now, off the UI thread.
+        threading.Thread(target=bus.report_now, name="audiplex-report", daemon=True).start()
+
     def run_player_action(action: Callable[[], None]) -> None:
         try:
             action()
         except Exception:
             logger.exception("Player action failed")
+        else:
+            report_soon()
+            media_keys.update()
+
+    media_keys = MediaKeys(player, on_action=report_soon)  # #3921
+    media_keys.start()
+
+    def media_keys_loop() -> None:
+        # #3921: keep the Windows overlay's play state and title current.
+        while not status_stop.wait(2):
+            media_keys.update()
 
     def transfer(device_id: str) -> None:
         def worker() -> None:
@@ -359,6 +375,7 @@ def _run(config: Config) -> None:
         status_stop.set()
 
         for name, stop in (
+            ("media keys", media_keys.stop),  # #3921
             ("bus", bus.stop),
             ("player", player.stop),
             ("proxy", proxy.stop),
@@ -438,6 +455,11 @@ def _run(config: Config) -> None:
     threading.Thread(
         target=status_loop,
         name="audiplex-device-status",
+        daemon=True,
+    ).start()
+    threading.Thread(
+        target=media_keys_loop,
+        name="audiplex-media-keys",
         daemon=True,
     ).start()
 

@@ -5,12 +5,13 @@ playback bus, Spotify-Connect style. The DJ (or the tray menu) transfers
 playback to it; while it is the active device, bus commands play here instead
 of on the phone. When it isn't active it just polls and never takes commands.
 
-- Needs VLC installed (64-bit, matching Python) and `pip install --user -r requirements.txt`.
+- Needs VLC installed (64-bit, matching Python). Python deps live in a venv (#3921, global pip is blocked):
+  `C:\Python311\python -m venv .venv` then `.venv\Scripts\python -m pip install -r requirements.txt`.
 - Config: `%APPDATA%\AudiplexPC\config.json`
   `{"base_url": "http://192.168.50.139:8100", "token": "...", "device_id": "pc-solace", "device_name": "Solace"}`
   (env overrides: `AUDIPLEX_PC_URL`, `AUDIPLEX_PC_TOKEN`, `AUDIPLEX_DEVICE_ID`, `AUDIPLEX_DEVICE_NAME`).
 - Token: `cd server && python -m audiplex.create_service_token --username pc-solace` (one account per PC).
-- Run: `pythonw -m audiplex_pc` from this folder (`--debug` for verbose logging).
+- Run: `.venv\Scripts\pythonw -m audiplex_pc` from this folder (`--debug` for verbose logging).
   Log: `%APPDATA%\AudiplexPC\audiplex_pc.log`.
 - UI: tray icon only. Left-click opens a small now-playing / transfer window.
 
@@ -20,4 +21,6 @@ Music plus the sleep engine (#3435): `bed_play`/`bed_volume`/`bed_stop` run a lo
 second VLC player (DirectSound output: VLC's default mmdevice output shares one volume per
 process, so a fade would mute the bed too), and `sleep_timer` crossfades the main player into
 it like the phone does. Isolated check: `python scripts/e2e_sleep_isolated.py` (never :8100).
-Tests: `python -m pytest tests`.
+Media keys (#3921): play/pause/next/previous keys and the Windows media overlay via SMTC
+(`media_keys.py`, winrt packages). Without winrt installed they are simply off.
+Tests: `.venv\Scripts\python -m pytest tests`.

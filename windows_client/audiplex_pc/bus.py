@@ -20,6 +20,13 @@ logger = logging.getLogger(__name__)
 # phone saves every 30 s; the PC is a little tighter so a handoff loses less.
 PROGRESS_PUSH_SECONDS = 15.0
 
+# #3921: commands after which the state is posted at once. deactivate posts its
+# own report inside dispatch, so it is not listed.
+STATE_CHANGING = frozenset({
+    "play_now", "queue", "play_next", "replace_upcoming", "activate", "reorder",
+    "skip", "previous", "pause", "resume", "seek", "play_book",
+})
+
 
 class BusClient:
     def __init__(
@@ -146,6 +153,11 @@ class BusClient:
                     )
 
                 self._ack(command_id, status, detail)
+                # #3921: post the new state now, not on the next 5 s tick, so a
+                # transfer right after a resume carries playing=true. After the
+                # ack so a slow POST can't hold it up; deactivate already reported.
+                if status != "error" and str(cmd.get("type", "")) in STATE_CHANGING:
+                    self.report_now()
 
             except Exception as exc:
                 if self._stop.is_set():
