@@ -97,9 +97,9 @@ class TrackSchema(BaseModel):
     @property
     def gain_db(self) -> float | None:
         from audiplex.config import get_settings
-        from audiplex.gain import music_gain_db
+        from audiplex.gain import music_gain_db, served_music_target  # #3501
         s = get_settings()
-        return music_gain_db(self.loudness_lufs, s.music_target_lufs, s.music_max_boost_db)
+        return music_gain_db(self.loudness_lufs, served_music_target(s), s.music_max_boost_db)  # #3501
 
 
 class AlbumSummary(BaseModel):

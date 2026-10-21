@@ -713,12 +713,12 @@ def get_gain(kind: str, item_id: int, db: Session = Depends(get_db), user: User 
     Book: raised to book_target_lufs (clamped), mode=boost_needs_limiter; the
     app applies a raise through its limiter (#4222). gain_db=null when unmeasured.
     """
-    from audiplex.gain import book_gain_db, music_gain_db
+    from audiplex.gain import book_gain_db, music_gain_db, served_music_target  # #3501
     from audiplex.models import Book, Track
     s = get_settings()
     if kind == "track":
         row = db.get(Track, item_id)
-        target = s.music_target_lufs
+        target = served_music_target(s)  # #3501 DJ offset while a pool runs (0 = off)
         mode = "boost_needs_limiter" if s.music_max_boost_db > 0 else "attenuate_only"  # #4118
     elif kind == "book":
         row = db.get(Book, item_id)

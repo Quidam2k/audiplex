@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # #4118: how far a quiet track may be RAISED toward the target. 0 = attenuate-only
     # (old apps never raise; a raise needs the app's LoudnessEnhancer limiter).
     music_max_boost_db: float = 0.0
+    # #3501 Todd 10/20 (Pantheon msg 46601): if a DJ ride shows 2+ too-quiet presses, the
+    # DJ music drops 3 dB. Applied to the served music target ONLY while a DJ pool runs;
+    # cut-only, clamped to -12. 0 = off (default). Flip on Todd's word: DJ_MUSIC_OFFSET_DB=-3.
+    dj_music_offset_db: float = 0.0
     # #4222 Todd 10/9: voices are never cut; books are RAISED to the voice level.
     # Served by GET /api/playback/gain/book/{id}; the app applies it post-trip.
     # The voices' FILE level; as heard they get up to +9.5 dB from TtsBoost, so

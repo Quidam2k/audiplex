@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 from audiplex import taste
 from audiplex.dj_learn import LOVE_MIN_STARS, restore as dj_learn_restore  # #4057
 from audiplex.config import get_settings, set_library_roots_for_category
+from audiplex.gain import served_music_target  # #3501
 from audiplex.auth import get_admin_user, get_current_user
 from audiplex.database import get_db
 from audiplex.identity import build_identity_map
@@ -1131,7 +1132,7 @@ def get_music_levels(
     # reported as median_lufs for information and fallback_lufs stays null.
     return MusicLevelsResponse(
         normalize_music=settings.normalize_music,
-        target_lufs=settings.music_target_lufs,
+        target_lufs=served_music_target(settings),  # #3501 DJ offset while a pool runs (0 = off)
         max_boost_db=settings.music_max_boost_db,  # #4118
         fallback_lufs=None,
         median_lufs=fallback_lufs,
