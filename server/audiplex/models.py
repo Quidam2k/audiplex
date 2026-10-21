@@ -159,6 +159,9 @@ class Track(Base):
     beat_offset: Mapped[float | None] = mapped_column(Float, nullable=True)
     musical_key: Mapped[str | None] = mapped_column(String(4), nullable=True)
     key_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # #8707: id of the canonical copy of this recording (dedup.py). Set = hidden from
+    # the flat library lists; still in its own folder/album, playlists and the DJ.
+    duplicate_of: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     added_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 

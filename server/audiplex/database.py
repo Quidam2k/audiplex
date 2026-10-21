@@ -399,6 +399,19 @@ def _migrate_track_audio_profile(engine):  # #7335 / #3981
             conn.execute(text("ALTER TABLE track_dips ADD COLUMN texture_conf FLOAT"))  # #3981
 
 
+def _migrate_track_duplicate_of(engine):  # #8707
+    inspector = inspect(engine)
+    if "tracks" not in inspector.get_table_names():
+        return
+    if "duplicate_of" in {col["name"] for col in inspector.get_columns("tracks")}:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE tracks ADD COLUMN duplicate_of INTEGER"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_tracks_duplicate_of ON tracks (duplicate_of)"
+        ))
+
+
 def init_db(database_url: str | None = None):
     """Initialize the database engine and session factory.
 
@@ -428,6 +441,7 @@ def init_db(database_url: str | None = None):
     _migrate_music_video_prompt_template(_engine)  # #6867
     _migrate_music_video_aspect(_engine)  # #6172
     _migrate_track_audio_profile(_engine)  # #7335 / #3981
+    _migrate_track_duplicate_of(_engine)  # #8707
     Base.metadata.create_all(bind=_engine)
     return _engine
 

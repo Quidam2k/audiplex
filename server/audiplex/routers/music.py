@@ -125,6 +125,7 @@ def get_genre_tracks(genre_name: str, db: Session = Depends(get_db), user: User 
         .join(Artist, Track.artist_id == Artist.id)
         .options(selectinload(Track.artist))
         .filter(Album.genre == genre_name)
+        .filter(Track.duplicate_of.is_(None))  # #8707 one entry per recording
         .order_by(
             func.lower(Artist.name),
             func.lower(Album.title),
@@ -173,6 +174,7 @@ def get_artist_tracks(artist_id: int, db: Session = Depends(get_db), user: User 
         .join(Album, Track.album_id == Album.id)
         .options(selectinload(Track.artist))
         .filter(Track.artist_id == artist_id)
+        .filter(Track.duplicate_of.is_(None))  # #8707 one entry per recording
         .order_by(
             func.lower(Album.title),
             Track.disc_number,
@@ -991,7 +993,10 @@ def _search_signature(db: Session) -> tuple:  # #3696
     """Cheap change detector: rebuilds after a rescan, not per keystroke."""
     a = db.query(func.count(Artist.id), func.max(Artist.id)).one()
     al = db.query(func.count(Album.id), func.max(Album.id), func.max(Album.updated_at)).one()
-    t = db.query(func.count(Track.id), func.max(Track.id), func.max(Track.updated_at)).one()
+    t = db.query(
+        func.count(Track.id), func.max(Track.id), func.max(Track.updated_at),
+        func.count(Track.duplicate_of),  # #8707 dedup writes don't bump updated_at
+    ).one()
     return (tuple(a), tuple(al), tuple(t))
 
 
@@ -1013,7 +1018,8 @@ def _build_search_cache(db: Session) -> dict:  # #3696
         ),
         "tracks": pack(
             db.query(Track.id, Track.title, Artist.name)
-            .outerjoin(Artist, Track.artist_id == Artist.id).all()
+            .outerjoin(Artist, Track.artist_id == Artist.id)
+            .filter(Track.duplicate_of.is_(None)).all()  # #8707
         ),
     }
 
@@ -1067,6 +1073,7 @@ def search_music(db: Session, q: str, limit: int = 50) -> SearchResults:  # #369
         .outerjoin(Artist, Track.artist_id == Artist.id)
         .outerjoin(Album, Track.album_id == Album.id)
         .filter(_all_words([Track.title, Artist.name, Album.title], words))
+        .filter(Track.duplicate_of.is_(None))  # #8707 one entry per recording
         .order_by(_rank(Track.title, q), func.lower(Track.title), Track.id).limit(limit)
     )]
 

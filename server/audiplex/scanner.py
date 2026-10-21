@@ -8,7 +8,10 @@ from sqlalchemy.orm import Session
 
 from audiplex.config import LibraryRoot
 from audiplex.cue_parser import parse_cue_file
-from audiplex.models import Album, Artist, Book, Chapter, Track
+from audiplex.libation import LibationBook, asin_from_folder
+from audiplex.libation import load_index as load_libation_index
+from audiplex.models import Album, Artist, Book, Chapter, PlaybackPosition, Track
+from audiplex.scanners.audiobook_misc import _process_book_folder
 from audiplex.schemas import ScanResultSchema
 from audiplex.utils.cover_art import extract_cover_art
 from audiplex.utils.metadata import (
@@ -22,6 +25,55 @@ from audiplex.utils.metadata import (
 logger = logging.getLogger(__name__)
 
 AUDIO_EXTENSIONS = {".m4b", ".m4a"}
+LIBATION_FOLDER_EXTENSIONS = {".mp3"}  # #8707 only ever scanned as a folder book
+
+
+def _apply_libation(book: Book, lb: LibationBook | None) -> None:
+    """#8707: a folder book's tags describe chapters, so Libation's own record wins."""
+    if lb is None:
+        return
+    book.title = lb.title or book.title
+    book.author = lb.authors or book.author
+    book.narrator = lb.narrators or book.narrator
+    if lb.series:
+        book.series, book.series_sequence = lb.series, lb.series_sequence
+        book.series_source = "libation"
+
+
+def _move_positions_to_folder_book(db: Session, book: Book) -> int:
+    """#8707: carry listening positions from old per-chapter-file rows onto the
+    folder book before the sweep cascades them away. Offset = that file's chapter
+    start + position within it. Newest position per user wins."""
+    starts = {
+        _normcase(c.file_path): c for c in db.query(Chapter).filter(Chapter.book_id == book.id)
+        if c.file_path
+    }
+    folder = _normcase(book.file_path)
+    moved = 0
+    old_rows = [
+        b for b in db.query(Book).filter(Book.id != book.id, Book.file_path.like(book.file_path + "%"))
+        if os.path.dirname(_normcase(b.file_path)) == folder
+    ]
+    for old in old_rows:
+        chapter = starts.get(_normcase(old.file_path))
+        for pos in db.query(PlaybackPosition).filter(PlaybackPosition.book_id == old.id).all():
+            if chapter is None:
+                continue
+            mine = db.query(PlaybackPosition).filter(
+                PlaybackPosition.book_id == book.id, PlaybackPosition.user_id == pos.user_id
+            ).first()
+            if mine and mine.updated_at >= pos.updated_at:
+                continue
+            if mine:
+                db.delete(mine)
+                db.flush()
+            pos.book_id = book.id
+            pos.position_seconds = chapter.start_seconds + pos.position_seconds
+            pos.chapter_index = chapter.index
+            moved += 1
+    if moved:
+        logger.info("Moved %d playback position(s) onto folder book %s", moved, book.file_path)
+    return moved
 
 
 def _find_cue_file(audio_path: Path) -> Path | None:
@@ -85,75 +137,110 @@ def _scan_libation(
         errors.append(f"Library path does not exist: {lib_path_str}")
         return ScanResultSchema(added=0, updated=0, removed=0, errors=errors), found_paths
 
-    for ext in AUDIO_EXTENSIONS:
+    # #8707: Libation's SplitFilesByChapter writes one file per chapter, and
+    # podcast-style titles arrive as .mp3. Any folder that is not exactly one
+    # .m4b/.m4a is one multi-track book (audiobook_misc shape: chapter per file),
+    # not a "book" per file.
+    by_folder: dict[Path, list[Path]] = {}
+    for ext in AUDIO_EXTENSIONS | LIBATION_FOLDER_EXTENSIONS:
         for audio_file in lib_path.rglob(f"*{ext}"):
-            file_path_str = str(audio_file)
-            found_paths.add(file_path_str)
+            by_folder.setdefault(audio_file.parent, []).append(audio_file)
+    single_files: list[Path] = []
+    libation = None
+    for folder, files in by_folder.items():
+        # Loose files in the root itself are separate books, never chapters.
+        if folder == lib_path:
+            single_files += [f for f in files if f.suffix.lower() in AUDIO_EXTENSIONS]
+            continue
+        if len(files) == 1 and files[0].suffix.lower() in AUDIO_EXTENSIONS:
+            single_files.append(files[0])
+            continue
+        if libation is None:
+            libation = load_libation_index()
+        found_paths.add(str(folder))
+        try:
+            action, warnings = _process_book_folder(db, folder, cover_cache_dir)
+            errors.extend(warnings)
+            book = db.query(Book).filter(Book.file_path == str(folder)).first()
+            if book:
+                _apply_libation(book, libation.get(asin_from_folder(folder.name) or ""))
+                _move_positions_to_folder_book(db, book)
+            if action == "added":
+                added += 1
+            elif action == "updated":
+                updated += 1
+        except Exception as e:
+            errors.append(f"Error processing {folder}: {e}")
+            logger.error(f"Error processing {folder}", exc_info=True)
 
-            try:
-                file_hash = compute_file_hash(file_path_str)
+    for audio_file in single_files:
+        file_path_str = str(audio_file)
+        found_paths.add(file_path_str)
 
-                existing = db.query(Book).filter(Book.file_path == file_path_str).first()
+        try:
+            file_hash = compute_file_hash(file_path_str)
 
-                if existing and existing.file_hash == file_hash:
-                    continue
+            existing = db.query(Book).filter(Book.file_path == file_path_str).first()
 
-                metadata = extract_metadata(file_path_str)
-                cue_path = _find_cue_file(audio_file)
-                chapters_data = _build_chapters(audio_file, metadata, metadata.duration_seconds)
+            if existing and existing.file_hash == file_hash:
+                continue
 
-                if existing:
-                    existing.title = metadata.title
-                    existing.author = metadata.author
-                    existing.narrator = metadata.narrator
-                    existing.series = metadata.series
-                    existing.series_sequence = metadata.series_sequence
-                    existing.series_raw = metadata.series_raw
-                    existing.duration_seconds = metadata.duration_seconds
-                    existing.file_size = metadata.file_size
-                    existing.file_hash = file_hash
-                    existing.has_cover = metadata.has_cover
-                    existing.cue_path = str(cue_path) if cue_path else None
-                    existing.category = "audiobook_clean"
+            metadata = extract_metadata(file_path_str)
+            cue_path = _find_cue_file(audio_file)
+            chapters_data = _build_chapters(audio_file, metadata, metadata.duration_seconds)
 
-                    db.query(Chapter).filter(Chapter.book_id == existing.id).delete()
-                    for ch in chapters_data:
-                        db.add(Chapter(book_id=existing.id, **ch))
+            if existing:
+                existing.title = metadata.title
+                existing.author = metadata.author
+                existing.narrator = metadata.narrator
+                existing.series = metadata.series
+                existing.series_sequence = metadata.series_sequence
+                existing.series_raw = metadata.series_raw
+                existing.duration_seconds = metadata.duration_seconds
+                existing.file_size = metadata.file_size
+                existing.file_hash = file_hash
+                existing.has_cover = metadata.has_cover
+                existing.cue_path = str(cue_path) if cue_path else None
+                existing.category = "audiobook_clean"
 
-                    if metadata.has_cover:
-                        extract_cover_art(file_path_str, existing.id, cover_cache_dir)
+                db.query(Chapter).filter(Chapter.book_id == existing.id).delete()
+                for ch in chapters_data:
+                    db.add(Chapter(book_id=existing.id, **ch))
 
-                    updated += 1
-                else:
-                    book = Book(
-                        title=metadata.title,
-                        author=metadata.author,
-                        narrator=metadata.narrator,
-                        series=metadata.series,
-                        series_sequence=metadata.series_sequence,
-                        series_raw=metadata.series_raw,
-                        category="audiobook_clean",
-                        duration_seconds=metadata.duration_seconds,
-                        file_path=file_path_str,
-                        cue_path=str(cue_path) if cue_path else None,
-                        has_cover=metadata.has_cover,
-                        file_size=metadata.file_size,
-                        file_hash=file_hash,
-                    )
-                    db.add(book)
-                    db.flush()
+                if metadata.has_cover:
+                    extract_cover_art(file_path_str, existing.id, cover_cache_dir)
 
-                    for ch in chapters_data:
-                        db.add(Chapter(book_id=book.id, **ch))
+                updated += 1
+            else:
+                book = Book(
+                    title=metadata.title,
+                    author=metadata.author,
+                    narrator=metadata.narrator,
+                    series=metadata.series,
+                    series_sequence=metadata.series_sequence,
+                    series_raw=metadata.series_raw,
+                    category="audiobook_clean",
+                    duration_seconds=metadata.duration_seconds,
+                    file_path=file_path_str,
+                    cue_path=str(cue_path) if cue_path else None,
+                    has_cover=metadata.has_cover,
+                    file_size=metadata.file_size,
+                    file_hash=file_hash,
+                )
+                db.add(book)
+                db.flush()
 
-                    if metadata.has_cover:
-                        extract_cover_art(file_path_str, book.id, cover_cache_dir)
+                for ch in chapters_data:
+                    db.add(Chapter(book_id=book.id, **ch))
 
-                    added += 1
+                if metadata.has_cover:
+                    extract_cover_art(file_path_str, book.id, cover_cache_dir)
 
-            except Exception as e:
-                errors.append(f"Error processing {audio_file}: {e}")
-                logger.error(f"Error processing {audio_file}", exc_info=True)
+                added += 1
+
+        except Exception as e:
+            errors.append(f"Error processing {audio_file}: {e}")
+            logger.error(f"Error processing {audio_file}", exc_info=True)
 
     return (
         ScanResultSchema(added=added, updated=updated, removed=0, errors=errors),
@@ -364,6 +451,15 @@ def scan_library(db: Session, library_roots, cover_cache_dir: str) -> ScanResult
         except Exception as e:
             errors.append(f"Error garbage-collecting orphan artists: {e}")
             logger.error("Error garbage-collecting orphan artists", exc_info=True)
+
+        # #8707: one library entry per recording; mix-folder copies stay on disk.
+        try:
+            from audiplex.dedup import mark_duplicates
+            db.flush()
+            mark_duplicates(db)
+        except Exception as e:
+            errors.append(f"Error marking duplicates: {e}")
+            logger.error("Error marking duplicates", exc_info=True)
 
     db.commit()
 
