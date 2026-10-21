@@ -78,6 +78,7 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_track_stats` — completion rates and where skips land, with each track's loudness line (intro quiet, fade, dips) when measured. #3981
 - `dj_pair_note` / `dj_pair_notes` — write / read DJ notes on a track or a track_a -> track_b pairing (kept across rides).
 - `dj_song_context` — everything stored about one song (JSON): sourced facts, measured bpm/key/energy, his stars/loved/tags, pair notes. Love words never included. (#3984)
+- `dj_lyrics` — stored lyrics for one song, on demand only (pass `verse='X'` for the matching stanzas). For understanding: on air quote at most one short line, never sing or read them. (#8201, catalogued #3921)
 - `dj_plays_well_after` — "what plays well after this, and why": library songs with stored-evidence reasons (pair note, shared writer, sample/cover link, shared theme, tag/bucket, key+tempo, energy, release year); "never after" notes veto. (#3984)
 - `dj_theme_songs` — songs about a theme ("war", "hope", "robots"): his tags, bucket names, then sourced song notes. (#3984)
 - Queue-time notes (#3984): dj_play_now / dj_queue / dj_play_next / dj_queue_by / dj_mix end with a CONTEXT block of sourced facts for the first 5 queued songs and any stored link between neighbours (CAUTION on a vetoed pair). Omitted when slow (>1.5 s), unknown, or the queue guard dropped tracks.
