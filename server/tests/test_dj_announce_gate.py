@@ -46,6 +46,8 @@ def test_quiet_goes_through(monkeypatch, tmp_path):
 
 def test_unset_or_unreadable_is_not_busy(monkeypatch, tmp_path):
     monkeypatch.delenv("DJ_SPEECH_STATE_FILE", raising=False)
+    # #4222: the unset fallback is Pantheon's REAL speech state; point it at a missing file.
+    monkeypatch.setattr(mcp_server, "DEFAULT_SPEECH_STATE_FILE", str(tmp_path / "default.json"))
     assert mcp_server._someone_talking() is False
     monkeypatch.setenv("DJ_SPEECH_STATE_FILE", str(tmp_path / "missing.json"))
     assert mcp_server._someone_talking() is False

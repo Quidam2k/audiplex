@@ -479,6 +479,15 @@ def isolated_book_handoff(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolated_todd_stop(monkeypatch, tmp_path):
+    """#4222: the Todd-stop latch (#4011) must never read or write the real
+    data/todd_stop.json, or a live latch reddens every start-command test."""
+    from audiplex import todd_stop
+
+    monkeypatch.setattr(todd_stop, "LATCH_PATH", tmp_path / "todd_stop.json")
+
+
+@pytest.fixture(autouse=True)
 def _no_live_pantheon_mute(monkeypatch, tmp_path):
     """#3493: the DJ MCP's mute gate must never read the live quiet window, or a
     real quiet hour reddens every DJ tool test. Pointing it at a missing Pantheon
