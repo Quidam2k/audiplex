@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull  // #5047
 import javax.inject.Inject
 
 /**
@@ -25,6 +26,7 @@ import javax.inject.Inject
 class BootReceiver : BroadcastReceiver() {
 
     @Inject lateinit var settingsStore: SettingsStore
+    @Inject lateinit var clientLog: ClientLogReporter
 
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
@@ -34,8 +36,14 @@ class BootReceiver : BroadcastReceiver() {
         val appContext = context.applicationContext
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
-                if (settingsStore.djLinkEnabled.first()) {
+                val enabled = settingsStore.djLinkEnabled.first()
+                if (enabled) {
                     DjLinkService.start(appContext)
+                }
+                // #5047: proves the reboot path ran (#4906), whether or not the link is on.
+                // Sent inside goAsync's ~10 s window: with the link off nothing else keeps the process up.
+                withTimeoutOrNull(BOOT_LOG_WAIT_MS) {
+                    clientLog.sendWhenReady("info", "boot_link_start", "phone booted", mapOf("dj_link" to "$enabled"))
                 }
             } finally {
                 pending.finish()
@@ -43,3 +51,6 @@ class BootReceiver : BroadcastReceiver() {
         }
     }
 }
+
+/** #5047: under goAsync's ~10 s receiver limit. */
+private const val BOOT_LOG_WAIT_MS = 8_000L

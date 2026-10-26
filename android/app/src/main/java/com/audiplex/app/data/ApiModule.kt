@@ -192,17 +192,26 @@ class ApiServiceHolder(
     @Volatile
     private var currentApi: AudiplexApi? = null
 
+    // #4906 (#5047): synchronized, and the client is published before the URL, because the
+    // app's startup now configures this off the main thread alongside the ViewModels.
+    @Synchronized
     fun setBaseUrl(url: String) {
         val normalized = if (url.endsWith("/")) url else "$url/"
         if (normalized != currentBaseUrl) {
-            currentBaseUrl = normalized
             currentApi = Retrofit.Builder()
                 .baseUrl(normalized)
                 .client(okHttpClient)
                 .addConverterFactory(MoshiConverterFactory.create(moshi))
                 .build()
                 .create(AudiplexApi::class.java)
+            currentBaseUrl = normalized
         }
+    }
+
+    /** #4906 (#5047): startup's saved-server snapshot, which must never override a URL a screen already set. */
+    @Synchronized
+    fun setBaseUrlIfUnset(url: String) {
+        if (currentBaseUrl.isEmpty()) setBaseUrl(url)
     }
 
     val baseUrl: String get() = currentBaseUrl

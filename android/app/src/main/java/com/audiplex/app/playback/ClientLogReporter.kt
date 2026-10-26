@@ -157,6 +157,15 @@ class ClientLogReporter @Inject constructor(
         scope.launch { send(level, event, message, detail) }
     }
 
+    /**
+     * #5047: [report] for the boot path, where the API client may not exist yet. Suspends
+     * until sent, so a BroadcastReceiver can hold goAsync open for it; the caller bounds the wait.
+     */
+    suspend fun sendWhenReady(level: String, event: String, message: String = "", detail: Map<String, String> = emptyMap()): Boolean {
+        Log.w(TAG, "$event: $message $detail")
+        return awaitApi() && send(level, event, message, detail)
+    }
+
     /** Returns true only if the server actually took the entry. */
     private suspend fun send(
         level: String,

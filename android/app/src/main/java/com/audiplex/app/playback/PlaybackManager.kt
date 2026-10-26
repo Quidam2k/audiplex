@@ -1,7 +1,12 @@
 package com.audiplex.app.playback
 
+import android.content.BroadcastReceiver  // #5047
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent  // #5047
+import android.content.IntentFilter  // #5047
+import android.media.AudioManager  // #5047
+import androidx.core.content.ContextCompat  // #5047
 import android.media.audiofx.LoudnessEnhancer  // #4222
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
@@ -388,6 +393,53 @@ class PlaybackManager @Inject constructor(
     val sleepEndsAtMs: StateFlow<Long?> = _sleepEndsAtMs
     private var sleepFadeSeconds = SleepFade.DEFAULT_FADE_SECONDS
     private var sleepBedFadeTo: Float? = null
+
+    // #5047: media-volume presses (side buttons or another app) while Audiplex is
+    // playing or sleep mode is armed, so a by-hand fix like 10/25's is measurable.
+    // A burst of presses within VOLUME_BURST_MS is one entry, first before to last after.
+    private val audioManager = context.getSystemService(AudioManager::class.java)
+    private var volumeBurstJob: Job? = null
+    private var volumeBurstFrom = -1
+    private val volumeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, intent: Intent) {
+            if (intent.getIntExtra(EXTRA_VOLUME_STREAM_TYPE, -1) != AudioManager.STREAM_MUSIC) return
+            val before = intent.getIntExtra(EXTRA_PREV_VOLUME_STREAM_VALUE, -1)
+            val after = intent.getIntExtra(EXTRA_VOLUME_STREAM_VALUE, -1)
+            if (before == after || !(isPlaying.value || bedWanted || _sleepEndsAtMs.value != null)) return
+            if (volumeBurstFrom < 0) volumeBurstFrom = before
+            volumeBurstJob?.cancel()
+            volumeBurstJob = scope.launch {
+                delay(VOLUME_BURST_MS)
+                val from = volumeBurstFrom
+                volumeBurstFrom = -1
+                if (from != after) {
+                    clientLog.report(
+                        "info", "stream_volume", "media volume $from -> $after",
+                        volumeDetail() + mapOf("before" to "$from", "after" to "$after"),
+                    )
+                }
+            }
+        }
+    }
+
+    init {
+        ContextCompat.registerReceiver(
+            context, volumeReceiver, IntentFilter(VOLUME_CHANGED_ACTION), ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+    }
+
+    /** #5047: what was playing, and how loud, alongside a volume press or the sleep handoff. */
+    private fun volumeDetail(): Map<String, String> = mapOf(
+        "stream" to "${audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)}",
+        "max" to "${audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)}",
+        "playing" to "${isPlaying.value}",
+        "kind" to "${_playerKind.value}",
+        "book_gain_db" to "${currentBookGainDb ?: ""}",
+        "bed" to "${_bedState.value}",
+        "bed_url" to (bedUrl ?: ""),
+        "bed_level" to "$bedCurrentVolume",
+        "sleep_armed" to "${_sleepEndsAtMs.value != null}",
+    )
 
     /** Synthetic ids for non-catalog queue items (DJ voice breaks, #431). */
     private var nextSyntheticTrackId: Int = -1
@@ -1682,6 +1734,9 @@ class PlaybackManager @Inject constructor(
                 },
             )
             if (done) _sleepEndsAtMs.value = null
+            if (done && bedFadeTo != null) {
+                clientLog.report("info", "bed_handoff", "book faded into the sleep bed", volumeDetail())  // #5047
+            }
         }
     }
 
@@ -2002,3 +2057,10 @@ class PlaybackManager @Inject constructor(
         controller = null
     }
 }
+
+// #5047: AudioManager's hidden volume broadcast and its extras (stable strings since API 1).
+private const val VOLUME_CHANGED_ACTION = "android.media.VOLUME_CHANGED_ACTION"
+private const val EXTRA_VOLUME_STREAM_TYPE = "android.media.EXTRA_VOLUME_STREAM_TYPE"
+private const val EXTRA_VOLUME_STREAM_VALUE = "android.media.EXTRA_VOLUME_STREAM_VALUE"
+private const val EXTRA_PREV_VOLUME_STREAM_VALUE = "android.media.EXTRA_PREV_VOLUME_STREAM_VALUE"
+private const val VOLUME_BURST_MS = 2_000L
