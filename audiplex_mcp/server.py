@@ -1655,8 +1655,10 @@ async def dj_plays_well_after(track_id: int, n: int = 8, exclude_ids: list[int] 
 async def dj_theme_songs(query: str, n: int = 25) -> str:
     """Songs in the library about a theme (#3984): 'war', 'hope', 'robots',
     'trains'... JSON [{track_id, title, artist, why: {kind, text, source, url}}].
-    Matches Todd's tags first, then bucket names, then the sourced song notes
-    (whole-word). One entry per song; banned songs left out."""
+    Matches Todd's tags first, then bucket names, then the sourced song notes,
+    then the stored lyrics (whole-word; why quotes one short line, #10124).
+    THE tool for a theme mix (Halloween, rain...): dj_search reads titles only.
+    One entry per song; banned songs left out."""
     hits = await _song_memory(song_context.theme, query, max(1, min(n, 100)))  # #3984
     if not hits:  # #3984
         return f"No library songs found for theme {query!r}."  # #3984
@@ -3457,7 +3459,8 @@ async def dj_search(query: str, limit: int = 30, include_longform: bool = False)
 
     Matches every whitespace-separated term in `query` against the track title
     and artist (case-insensitive, in any order), so 'ashnikko daisy' works.
-    Exact and prefix matches sort first.
+    Exact and prefix matches sort first. Titles/artists only: for a theme
+    mix use dj_theme_songs, which also reads song notes and lyrics (#10124).
 
     include_longform: False by default, which hides hours-long podcasts and
     focus loops so a music search returns music. Set True to find those on

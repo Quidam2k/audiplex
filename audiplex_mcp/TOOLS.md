@@ -80,7 +80,7 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_song_context` — everything stored about one song (JSON): sourced facts, measured bpm/key/energy, his stars/loved/tags, pair notes. Love words never included. (#3984)
 - `dj_lyrics` — stored lyrics for one song, on demand only (pass `verse='X'` for the matching stanzas). For understanding: on air quote at most one short line, never sing or read them. (#8201, catalogued #3921)
 - `dj_plays_well_after` — "what plays well after this, and why": library songs with stored-evidence reasons (pair note, shared writer, sample/cover link, shared theme, tag/bucket, key+tempo, energy, release year); "never after" notes veto. (#3984)
-- `dj_theme_songs` — songs about a theme ("war", "hope", "robots"): his tags, bucket names, then sourced song notes. (#3984)
+- `dj_theme_songs` — songs about a theme ("war", "hope", "robots"): his tags, bucket names, sourced song notes, then lyrics (one quoted line). Use it for theme mixes; `dj_search` is titles only. (#3984, #10124)
 - Queue-time notes (#3984): dj_play_now / dj_queue / dj_play_next / dj_queue_by / dj_mix end with a CONTEXT block of sourced facts for the first 5 queued songs and any stored link between neighbours (CAUTION on a vetoed pair). Omitted when slow (>1.5 s), unknown, or the queue guard dropped tracks.
 - `dj_what_was_that` — Todd asked "what was that?": names the last (or current) song and has the DJ name it the next 3 plays (#3912).
 - `dj_callouts` — which songs a DJ bridge names: whole-album deep cuts yes, Todd's faster/slower picks and hits no; show or set per pool lane (#3912).

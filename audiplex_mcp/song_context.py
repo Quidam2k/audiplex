@@ -633,6 +633,44 @@ def _fact_candidates(
     return memory.rfl.execute(sql, params).fetchall()
 
 
+def _lyric_candidates(
+    memory: _Memory, query: str, pattern: re.Pattern[str]
+) -> list[tuple[str, str, str]]:
+    """#10124: (song_key, one matching line <=120 chars, source), best first."""
+    if memory.rfl is None:
+        return []
+    sql = "SELECT song_key, plain, source FROM lyrics WHERE status = 'ok'"
+    params: tuple[str, ...] = ()
+    if query.isascii():  # SQLite LIKE folds ASCII case only; else scan all
+        sql += " AND plain LIKE ? ESCAPE '\\'"
+        params = ("%" + _like(query) + "%",)
+    try:
+        rows = memory.rfl.execute(sql, params).fetchall()
+    except sqlite3.Error:
+        return []  # no lyrics table yet: fail open
+    ranked = []
+    for row in rows:
+        lines = [ln.strip() for ln in (row["plain"] or "").splitlines() if ln.strip()]
+        hits = [(ln, m) for ln in lines if (m := pattern.search(ln))]
+        if hits:
+            line, match = hits[0]
+            width = 120
+            if len(lines) == 1:  # a one-line song: at most half, never all of it
+                width = max(len(match.group(0)), min(60, len(line) // 2))
+            quote = _excerpt(line, match, width)
+            ranked.append((-len(hits), row["song_key"], quote, row["source"]))
+    ranked.sort()
+    return [(key, line, source) for _, key, line, source in ranked]
+
+
+def _excerpt(line: str, match: re.Match[str], width: int) -> str:
+    """#10124: up to `width` chars of `line` that keep the matched word."""
+    if len(line) < width:
+        return line
+    start = max(0, min(match.start() - width // 3, len(line) - width))
+    return line[start:start + width].strip()
+
+
 def _candidates(memory: _Memory, seed: Track) -> set[int]:
     candidates: set[int] = set()
     track_id = seed["id"]
@@ -901,7 +939,7 @@ def after(
 
 
 def theme(query: str, n: int = 25) -> list[dict[str, Any]]:
-    """Find tagged tracks, named buckets, then whole-phrase sourced facts."""
+    """Find tagged tracks, named buckets, whole-phrase sourced facts, then lyrics (#10124)."""
     try:
         query = query.strip()
         if len(query) < 3 or n <= 0:
@@ -969,6 +1007,15 @@ def theme(query: str, n: int = 25) -> list[dict[str, Any]]:
                     why = _row_fact(row)
                     for track_id in memory.keys.get(row["song_key"], ()):
                         add(track_id, why)
+            if len(results) >= n:
+                return results
+
+            # #10124: lyrics last. Whole-word, songs with more matching lines
+            # first; the why quotes ONE short line, never the lyric (#8201).
+            for key, line, source in _lyric_candidates(memory, query, pattern):
+                why = _reason("lyrics", line, source or "lyrics")
+                for track_id in memory.keys.get(key, ()):
+                    add(track_id, why)
             return results
     except Exception as exc:
         _error("theme", exc)

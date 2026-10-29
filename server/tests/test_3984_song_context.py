@@ -264,3 +264,109 @@ def test_hook_never_delays_a_queue_call(dbs, monkeypatch):
 
     note, took = asyncio.run(timed())
     assert note == "" and took < 1.0
+
+
+def test_theme_reads_lyrics_one_line(dbs):  # #10124
+    plain = "First verse here\nThe vampire walks at night\nOther line"  # #10124
+    with sqlite3.connect(os.environ["RFL_DJ_NOTES_DB"]) as c:  # #10124
+        c.execute("CREATE TABLE lyrics(song_key TEXT PRIMARY KEY, plain TEXT, status TEXT, source TEXT, lrclib_id INT)")  # #10124
+        c.execute("INSERT INTO lyrics VALUES (?, ?, 'ok', 'lrclib', 1)", (_load_store().song_key("Delta", "Year Mate"), plain))  # #10124
+    sc._reset_cache()  # #10124
+    result = sc.theme("vampire")  # #10124
+    assert len(result) == 1  # #10124
+    assert result[0]["track_id"] == 5  # #10124
+    assert result[0]["why"] == {"kind": "lyrics", "text": "The vampire walks at night", "source": "lrclib", "url": ""}  # #10124
+    blob = json.dumps(result)  # #10124
+    assert "First verse here" not in blob  # #10124
+    assert "Other line" not in blob  # #10124
+
+
+def test_theme_lyrics_whole_word(dbs):  # #10124
+    with sqlite3.connect(os.environ["RFL_DJ_NOTES_DB"]) as c:  # #10124
+        c.execute("CREATE TABLE lyrics(song_key TEXT PRIMARY KEY, plain TEXT, status TEXT, source TEXT, lrclib_id INT)")  # #10124
+        c.execute("INSERT INTO lyrics VALUES (?, ?, 'ok', 'lrclib', 1)", (_load_store().song_key("Delta", "Year Mate"), "Pure witchcraft tonight"))  # #10124
+    sc._reset_cache()  # #10124
+    assert sc.theme("witch") == []  # #10124
+    assert [h["track_id"] for h in sc.theme("witchcraft")] == [5]  # #10124
+
+
+def test_theme_notes_outrank_lyrics(dbs):  # #10124
+    store = _load_store()  # #10124
+    with sqlite3.connect(os.environ["RFL_DJ_NOTES_DB"]) as c:  # #10124
+        c.execute("CREATE TABLE lyrics(song_key TEXT PRIMARY KEY, plain TEXT, status TEXT, source TEXT, lrclib_id INT)")  # #10124
+        c.executemany("INSERT INTO lyrics VALUES (?, ?, 'ok', 'lrclib', ?)", [  # #10124
+            (store.song_key("Eta", "Never Next"), "We march to war again", 1),  # #10124
+            (store.song_key("Theta", "War Cry"), "War is coming", 2),  # #10124
+        ])  # #10124
+    sc._reset_cache()  # #10124
+    result = sc.theme("war")  # #10124
+    assert result[0]["track_id"] == 11  # #10124
+    assert result[0]["why"]["kind"] == "theme"  # #10124
+    assert any(h["track_id"] == 9 and h["why"]["kind"] == "lyrics" for h in result)  # #10124
+    ids = [h["track_id"] for h in result]  # #10124
+    assert sum(tid in {11, 12} for tid in ids) == 1  # #10124
+    assert 13 not in ids  # #10124
+
+
+def test_theme_lyrics_rank_by_matching_lines(dbs):  # #10124
+    store = _load_store()  # #10124
+    with sqlite3.connect(os.environ["RFL_DJ_NOTES_DB"]) as c:  # #10124
+        c.execute("CREATE TABLE lyrics(song_key TEXT PRIMARY KEY, plain TEXT, status TEXT, source TEXT, lrclib_id INT)")  # #10124
+        c.executemany("INSERT INTO lyrics VALUES (?, ?, 'ok', 'lrclib', ?)", [  # #10124
+            (store.song_key("Delta", "Year Mate"), "A ghost walks alone", 1),  # #10124
+            (store.song_key("Gamma", "Writer Twin"), "A ghost at the window\nThe ghost calls out\nA ghost fades away", 2),  # #10124
+        ])  # #10124
+    sc._reset_cache()  # #10124
+    assert [h["track_id"] for h in sc.theme("ghost")] == [3, 5]  # #10124
+
+
+def test_theme_lyrics_skip_non_ok_and_banned(dbs):  # #10124
+    store = _load_store()  # #10124
+    with sqlite3.connect(os.environ["RFL_DJ_NOTES_DB"]) as c:  # #10124
+        c.execute("CREATE TABLE lyrics(song_key TEXT PRIMARY KEY, plain TEXT, status TEXT, source TEXT, lrclib_id INT)")  # #10124
+        c.executemany("INSERT INTO lyrics VALUES (?, ?, ?, 'lrclib', ?)", [  # #10124
+            (store.song_key("Delta", "Year Mate"), "A phantom passes by", "instrumental", 1),  # #10124
+            (store.song_key("Gamma", "Writer Twin"), "The phantom waits outside", "missing", 2),  # #10124
+            (store.song_key("Epsilon", "Banned One"), "A phantom in the night", "ok", 3),  # #10124
+        ])  # #10124
+    sc._reset_cache()  # #10124
+    assert sc.theme("phantom") == []  # #10124
+
+
+def test_theme_lyric_line_capped(dbs):  # #10124
+    plain = "vampire " + "x" * 292  # #10124
+    assert len(plain) == 300  # #10124
+    with sqlite3.connect(os.environ["RFL_DJ_NOTES_DB"]) as c:  # #10124
+        c.execute("CREATE TABLE lyrics(song_key TEXT PRIMARY KEY, plain TEXT, status TEXT, source TEXT, lrclib_id INT)")  # #10124
+        c.execute("INSERT INTO lyrics VALUES (?, ?, 'ok', 'lrclib', 1)", (_load_store().song_key("Delta", "Year Mate"), plain))  # #10124
+    sc._reset_cache()  # #10124
+    result = sc.theme("vampire")  # #10124
+    assert [h["track_id"] for h in result] == [5]  # #10124
+    assert result[0]["why"]["kind"] == "lyrics"  # #10124
+    assert len(result[0]["why"]["text"]) <= 60 and "vampire" in result[0]["why"]["text"]  # #10124: one-line song, half at most
+
+
+def _add_lyrics(rows):  # #10124
+    with sqlite3.connect(os.environ["RFL_DJ_NOTES_DB"]) as c:  # #10124
+        c.execute("CREATE TABLE lyrics(song_key TEXT PRIMARY KEY, plain TEXT, status TEXT, source TEXT, lrclib_id INT)")  # #10124
+        for (artist, title), plain in rows:  # #10124
+            c.execute("INSERT INTO lyrics VALUES (?, ?, 'ok', 'lrclib', 1)", (_load_store().song_key(artist, title), plain))  # #10124
+    sc._reset_cache()  # #10124
+
+
+def test_theme_lyric_quote_keeps_the_word_and_never_the_whole_song(dbs):  # #10124 (Codex review)
+    long_line = "x " * 70 + "ghost at midnight"  # #10124: match past char 120
+    _add_lyrics([(("Delta", "Year Mate"), "Intro line" + chr(10) + long_line),  # #10124
+                 (("Gamma", "Writer Twin"), "The ghost of you is all I keep tonight")])  # #10124: one-line song
+    whys = {h["track_id"]: h["why"]["text"] for h in sc.theme("ghost")}  # #10124
+    assert "ghost" in whys[5] and len(whys[5]) <= 120  # #10124
+    assert "ghost" in whys[3] and whys[3] != "The ghost of you is all I keep tonight"  # #10124
+
+
+def test_theme_lyrics_unicode_case(dbs):  # #10124 (Codex review): LIKE folds ASCII only
+    _add_lyrics([(("Delta", "Year Mate"), "Un ÉTÉ sans fin")])  # #10124
+    assert [h["track_id"] for h in sc.theme("été")] == [5]  # #10124
+
+
+def test_theme_without_lyrics_table_fails_open(dbs):  # #10124
+    assert [h["track_id"] for h in sc.theme("war")] == [11]  # #10124
