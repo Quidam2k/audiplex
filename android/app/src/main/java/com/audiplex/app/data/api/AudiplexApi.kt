@@ -58,6 +58,9 @@ interface AudiplexApi {
     @POST("api/library/scan")
     suspend fun scanLibrary(): ScanResult
 
+    @POST("api/library/scan/meditations") // #9295: any user, meditation family only
+    suspend fun scanMeditations(): ScanResult
+
     @GET("api/progress")
     suspend fun getAllProgress(): List<ProgressSchema>
 

@@ -41,6 +41,14 @@ class MeditationsViewModel @Inject constructor(
         load()
     }
 
+    /** #9295: pick up meditation files added since the list was loaded. */
+    fun refresh() {
+        viewModelScope.launch {
+            try { apiHolder.api?.scanMeditations() } catch (_: Exception) { }
+            load()
+        }
+    }
+
     fun load() {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, error = null)

@@ -18,7 +18,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
-enum class LibraryFilterMode { All, Favorites, ToRead }
+enum class LibraryFilterMode { All, Favorites, ToRead, Recent, Authors, Series } // #10071
 
 sealed class LibraryUiState {
     data object Loading : LibraryUiState()
@@ -157,14 +157,6 @@ class LibraryViewModel @Inject constructor(
     fun setFilterMode(mode: LibraryFilterMode) {
         val current = (_uiState.value as? LibraryUiState.Success) ?: return
         _uiState.value = current.copy(filterMode = mode)
-    }
-
-    fun filterByAuthor(author: String) {
-        loadLibrary(filterAuthor = author)
-    }
-
-    fun filterBySeries(series: String) {
-        loadLibrary(filterSeries = series)
     }
 
     fun toggleBookFavorite(bookId: Int) {

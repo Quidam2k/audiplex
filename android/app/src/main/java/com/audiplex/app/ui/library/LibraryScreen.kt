@@ -3,6 +3,8 @@ package com.audiplex.app.ui.library
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +29,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Card
@@ -47,9 +51,15 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.runtime.toMutableStateList
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,6 +75,7 @@ import com.audiplex.app.data.api.AudiplexApi
 import com.audiplex.app.data.api.BookSummary
 import com.audiplex.app.ui.common.ItemActionSheet
 import com.audiplex.app.ui.meditations.MeditationsTab // #839
+import com.audiplex.app.ui.meditations.MeditationsViewModel
 import com.audiplex.app.ui.common.ItemKind
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -149,8 +160,6 @@ fun LibraryScreen(
                     baseUrl = viewModel.getBaseUrl(),
                     onBookClick = onBookClick,
                     onBookLongPress = { pendingBook = it },
-                    onAuthorClick = { viewModel.filterByAuthor(it) },
-                    onSeriesClick = { viewModel.filterBySeries(it) },
                     onClearFilter = { viewModel.clearFilter() },
                     onFilterModeChange = { viewModel.setFilterMode(it) },
                     onRefresh = { viewModel.refreshLibrary() }
@@ -184,8 +193,6 @@ private fun LibraryContent(
     baseUrl: String,
     onBookClick: (Int) -> Unit,
     onBookLongPress: (BookSummary) -> Unit,
-    onAuthorClick: (String) -> Unit,
-    onSeriesClick: (String) -> Unit,
     onClearFilter: () -> Unit,
     onFilterModeChange: (LibraryFilterMode) -> Unit,
     onRefresh: () -> Unit
@@ -231,11 +238,12 @@ private fun LibraryContent(
         }
     }
 
-    // Books-tab-only: filter mode chips (All / Favorites / Want to read).
+    // Books-tab-only: filter mode chips. #10071: six chips are wider than a phone, so the row scrolls.
     if (selectedTab == 0) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 12.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -261,20 +269,48 @@ private fun LibraryContent(
                     { Icon(Icons.Default.Bookmark, contentDescription = null, modifier = Modifier.size(FilterChipDefaults.IconSize)) }
                 } else null
             )
+            for ((mode, label) in listOf(
+                LibraryFilterMode.Recent to "Recently added",
+                LibraryFilterMode.Authors to "Authors",
+                LibraryFilterMode.Series to "Series"
+            )) {
+                FilterChip(
+                    selected = state.filterMode == mode,
+                    onClick = { onFilterModeChange(mode) },
+                    label = { Text(label) }
+                )
+            }
         }
     }
 
+    // #9295: on the Meditations tab, pull-to-refresh reloads the meditations.
+    val meditationsViewModel: MeditationsViewModel = hiltViewModel()
+    val authorGroups = remember(state.books) { groupByAuthor(state.books) }
+    val seriesGroups = remember(state.books) { groupBySeries(state.books) }
+
     PullToRefreshBox(
         isRefreshing = isRefreshing,
-        onRefresh = onRefresh,
+        onRefresh = { if (selectedTab == 3) meditationsViewModel.refresh() else onRefresh() },
         modifier = Modifier.fillMaxSize()
     ) {
         when (selectedTab) {
-            0 -> {
+            0 -> if (state.filterMode == LibraryFilterMode.Authors || state.filterMode == LibraryFilterMode.Series) {
+                val bySeries = state.filterMode == LibraryFilterMode.Series
+                key(bySeries) { // separate expand/scroll state per chip
+                    ExpandableGroupList(
+                        groups = if (bySeries) seriesGroups else authorGroups,
+                        bySeries = bySeries,
+                        baseUrl = baseUrl,
+                        onBookClick = onBookClick,
+                        onBookLongPress = onBookLongPress
+                    )
+                }
+            } else {
                 val filteredBooks = when (state.filterMode) {
-                    LibraryFilterMode.All -> state.books
                     LibraryFilterMode.Favorites -> state.books.filter { it.id.toString() in favoriteBookIds }
                     LibraryFilterMode.ToRead -> state.books.filter { it.id.toString() in toReadBookIds }
+                    LibraryFilterMode.Recent -> recentlyAdded(state.books)
+                    else -> state.books
                 }
                 BooksTab(
                     books = filteredBooks,
@@ -285,26 +321,16 @@ private fun LibraryContent(
                     onBookClick = onBookClick,
                     onBookLongPress = onBookLongPress,
                     emptyMessage = when (state.filterMode) {
-                        LibraryFilterMode.All -> null
                         LibraryFilterMode.Favorites -> "No favorited books yet. Long-press a book cover to favorite it."
                         LibraryFilterMode.ToRead -> "Your Want to read list is empty. Long-press a book to add it."
+                        LibraryFilterMode.Recent -> "Nothing added in the past month."
+                        else -> null
                     }
                 )
             }
-            1 -> AuthorsTab(
-                authors = state.authors,
-                onAuthorClick = { author ->
-                    onAuthorClick(author)
-                    selectedTab = 0
-                }
-            )
-            2 -> SeriesTab(
-                series = state.series,
-                onSeriesClick = { series ->
-                    onSeriesClick(series)
-                    selectedTab = 0
-                }
-            )
+            // #10071: the Authors/Series tabs show the same tree as the chips.
+            1 -> ExpandableGroupList(authorGroups, bySeries = false, baseUrl, onBookClick, onBookLongPress)
+            2 -> ExpandableGroupList(seriesGroups, bySeries = true, baseUrl, onBookClick, onBookLongPress)
             // #839 — meditations get their own tab; the bulk download lives there.
             3 -> MeditationsTab(onMeditationClick = onBookClick)
         }
@@ -511,65 +537,94 @@ private fun BookCoverImage(
     }
 }
 
+/**
+ * #10071: authors or series as a tree. Groups start collapsed; tapping one
+ * expands its books in place (series in reading order, see LibraryGrouping).
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun AuthorsTab(
-    authors: List<com.audiplex.app.data.api.AuthorSchema>,
-    onAuthorClick: (String) -> Unit
+private fun ExpandableGroupList(
+    groups: List<BookGroup>,
+    bySeries: Boolean,
+    baseUrl: String,
+    onBookClick: (Int) -> Unit,
+    onBookLongPress: (BookSummary) -> Unit
 ) {
-    LazyColumn(
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        items(authors) { author ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onAuthorClick(author.name) }
-                    .padding(vertical = 12.dp, horizontal = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = author.name,
-                    style = MaterialTheme.typography.bodyLarge,
-                    modifier = Modifier.weight(1f)
-                )
-                Text(
-                    text = "${author.bookCount} books",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-    }
-}
+    val expanded = rememberSaveable(
+        saver = listSaver<SnapshotStateList<String>, String>(
+            save = { it.toList() },
+            restore = { it.toMutableStateList() }
+        )
+    ) { mutableStateListOf() }
 
-@Composable
-private fun SeriesTab(
-    series: List<com.audiplex.app.data.api.SeriesSchema>,
-    onSeriesClick: (String) -> Unit
-) {
-    LazyColumn(
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        items(series) { s ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onSeriesClick(s.name) }
-                    .padding(vertical = 12.dp, horizontal = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = s.name,
-                    style = MaterialTheme.typography.bodyLarge,
-                    modifier = Modifier.weight(1f)
-                )
-                Text(
-                    text = "${s.bookCount} books",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+    LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+        groups.forEach { group ->
+            val open = group.name in expanded
+            item(key = "group:${group.name}") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { if (open) expanded.remove(group.name) else expanded.add(group.name) }
+                        .padding(vertical = 12.dp, horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = group.name,
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = if (group.books.size == 1) "1 book" else "${group.books.size} books",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Icon(
+                        if (open) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = if (open) "Collapse" else "Expand",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 8.dp)
+                    )
+                }
+            }
+            if (open) {
+                items(group.books, key = { "book:${group.name}:${it.id}" }) { book ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .combinedClickable(
+                                onClick = { onBookClick(book.id) },
+                                onLongClick = { onBookLongPress(book) }
+                            )
+                            .padding(start = 32.dp, end = 16.dp, top = 6.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        BookCoverImage(
+                            book = book,
+                            baseUrl = baseUrl,
+                            modifier = Modifier.size(48.dp).clip(RoundedCornerShape(6.dp))
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                text = book.title,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            groupBookLabel(book, bySeries)?.let { label ->
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
     }
