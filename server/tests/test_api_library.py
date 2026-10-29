@@ -54,6 +54,27 @@ class TestListBooks:
         assert len(data) == 1
         assert data[0]["title"] == "X"
 
+    def test_series_filter_reads_in_sequence_order(self, client, db_engine):
+        # #10071: Dungeon Crawler Carl's titles sort 2,1,5,3,... by title.
+        from sqlalchemy.orm import sessionmaker
+        Session = sessionmaker(bind=db_engine)
+        session = Session()
+        for i, (title, seq) in enumerate([
+            ("Carl's Doomsday", "2"), ("Dungeon Crawler Carl", "1"), ("The Ruin", "10"),
+            ("Novella", "2.5"), ("Anthology", None), ("The Butcher", "5"),
+        ]):
+            session.add(Book(title=title, series="DCC", series_sequence=seq,
+                             file_path=f"/{i}.m4b", file_size=1, file_hash=str(i)))
+        session.commit()
+        session.close()
+
+        titles = [b["title"] for b in client.get("/api/library/books?series=DCC").json()]
+        assert titles == ["Dungeon Crawler Carl", "Carl's Doomsday", "Novella",
+                          "The Butcher", "The Ruin", "Anthology"]
+        # The unfiltered grid stays in title order (Todd, msg 51746).
+        all_titles = [b["title"] for b in client.get("/api/library/books").json()]
+        assert all_titles == sorted(all_titles)
+
     def test_filter_books_by_category(self, client, db_engine):
         from sqlalchemy.orm import sessionmaker
         Session = sessionmaker(bind=db_engine)

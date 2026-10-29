@@ -40,7 +40,18 @@ def list_books(
         query = query.filter(Book.series == series)
     if category:
         query = query.filter(Book.category == category)
-    return query.order_by(Book.title).all()
+    books = query.order_by(Book.title).all()
+    if series:  # #10071: a series reads in sequence order, not title order
+        books.sort(key=lambda b: series_seq_key(b.series_sequence))
+    return books
+
+
+def series_seq_key(seq: str | None) -> float:
+    """'2' < '2.5' < '10'; a missing or unparseable sequence sorts last."""
+    try:
+        return float(seq)
+    except (TypeError, ValueError):
+        return float("inf")
 
 
 @router.get("/sleep-beds")
@@ -158,6 +169,27 @@ def trigger_audiobook_scan(db: Session = Depends(get_db), user: User = Depends(g
             errors=["No audiobook_clean roots are configured."],
         )
     return scan_library(db, book_roots, settings.cover_cache_dir)
+
+
+@router.post("/scan/meditations", response_model=ScanResultSchema)
+def trigger_meditation_scan(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Rescan ONLY the meditation roots, sweep included (#9295). Any authenticated caller.
+
+    Same #842 scoping as /scan/audiobooks. One extra guard: an empty or
+    unreadable meditation folder (a drive hiccup) scans and sweeps nothing,
+    so "zero files" is never read as "every meditation was deleted".
+    """
+    from audiplex.meditation_watch import snapshot
+
+    settings = get_settings()
+    roots = [r for r in settings.library_roots if getattr(r, "category", None) == "meditation"]
+    if not roots:
+        return ScanResultSchema(added=0, updated=0, removed=0,
+                                errors=["No meditation roots are configured."])
+    if snapshot([r.path for r in roots]) is None:
+        return ScanResultSchema(added=0, updated=0, removed=0, errors=[
+            "Meditation folder is empty or unreadable; nothing scanned or removed."])
+    return scan_library(db, roots, settings.cover_cache_dir)
 
 
 class EnrichResultSchema(BaseModel):

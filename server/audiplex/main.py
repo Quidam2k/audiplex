@@ -61,12 +61,17 @@ async def lifespan(app: FastAPI):
     from audiplex import scheduled_stop
 
     stop_ticker = asyncio.create_task(scheduled_stop.run_ticker(bus))
+    # #9295: new meditation files appear without a restart (add-only).
+    from audiplex import meditation_watch
+
+    meditation_ticker = asyncio.create_task(meditation_watch.run_ticker())
     _resume_music_video_worker(settings)
     try:
         yield
     finally:
         ticker.cancel()
         stop_ticker.cancel()
+        meditation_ticker.cancel()
         dj_triggers.set_loop(None)
 
 
