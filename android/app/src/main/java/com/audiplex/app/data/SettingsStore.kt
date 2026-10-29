@@ -57,6 +57,7 @@ class SettingsStore @Inject constructor(
     private val audiobookVolumeKey = floatPreferencesKey("audiobook_volume")
     private val lastSleepBedIdKey = intPreferencesKey("last_sleep_bed_id")  // #3953
     private val sleepBedVolumeKey = floatPreferencesKey("sleep_bed_volume")  // #4018
+    private val sleepBedHeadroomMigratedKey = booleanPreferencesKey("sleep_bed_headroom_migrated")  // #5131
     private val skipSecondsKey = intPreferencesKey("skip_seconds")  // #4220
 
     override val serverUrl: Flow<String> = context.dataStore.data.map { prefs ->
@@ -168,6 +169,16 @@ class SettingsStore @Inject constructor(
 
     suspend fun setSleepBedVolume(volume: Float) {
         context.dataStore.edit { prefs -> prefs[sleepBedVolumeKey] = volume.coerceIn(0f, 1f) }
+    }
+
+    /** #5131: once, rescale the saved bed level so the old maximum sits at the slider's middle. */
+    suspend fun migrateSleepBedHeadroom() {
+        context.dataStore.edit { prefs ->
+            com.audiplex.app.playback.SleepBedRules.migrateStoredLevel(
+                prefs[sleepBedVolumeKey], prefs[sleepBedHeadroomMigratedKey] == true,
+            )?.let { prefs[sleepBedVolumeKey] = it }
+            prefs[sleepBedHeadroomMigratedKey] = true
+        }
     }
 
     suspend fun setServerUrl(url: String) {

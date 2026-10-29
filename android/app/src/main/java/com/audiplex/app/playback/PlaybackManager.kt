@@ -186,7 +186,10 @@ class PlaybackManager @Inject constructor(
                 if (_playerKind.value == PlayerKind.Audiobook) applyVolumeForCurrentKind()
             }
         }
-        scope.launch { settingsStore.sleepBedVolume.collect { sleepBedLevel = it } }  // #4018
+        scope.launch {
+            settingsStore.migrateSleepBedHeadroom()  // #5131: before the first read, so the old max reads as the middle
+            settingsStore.sleepBedVolume.collect { sleepBedLevel = it }  // #4018
+        }
     }
 
     /** #997: the base volume for [kind]. Music and Stream share the music dial. */
@@ -384,7 +387,10 @@ class PlaybackManager @Inject constructor(
     private var bedStartedAtMs = 0L
     private var bedRecovering = false
     private var bedRetryJob: Job? = null
-    private var bedCurrentVolume = 0f           // survives a restart of the bed player
+    private var bedCurrentVolume = 0f           // slider scale (#5131); what the bed plays at right now
+    private var bedTargetLevel = 0f             // #5131: where it is headed (a fade-in may be under way); survives a restart
+    private var bedEnhancer: LoudnessEnhancer? = null  // #5131: the top half of the slider; one per bed player
+    private var bedRampJob: Job? = null         // #5131
     private val bedDownloads = mutableSetOf<String>()
     private var sleepTimerJob: Job? = null
     // #3714: when the armed sleep fade STARTS (wall clock), null when none is
@@ -438,6 +444,7 @@ class PlaybackManager @Inject constructor(
         "bed" to "${_bedState.value}",
         "bed_url" to (bedUrl ?: ""),
         "bed_level" to "$bedCurrentVolume",
+        "bed_gain_db" to "${SleepBedRules.bedGain(bedCurrentVolume).boostDb}",  // #5131
         "sleep_armed" to "${_sleepEndsAtMs.value != null}",
     )
 
@@ -1544,7 +1551,7 @@ class PlaybackManager @Inject constructor(
 
     @OptIn(UnstableApi::class)
     private fun startBedPlayer(url: String, volume: Float) {
-        bedPlayer?.release()
+        disposeBedPlayer()
         val local = bedCacheFile(url).takeIf { it.exists() }
         // DefaultDataSource reads the file:// local copy and hands http(s) to the auth'd client.
         val dataSourceFactory = DefaultDataSource.Factory(context, OkHttpDataSource.Factory(okHttpClient))
@@ -1576,8 +1583,15 @@ class PlaybackManager @Inject constructor(
             }
         })
         player.repeatMode = Player.REPEAT_MODE_ONE
-        bedCurrentVolume = volume.coerceIn(0f, 1f)
-        player.volume = bedCurrentVolume
+        // #5131: a fresh enhancer at 0 dB (nothing carries over). A boosted start fades in, never cold at
+        // full boost; an unboosted one (every DJ bed_play, incl. the chimes) starts at its level as before.
+        bedTargetLevel = volume.coerceIn(0f, 1f)
+        if (SleepBedRules.needsRampIn(bedTargetLevel)) {
+            applyBedLevel(0f)
+            rampBedTo(bedTargetLevel)
+        } else {
+            applyBedLevel(bedTargetLevel)
+        }
         player.setMediaItem(MediaItem.fromUri(local?.let { Uri.fromFile(it) } ?: Uri.parse(url)))
         player.prepare()
         player.play()
@@ -1594,8 +1608,7 @@ class PlaybackManager @Inject constructor(
             SleepBedRules.cacheFileName(it) != SleepBedRules.cacheFileName(url) && bedCacheFile(it).exists()
         }
         val action = SleepBedRules.recoveryFor(bedFailures, bedOnFallback, fallback != null)
-        bedPlayer?.release()
-        bedPlayer = null
+        disposeBedPlayer()
         val detail = mapOf(
             "url" to url, "local" to wasLocal.toString(), "failures" to bedFailures.toString(),
             "error" to error.errorCodeName, "action" to action.toString(),
@@ -1606,14 +1619,14 @@ class PlaybackManager @Inject constructor(
                 bedRecovering = true
                 bedRetryJob = scope.launch {
                     delay(action.delayMs)
-                    if (bedWanted) startBedPlayer(url, bedCurrentVolume)
+                    if (bedWanted) startBedPlayer(url, bedTargetLevel)
                 }
             }
             SleepBedRules.Recovery.Fallback -> {
                 clientLog.report("error", "bed_fallback", "sleep bed failed; playing the local brown-noise bed", detail)
                 bedOnFallback = true
                 bedFailures = 0
-                startBedPlayer(fallback!!, bedCurrentVolume)
+                startBedPlayer(fallback!!, bedTargetLevel)
                 return
             }
             SleepBedRules.Recovery.GiveUp -> {
@@ -1645,12 +1658,63 @@ class PlaybackManager @Inject constructor(
     /** #4018: the dialog's one-tap Restart bed: same bed, same volume. */
     fun restartBed() {
         val url = bedUrl ?: return
-        bedPlay(url, bedCurrentVolume.takeIf { it > 0f } ?: sleepBedLevel)
+        bedPlay(url, bedTargetLevel.takeIf { it > 0f } ?: sleepBedLevel)
     }
 
+    /** [volume] is on the slider scale (#5131): 0.5 is the old full volume, above it the enhancer boosts. */
     fun bedVolume(volume: Float) {
-        bedCurrentVolume = volume.coerceIn(0f, 1f)
-        bedPlayer?.volume = bedCurrentVolume
+        bedRampJob?.cancel()
+        bedTargetLevel = volume.coerceIn(0f, 1f)
+        applyBedLevel(bedTargetLevel)
+    }
+
+    /**
+     * #5131: every bed level change goes through here, so fades, ducks and the
+     * slider move the enhancer gain along with the player volume.
+     */
+    private fun applyBedLevel(level: Float) {
+        bedCurrentVolume = level.coerceIn(0f, 1f)
+        val player = bedPlayer ?: return
+        val gain = SleepBedRules.bedGain(bedCurrentVolume)
+        player.volume = gain.volume
+        try {
+            if (gain.boostDb > 0f && bedEnhancer == null) {
+                bedEnhancer = LoudnessEnhancer(player.audioSessionId).apply { setTargetGain(0) }
+            }
+            bedEnhancer?.setTargetGain((gain.boostDb * 100).toInt())  // millibels; the built-in limiter guards it
+            bedEnhancer?.enabled = gain.boostDb > 0f
+        } catch (_: Exception) {
+            releaseBedEnhancer()
+        }
+    }
+
+    /** #5131: fade the bed from where it is to [level] over RAMP_MS. */
+    private fun rampBedTo(level: Float) {
+        bedRampJob?.cancel()
+        val steps = SleepBedRules.rampLevels(bedCurrentVolume, level)
+        bedRampJob = scope.launch {
+            for (l in steps) {
+                delay(SleepBedRules.RAMP_MS / steps.size)
+                applyBedLevel(l)
+            }
+        }
+    }
+
+    // #5131: same caution as #4222, devices can throw while disabling or releasing an effect.
+    private fun releaseBedEnhancer() {
+        val enhancer = bedEnhancer
+        bedEnhancer = null
+        try { enhancer?.enabled = false } catch (_: Exception) { }
+        try { enhancer?.release() } catch (_: Exception) { }
+    }
+
+    /** #5131: the bed player and its enhancer go together. */
+    private fun disposeBedPlayer() {
+        bedRampJob?.cancel()
+        bedRampJob = null
+        releaseBedEnhancer()
+        bedPlayer?.release()
+        bedPlayer = null
     }
 
     /** #4018: the slider. Saved, and applied live unless a crossfade is still waiting to bring the bed up. */
@@ -1700,9 +1764,9 @@ class PlaybackManager @Inject constructor(
         bedRetryJob?.cancel()
         bedRetryJob = null
         bedRecovering = false
-        bedPlayer?.release()
-        bedPlayer = null
+        disposeBedPlayer()
         bedCurrentVolume = 0f
+        bedTargetLevel = 0f  // #5131
         refreshBedState()
     }
 
@@ -1773,7 +1837,7 @@ class PlaybackManager @Inject constructor(
     /** Cancel the sleep button's timer; a bed still waiting silently for the crossfade goes too. */
     fun cancelSleepMode() {
         cancelSleepTimer()
-        if (bedWanted && bedCurrentVolume == 0f) bedStop()
+        if (bedWanted && bedTargetLevel == 0f) bedStop()  // #5131: the target, so a fade-in under way is not "waiting silently"
     }
 
     /** [source] says who asked (#3552): it rides the pause_source client log. */

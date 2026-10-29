@@ -537,7 +537,7 @@ class DjCommandClient @Inject constructor(
             // cases above are touched.
             "bed_play" -> {
                 val url = cmd.payload?.url ?: return badPayload("url")
-                val volume = cmd.payload.volume ?: 0.5f
+                val volume = SleepBedRules.fromDjLevel(cmd.payload.volume ?: 0.5f)  // #5131: old 0..1 meaning
                 // #3367: a relative url (a library book) resolves against OUR base URL.
                 val absolute = SleepFade.resolveUrl(url, baseUrl)
                 withContext(Dispatchers.Main) { playbackManager.bedPlay(absolute, volume) }
@@ -545,12 +545,12 @@ class DjCommandClient @Inject constructor(
             "bed_stop" -> withContext(Dispatchers.Main) { playbackManager.bedStop() }
             "bed_volume" -> {
                 val volume = cmd.payload?.volume ?: return badPayload("volume")
-                withContext(Dispatchers.Main) { playbackManager.bedVolume(volume) }
+                withContext(Dispatchers.Main) { playbackManager.bedVolume(SleepBedRules.fromDjLevel(volume)) }  // #5131
             }
             "sleep_timer" -> {
                 val minutes = cmd.payload?.minutes ?: return badPayload("minutes")
                 val fadeSeconds = cmd.payload.fadeSeconds ?: 120
-                val bedFadeTo = cmd.payload.bedFadeTo
+                val bedFadeTo = cmd.payload.bedFadeTo?.let { SleepBedRules.fromDjLevel(it) }  // #5131
                 withContext(Dispatchers.Main) { playbackManager.startSleepTimer(minutes, fadeSeconds, bedFadeTo) }
             }
             "cancel_sleep_timer" -> withContext(Dispatchers.Main) { playbackManager.cancelSleepTimer() }

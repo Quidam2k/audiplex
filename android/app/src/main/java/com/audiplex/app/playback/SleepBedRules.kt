@@ -21,8 +21,56 @@ enum class BedState {
 /** #4018: pure decisions for keeping the looping sleep bed alive overnight. */
 object SleepBedRules {
 
-    /** #4018: the bed's own level, independent of the book; previously fixed at 0.5. */
-    const val DEFAULT_VOLUME = 0.9f
+    /**
+     * #4018: the bed's own level, independent of the book; previously fixed at 0.5.
+     * #5131: 0.45 on the new scale is the old 0.9 (player volume 0.9, no boost).
+     */
+    const val DEFAULT_VOLUME = 0.45f
+
+    /** #5131: the slider position that equals the old maximum (player volume 1.0, no boost). */
+    const val UNITY_LEVEL = 0.5f
+
+    /** #5131: LoudnessEnhancer gain at the top of the slider; its limiter guards it. */
+    const val MAX_BOOST_DB = 12f
+
+    /** #5131: what one slider level asks of the bed player and its LoudnessEnhancer. */
+    data class BedGain(val volume: Float, val boostDb: Float)
+
+    /**
+     * #5131: the bottom half of the slider is player volume 0..1 at 0 dB; the top
+     * half holds volume at 1 and adds 0..+12 dB, linear in dB. NaN reads as 0.
+     */
+    fun bedGain(level: Float): BedGain {
+        val l = if (level.isNaN()) 0f else level.coerceIn(0f, 1f)
+        return if (l <= UNITY_LEVEL) BedGain(l / UNITY_LEVEL, 0f)
+        else BedGain(1f, (l - UNITY_LEVEL) / (1f - UNITY_LEVEL) * MAX_BOOST_DB)
+    }
+
+    /** #5131: DJ bed levels keep their old 0..1 meaning (1 = player volume 1), so they never boost. */
+    fun fromDjLevel(djLevel: Float): Float =
+        if (djLevel.isNaN()) 0f else djLevel.coerceIn(0f, 1f) * UNITY_LEVEL
+
+    /**
+     * #5131: one-time rescale of the saved slider value, so last night's level sounds
+     * the same. Returns the value to write, or null when there is nothing to write;
+     * the caller sets the migrated flag either way.
+     */
+    fun migrateStoredLevel(stored: Float?, alreadyMigrated: Boolean): Float? =
+        if (alreadyMigrated || stored == null) null else stored.coerceIn(0f, 1f) * UNITY_LEVEL
+
+    /** #5131: a bed that starts at a level fades in over this long, never cold at full boost. */
+    const val RAMP_MS = 8_000L
+    const val RAMP_STEPS = 32
+
+    /** #5131: only a boosted start fades in; DJ levels (chimes ride bed_play) never boost, so never wait. */
+    fun needsRampIn(level: Float): Boolean = bedGain(level).boostDb > 0f
+
+    /** #5131: [steps] levels after [from], ending exactly at [to] (clamped 0..1). */
+    fun rampLevels(from: Float, to: Float, steps: Int = RAMP_STEPS): List<Float> {
+        val n = steps.coerceAtLeast(1)
+        val end = to.coerceIn(0f, 1f)
+        return (1..n).map { i -> if (i == n) end else (from + (to - from) * i / n).coerceIn(0f, 1f) }
+    }
 
     /** #4018: retry delays for each bed, including the fallback. */
     val RETRY_DELAYS_MS = listOf(10_000L, 30_000L, 60_000L)
