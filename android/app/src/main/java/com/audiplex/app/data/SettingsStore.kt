@@ -12,6 +12,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -58,6 +59,12 @@ class SettingsStore @Inject constructor(
     private val lastSleepBedIdKey = intPreferencesKey("last_sleep_bed_id")  // #3953
     private val sleepBedVolumeKey = floatPreferencesKey("sleep_bed_volume")  // #4018
     private val sleepBedHeadroomMigratedKey = booleanPreferencesKey("sleep_bed_headroom_migrated")  // #5131
+    private val sleepBookLevelKey = floatPreferencesKey("sleep_book_level")  // #5282
+    private val sleepMixAttenuateMigratedKey = booleanPreferencesKey("sleep_mix_attenuate_migrated")  // #5282
+    private val sleepHoldIndexKey = intPreferencesKey("sleep_hold_index")  // #5282
+    private val sleepHoldRouteKey = stringPreferencesKey("sleep_hold_route")  // #5282
+    private val sleepHoldAtKey = longPreferencesKey("sleep_hold_at")  // #5282
+    private val sleepHoldFinishedKey = booleanPreferencesKey("sleep_hold_finished")  // #5282
     private val skipSecondsKey = intPreferencesKey("skip_seconds")  // #4220
 
     override val serverUrl: Flow<String> = context.dataStore.data.map { prefs ->
@@ -171,13 +178,53 @@ class SettingsStore @Inject constructor(
         context.dataStore.edit { prefs -> prefs[sleepBedVolumeKey] = volume.coerceIn(0f, 1f) }
     }
 
-    /** #5131: once, rescale the saved bed level so the old maximum sits at the slider's middle. */
-    suspend fun migrateSleepBedHeadroom() {
+    /** #5282: "Book at bedtime", applied only around sleep mode; the day dial is untouched. */
+    val sleepBookLevel: Flow<Float> = context.dataStore.data.map { prefs ->
+        prefs[sleepBookLevelKey] ?: com.audiplex.app.playback.SleepBedRules.DEFAULT_BOOK_LEVEL
+    }
+
+    suspend fun setSleepBookLevel(level: Float) {
+        context.dataStore.edit { prefs -> prefs[sleepBookLevelKey] = level.coerceIn(0f, 1f) }
+    }
+
+    /** #5282: once, move the saved bed boost onto the book, keeping the balance he last set. */
+    suspend fun migrateSleepMixToAttenuate() {
         context.dataStore.edit { prefs ->
-            com.audiplex.app.playback.SleepBedRules.migrateStoredLevel(
-                prefs[sleepBedVolumeKey], prefs[sleepBedHeadroomMigratedKey] == true,
-            )?.let { prefs[sleepBedVolumeKey] = it }
-            prefs[sleepBedHeadroomMigratedKey] = true
+            com.audiplex.app.playback.SleepBedRules.migrateToAttenuate(
+                prefs[sleepBedVolumeKey],
+                prefs[sleepBedHeadroomMigratedKey] == true,
+                prefs[sleepMixAttenuateMigratedKey] == true,
+            )?.let {
+                prefs[sleepBedVolumeKey] = it.bedLevel
+                prefs[sleepBookLevelKey] = it.bookLevel
+            }
+            prefs[sleepMixAttenuateMigratedKey] = true
+        }
+    }
+
+    /** #5282: survives the process dying overnight, because the next morning's first sound is the point. */
+    suspend fun sleepHold(): com.audiplex.app.playback.SleepBedRules.SleepHold? {
+        val prefs = context.dataStore.data.first()
+        val index = prefs[sleepHoldIndexKey] ?: return null
+        val route = prefs[sleepHoldRouteKey] ?: return null
+        return com.audiplex.app.playback.SleepBedRules.SleepHold(
+            index, route, prefs[sleepHoldAtKey] ?: 0L, prefs[sleepHoldFinishedKey] == true,
+        )
+    }
+
+    suspend fun setSleepHold(hold: com.audiplex.app.playback.SleepBedRules.SleepHold?) {
+        context.dataStore.edit { prefs ->
+            if (hold == null) {
+                prefs.remove(sleepHoldIndexKey)
+                prefs.remove(sleepHoldRouteKey)
+                prefs.remove(sleepHoldAtKey)
+                prefs.remove(sleepHoldFinishedKey)
+            } else {
+                prefs[sleepHoldIndexKey] = hold.index
+                prefs[sleepHoldRouteKey] = hold.route
+                prefs[sleepHoldAtKey] = hold.atMs
+                prefs[sleepHoldFinishedKey] = hold.finished
+            }
         }
     }
 

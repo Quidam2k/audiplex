@@ -98,6 +98,8 @@ fun PlayerScreen(
     val sleepMinutesLeft by viewModel.sleepMinutesLeft.collectAsState()
     val bedState by viewModel.bedState.collectAsState()
     val sleepBedLevel by viewModel.sleepBedLevel.collectAsState()
+    val sleepBookLevel by viewModel.sleepBookLevel.collectAsState()  // #5282
+    val mixPreview by viewModel.mixPreview.collectAsState()  // #5282
     val sleepBeds by viewModel.sleepBeds.collectAsState()
     val sleepBedsError by viewModel.sleepBedsError.collectAsState()
     val defaultSleepBedId by viewModel.defaultSleepBedId.collectAsState()
@@ -115,6 +117,11 @@ fun PlayerScreen(
             bedState = bedState,
             bedLevel = sleepBedLevel,
             onBedLevel = { viewModel.setSleepBedLevel(it) },
+            bookLevel = sleepBookLevel,
+            onBookLevel = { viewModel.setSleepBookLevel(it) },
+            previewing = mixPreview,
+            onStartPreview = { viewModel.startMixPreview(it) },
+            onStopPreview = { viewModel.stopMixPreview() },
             onRetryBeds = { viewModel.loadSleepBeds() },
             onStart = { minutes, bed, fadeSeconds -> viewModel.startSleep(minutes, bed, fadeSeconds) },
             onExtend = { viewModel.extendSleep() },

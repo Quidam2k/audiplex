@@ -168,6 +168,12 @@ class PlayerViewModel @Inject constructor(
     val sleepBedLevel: StateFlow<Float> = settingsStore.sleepBedVolume
         .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000), SleepBedRules.DEFAULT_VOLUME)
 
+    /** #5282: "Book at bedtime". */
+    val sleepBookLevel: StateFlow<Float> = settingsStore.sleepBookLevel
+        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000), SleepBedRules.DEFAULT_BOOK_LEVEL)
+
+    val mixPreview: StateFlow<Boolean> = playbackManager.mixPreview
+
     private val _sleepBeds = MutableStateFlow<List<SleepBed>>(emptyList())
     val sleepBeds: StateFlow<List<SleepBed>> = _sleepBeds.asStateFlow()
 
@@ -218,6 +224,9 @@ class PlayerViewModel @Inject constructor(
     fun stopSleepBed() = playbackManager.bedStop()
     fun restartSleepBed() = playbackManager.restartBed()
     fun setSleepBedLevel(level: Float) = playbackManager.setSleepBedLevel(level)
+    fun setSleepBookLevel(level: Float) = playbackManager.setSleepBookLevel(level)
+    fun startMixPreview(bed: SleepBed) = playbackManager.startMixPreview(bed.streamUrl)
+    fun stopMixPreview() = playbackManager.stopMixPreview()
 
     fun formatTime(ms: Long): String {
         val totalSeconds = ms / 1000

@@ -50,9 +50,11 @@ object SleepFade {
         setMain: (Float) -> Unit,
         setBed: (Float) -> Unit,
         pause: () -> Unit,
+        onFadeStart: () -> Unit = {},  // #5282
     ): Boolean {
         delay((minutes * 60_000).toLong().coerceAtLeast(0))
         val startVolume = mainVolume() ?: return false
+        onFadeStart()
         val bedStart = bedVolume()
         val steps = (fadeSeconds.coerceAtLeast(1) * 4).coerceAtLeast(1)
         val stepDelayMs = (fadeSeconds * 1000L / steps).coerceAtLeast(50L)

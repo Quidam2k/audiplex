@@ -20,6 +20,8 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -31,6 +33,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.audiplex.app.data.api.SleepBed
 import com.audiplex.app.playback.BedState
+import com.audiplex.app.playback.SleepBedRules
 import com.audiplex.app.playback.SleepFade
 
 private const val TEST_MINUTES = 1
@@ -46,6 +49,11 @@ fun SleepDialog(
     bedState: BedState,
     bedLevel: Float,
     onBedLevel: (Float) -> Unit,
+    bookLevel: Float,  // #5282
+    onBookLevel: (Float) -> Unit,
+    previewing: Boolean,
+    onStartPreview: (SleepBed) -> Unit,
+    onStopPreview: () -> Unit,
     onRetryBeds: () -> Unit,
     onStart: (minutes: Int, bed: SleepBed?, fadeSeconds: Int) -> Unit,
     onExtend: () -> Unit,
@@ -54,7 +62,10 @@ fun SleepDialog(
     onRestartBed: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val bedRunning = bedState == BedState.Playing || bedState == BedState.Recovering
+    // #5282: Hear the mix runs the bed while he is still choosing, so it is not "the bed is playing".
+    val bedRunning = !previewing && (bedState == BedState.Playing || bedState == BedState.Recovering)
+
+    DisposableEffect(Unit) { onDispose { onStopPreview() } }
 
     var minutes by rememberSaveable { mutableStateOf(30) }
     // Keyed on the default bed (last used, else first; #3953): the list loads
@@ -63,6 +74,14 @@ fun SleepDialog(
     var selectedBedId by rememberSaveable(defaultBedId) {
         mutableStateOf<Int?>(defaultBedId)
     }
+    val selectedBed = beds.firstOrNull { it.id == selectedBedId }
+
+    // #5282: choosing another bed while listening switches to it; Silence ends the preview.
+    LaunchedEffect(selectedBedId) {
+        if (previewing) {
+            if (selectedBed != null) onStartPreview(selectedBed) else onStopPreview()
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -70,13 +89,16 @@ fun SleepDialog(
         text = {
             when {
                 minutesLeft != null -> {
-                    Text(
-                        if (minutesLeft <= 0) {
-                            "Fading out now"
-                        } else {
-                            "Fades out in $minutesLeft min"
-                        }
-                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            if (minutesLeft <= 0) {
+                                "Fading out now"
+                            } else {
+                                "Fades out in $minutesLeft min"
+                            }
+                        )
+                        LevelRow("Book at bedtime", bookLevel, onBookLevel)
+                    }
                 }
 
                 bedRunning -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -171,7 +193,19 @@ fun SleepDialog(
                             }
                         }
 
-                        if (beds.any { it.id == selectedBedId }) BedVolumeRow(bedLevel, onBedLevel)
+                        if (selectedBed != null) {
+                            BedVolumeRow(bedLevel, onBedLevel)
+                            LevelRow("Book at bedtime", bookLevel, onBookLevel)
+                            TextButton(
+                                onClick = { if (previewing) onStopPreview() else onStartPreview(selectedBed) }
+                            ) {
+                                Text(if (previewing) "Stop listening" else "Hear the mix")
+                            }
+                            Text(
+                                "Too quiet overall? Raise the phone.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
                     }
                 }
             }
@@ -257,18 +291,22 @@ fun SleepDialog(
 
 /** #4018: the bed's own volume, independent of the book; moves the playing bed live. */
 @Composable
-private fun BedVolumeRow(level: Float, onLevel: (Float) -> Unit) {
+private fun BedVolumeRow(level: Float, onLevel: (Float) -> Unit) = LevelRow("Bed volume", level, onLevel)
+
+/** #5282: full right is the sound's own level, never past it. The taper lives here; the level is player volume. */
+@Composable
+private fun LevelRow(label: String, level: Float, onLevel: (Float) -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         // Local while dragging: the saved level comes back a beat later and would make the thumb stutter.
-        var value by remember { mutableStateOf(level) }
-        Text("Bed volume")
+        var position by remember { mutableStateOf(SleepBedRules.levelToSlider(level)) }
+        Text(label)
         Slider(
-            value = value,
-            onValueChange = { value = it; onLevel(it) },
+            value = position,
+            onValueChange = { position = it; onLevel(SleepBedRules.sliderToLevel(it)) },
             valueRange = 0f..1f,
             modifier = Modifier.weight(1f),
         )
