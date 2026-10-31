@@ -17,6 +17,25 @@ def test_book_gain_raises_to_the_voice_and_clamps():
     assert book_gain_db(None, -20.0, 12.0) is None
 
 
+def test_book_gain_with_raises_off_cuts_to_target():  # #5282
+    assert book_gain_db(-17.0, -20.0, 0.0) == -3.0
+    assert book_gain_db(-24.0, -20.0, 0.0) == 0.0  # quiet book stays quiet, never raised
+    assert book_gain_db(20.0, -20.0, 0.0) == round(MIN_GAIN_DB, 2)
+    assert book_gain_db(None, -20.0, 0.0) is None
+
+
+def test_endpoint_book_with_raises_off_says_attenuate_only(client, db_session, sample_book, monkeypatch):  # #5282
+    from audiplex.config import get_settings
+    s = get_settings()
+    monkeypatch.setattr(s, "book_target_lufs", -20.0)
+    monkeypatch.setattr(s, "book_max_boost_db", 0.0)
+    sample_book.loudness_lufs = -17.0
+    db_session.commit()
+    data = client.get(f"/api/playback/gain/book/{sample_book.id}").json()
+    assert data["gain_db"] == -3.0
+    assert data["mode"] == "attenuate_only"  # the app reads this to move Book at bedtime
+
+
 def test_endpoint_track(client, db_session, sample_track):
     sample_track.loudness_lufs = -14.0
     db_session.commit()

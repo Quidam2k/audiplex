@@ -39,6 +39,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.audiplex.app.playback.MixCategory
+import com.audiplex.app.playback.MixLevels
+import com.audiplex.app.ui.player.PastFullSlider
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -55,8 +58,8 @@ fun SettingsScreen(
     val downloadOnCellular by viewModel.downloadOnCellular.collectAsState()
     val djLinkEnabled by viewModel.djLinkEnabled.collectAsState()
     val restoreManualQueues by viewModel.restoreManualQueues.collectAsState()  // #3601
-    val musicVolume by viewModel.musicVolume.collectAsState()
-    val audiobookVolume by viewModel.audiobookVolume.collectAsState()
+    val mixLevels by viewModel.mixLevels.collectAsState()
+    val bedtimeShiftCappedDb by viewModel.bedtimeShiftCappedDb.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
     val totalStorageUsed by viewModel.totalStorageUsed.collectAsState()
     val username by viewModel.username.collectAsState()
@@ -246,12 +249,11 @@ fun SettingsScreen(
             HorizontalDivider()
             Spacer(Modifier.height(16.dp))
 
-            // #997/#3111: independent per-channel playback levels.
-            PlaybackLevelsSection(
-                musicVolume = musicVolume,
-                audiobookVolume = audiobookVolume,
-                onMusicChange = { viewModel.setMusicVolume(it) },
-                onAudiobookChange = { viewModel.setAudiobookVolume(it) }
+            // #997/#3111, #5282 slice 2: a level for each category of sound.
+            LevelsSection(
+                levels = mixLevels,
+                bedtimeShiftCappedDb = bedtimeShiftCappedDb,
+                onChange = viewModel::setMixLevel
             )
 
             Spacer(Modifier.height(32.dp))
@@ -478,56 +480,78 @@ private fun MusicFoldersSection(
     }
 }
 
+private val LEVEL_LABELS = listOf(
+    MixCategory.MUSIC to "Music",
+    MixCategory.BOOK to "Book",
+    MixCategory.BED to "Sleep",  // Todd 53037
+    MixCategory.DJ_VOICE to "DJ",
+    MixCategory.CHIMES to "Chimes",
+)
+
 /**
- * #997/#3111: independent MUSIC and AUDIOBOOK playback levels. These set each
- * channel's base volume so it can be balanced against the companion's VOICE
- * dial without one knob dragging the others. Live-committed on drag release
- * (PlaybackManager collects the flow and applies it to a playing track at once).
+ * #997/#3111, #5282 slice 2: a level for each category of sound. The mark is the sound's
+ * own level; past it is his to choose and can distort (Todd 53042). Book at bedtime lives
+ * in the sleep dialog. Live-committed on drag release (PlaybackManager collects the
+ * store and applies them at once).
  */
 @Composable
-private fun PlaybackLevelsSection(
-    musicVolume: Float,
-    audiobookVolume: Float,
-    onMusicChange: (Float) -> Unit,
-    onAudiobookChange: (Float) -> Unit
+private fun LevelsSection(
+    levels: Map<MixCategory, Float>,
+    bedtimeShiftCappedDb: Float,
+    onChange: (MixCategory, Float) -> Unit
 ) {
-    Text("Playback Levels", style = MaterialTheme.typography.titleMedium)
+    Text("Levels", style = MaterialTheme.typography.titleMedium)
     Spacer(Modifier.height(4.dp))
     Text(
-        "Set music and audiobook loudness separately. Persona voice has its own " +
-            "level in the Pantheon app — turn a channel down here so raising " +
-            "voice there doesn't blast it back.",
+        "Season each sound to taste, then use the phone's volume to raise them all together. " +
+            "Past the Full mark a sound goes through a limiter and can distort. " +
+            "Agent voices have their own level in the Pantheon app.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
-    Spacer(Modifier.height(12.dp))
-    VolumeSlider(label = "Music", value = musicVolume, onChange = onMusicChange)
-    Spacer(Modifier.height(12.dp))
-    VolumeSlider(label = "Audiobook", value = audiobookVolume, onChange = onAudiobookChange)
+    LEVEL_LABELS.forEach { (category, label) ->
+        val level = levels[category] ?: return@forEach  // not loaded yet
+        Spacer(Modifier.height(12.dp))
+        VolumeSlider(label = label, level = level, onChange = { onChange(category, it) })
+    }
+    if (bedtimeShiftCappedDb >= 0.5f) {
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Book at bedtime is at full, so the bed can sit up to " +
+                "${bedtimeShiftCappedDb.toInt()} dB louder against the book than you set it. " +
+                "Turn Sleep down if it does.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
 }
 
 @Composable
 private fun VolumeSlider(
     label: String,
-    value: Float,
+    level: Float,
     onChange: (Float) -> Unit
 ) {
     // Local drag state so the thumb tracks the finger; commit on release only,
     // keeping DataStore writes off the drag path. Re-seeds if the stored value
     // changes underneath us (e.g. a DJ volume command).
-    var local by remember(value) { mutableStateOf(value) }
+    var position by remember(level) { mutableStateOf(MixLevels.levelToSlider(level)) }
+    val current = MixLevels.sliderToLevel(position)
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Text(label, style = MaterialTheme.typography.bodyMedium)
-        Text("${(local * 100).toInt()}%", style = MaterialTheme.typography.bodyMedium)
+        Text(
+            MixLevels.levelText(current),
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (current > 1f) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+        )
     }
-    Slider(
-        value = local,
-        valueRange = 0f..1f,
-        onValueChange = { local = it },
-        onValueChangeFinished = { onChange(local) }
+    PastFullSlider(
+        position = position,
+        onPosition = { position = it },
+        onFinished = { onChange(MixLevels.sliderToLevel(position)) }
     )
 }
 

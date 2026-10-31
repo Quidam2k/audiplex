@@ -172,6 +172,17 @@ class PlaybackManager @Inject constructor(
     private var sleepArmedWithBed = false
     private var sleepFading = false  // the fade owns the main volume; see applyVolumeForCurrentKind
     private var sleepHold: SleepBedRules.SleepHold? = null
+    private var djVoiceLevel: Float = 1f  // #5282 slice 2: seeded from the music dial before the first read
+    private var chimeLevel: Float = 1f  // #5282 slice 2
+    private val clipSteering = ClipVoiceSteering(
+        currentIsClip = { clipIsCurrent() },
+        writeLevel = {
+            val ramping = mainRampJob?.isActive == true  // a bedtime ramp under way keeps ramping, as on a song change
+            updateCurrentTrackGain()
+            applyVolumeForCurrentKind(ramp = ramping)
+        },
+        songChange = { reapplyTrackGain() },
+    )
     private var mainRampJob: Job? = null
     private var previewResumedMain = false
     private var mainFadedOut = false  // the fade left the player at 0; the next play restores it, whoever presses play
@@ -201,6 +212,7 @@ class PlaybackManager @Inject constructor(
         scope.launch {
             settingsStore.migrateSleepMixToAttenuate()  // #5282: before the first read
             sleepHold = sleepHold ?: settingsStore.sleepHold()  // #5282: a bedtime already started wins
+            settingsStore.seedDjVoiceLevel()  // #5282 slice 2: before the first read
             launch {
                 settingsStore.sleepBookLevel.collect { v ->
                     val changed = v != sleepBookLevel
@@ -208,22 +220,39 @@ class PlaybackManager @Inject constructor(
                     if (changed && bedtimeTrimActive()) applyVolumeForCurrentKind()
                 }
             }
-            settingsStore.sleepBedVolume.collect { sleepBedLevel = it }  // #4018
+            launch {
+                settingsStore.djVoiceLevel.collect { v ->
+                    val changed = v != djVoiceLevel
+                    djVoiceLevel = v
+                    if (changed && clipIsCurrent()) applyVolumeForCurrentKind()
+                }
+            }
+            launch { settingsStore.chimeLevel.collect { chimeLevel = it } }  // read at the next chime; they last seconds
+            settingsStore.sleepBedVolume.collect { v ->  // #4018
+                val changed = v != sleepBedLevel
+                sleepBedLevel = v
+                if (changed) applySleepBedLevelLive()  // #5282 slice 2: Settings moves it too
+            }
         }
     }
 
-    /** #997: the base volume for [kind]. Music and Stream share the music dial. */
-    private fun volumeForKind(kind: PlayerKind): Float =
-        if (kind == PlayerKind.Audiobook) audiobookVolume else musicVolume
+    /** #5282 slice 2: the DJ clip is the current item, read from the player since the queue state can lag it. */
+    private fun clipIsCurrent(): Boolean =
+        _playerKind.value == PlayerKind.Music && ClipEdgeFade.isClip(controller?.currentMediaItem?.mediaId)
 
     /**
-     * #7109: compute the effective music volume with per-track gain applied.
-     * For non-music, returns the slider volume unchanged.
+     * #7109 #4118 #4222 #5282: the main player's level for [kind], in one place: dial, per-item gain and
+     * bedtime cut, split into player volume and the limiter's raise. Music and Stream share the music dial.
      */
-    private fun effectiveMusicVolume(sliderVolume: Float): Float {
-        if (!isMusic()) return sliderVolume * mainTrim()
-        return (sliderVolume * currentMusicGain * mainTrim()).coerceIn(0f, 1f)
-    }
+    private fun mainSplit(kind: PlayerKind): MixLevels.Split = MixLevels.split(when {
+        kind == PlayerKind.Audiobook -> audiobookVolume * 10.0.pow(bookAppliedDb() / 20.0)
+        isMusic() -> {
+            val raiseDb = if (bedtimeTrimActive()) 0.0 else currentMusicBoostDb.coerceAtMost(MAX_BOOST_DB)
+            val trackGain = currentMusicGain * 10.0.pow(raiseDb / 20.0)
+            MixLevels.musicAmplitude(clipIsCurrent(), musicVolume, trackGain, djVoiceLevel, mainTrim())
+        }
+        else -> (musicVolume * mainTrim()).toDouble()
+    })
 
     /** #5282: does the bedtime cut apply to the main player right now? */
     private fun bedtimeTrimActive(): Boolean =
@@ -236,7 +265,7 @@ class PlaybackManager @Inject constructor(
 
     /** #5282: book gain as played: the server's gain, or at bedtime that plus the cut, never past 0 dB. */
     private fun bookAppliedDb(): Double {
-        val gain = currentBookGainDb ?: 0.0
+        val gain = (currentBookGainDb ?: 0.0).coerceAtMost(MAX_BOOST_DB)  // #4118: never blare, whatever the server sends
         return if (bedtimeTrimActive()) SleepBedRules.bookNetDb(gain, sleepBookLevel) else gain
     }
 
@@ -313,11 +342,11 @@ class PlaybackManager @Inject constructor(
             return
         }
         val applied = _playerVolume.value
-        val expected = effectiveMusicVolume(volumeForKind(PlayerKind.Music))
+        val expected = mainSplit(PlayerKind.Music).volume
         updateCurrentTrackGain()
         applyBoostEnhancer()  // #4118: the raise rides on the limiter, duck or not
         // #7528: mid-duck, move the level the restore lands on instead.
-        if (PlayerHooks.retargetRestore(effectiveMusicVolume(volumeForKind(PlayerKind.Music)))) return
+        if (PlayerHooks.retargetRestore(mainSplit(PlayerKind.Music).volume)) return
         // #5282: a bedtime-cut ramp under way is not a duck or a fade; keep ramping, to the new track's level.
         val ramping = mainRampJob?.isActive == true
         if (!ramping && applied < expected * DUCKED_FRACTION) return  // e.g. a sleep fade: leave it be
@@ -330,7 +359,8 @@ class PlaybackManager @Inject constructor(
      */
     private fun updateCurrentTrackGain() {
         val currentTrack = _currentMusic.value?.let { it.items.getOrNull(it.currentIndex)?.track }
-        if (currentTrack == null || musicLevels == null || !musicLevels!!.normalizeMusic) {
+        // #5282 slice 2: a clip has no loudness of its own, so it must not take the library's median gain.
+        if (currentTrack == null || clipIsCurrent() || musicLevels == null || !musicLevels!!.normalizeMusic) {
             currentMusicGain = 1.0f
             currentMusicBoostDb = 0.0
             return
@@ -359,9 +389,7 @@ class PlaybackManager @Inject constructor(
         dropSleepHoldIfDone()
         // #4222 #4118: positive gain uses the limiter; only attenuation changes player volume.
         applyBoostEnhancer()
-        val target = if (kind == PlayerKind.Audiobook) {
-            (audiobookVolume * 10.0.pow(bookAppliedDb().coerceAtMost(0.0) / 20.0)).toFloat()
-        } else effectiveMusicVolume(volumeForKind(kind))
+        val target = mainSplit(kind).volume
         if (PlayerHooks.retargetRestore(target)) return  // #7528: ducked; the restore lands on it
         if (ramp) rampMainTo(target) else setPlayerVolume(target)
     }
@@ -388,6 +416,14 @@ class PlaybackManager @Inject constructor(
                     _currentBook.value?.id != bookId) return@launch
                 if (gain.gainDb != null && !gain.gainDb.isFinite()) return@launch
                 currentBookGainDb = gain.gainDb
+                MixLevels.raisesOff(gain.mode)?.let { off ->  // #5282 slice 2: keeps the bedtime balance across a server flip
+                    settingsStore.syncBedtimeShift(off)?.let { shift ->
+                        clientLog.report("info", "bedtime_shift", "book at bedtime moved with the server's book raises", mapOf(
+                            "raises_off" to "$off", "level" to "${shift.level}",
+                            "applied_db" to "${shift.appliedDb ?: ""}", "capped_db" to "${shift.cappedDb}",
+                        ))
+                    }
+                }
                 applyVolumeForCurrentKind()
             } catch (e: CancellationException) {
                 throw e
@@ -406,11 +442,7 @@ class PlaybackManager @Inject constructor(
                 bookGainPlayer = player
                 player?.addListener(bookAudioSessionListener)
             }
-            val gainDb = when {  // #4118: music raises share the book's limiter
-                _playerKind.value == PlayerKind.Audiobook -> bookAppliedDb()  // #5282
-                _playerKind.value == PlayerKind.Music && isMusic() && !bedtimeTrimActive() -> currentMusicBoostDb
-                else -> 0.0
-            }
+            val gainDb = _playerKind.value?.let { mainSplit(it).boostDb } ?: 0.0  // #4118: every kind shares the limiter
             val sessionId = player?.audioSessionId ?: C.AUDIO_SESSION_ID_UNSET
             if (gainDb <= 0.0 ||
                 sessionId == C.AUDIO_SESSION_ID_UNSET) {
@@ -423,8 +455,7 @@ class PlaybackManager @Inject constructor(
                 bookEnhancerSessionId = sessionId
             }
             // #4222: LoudnessEnhancer's built-in limiter handles boosts above unity.
-            // #4118: hard ceiling here too, whatever the server sends (never blare).
-            bookEnhancer?.setTargetGain((gainDb.coerceAtMost(MAX_BOOST_DB) * 100).toInt())  // millibels
+            bookEnhancer?.setTargetGain((gainDb * 100).toInt())  // millibels
             bookEnhancer?.enabled = true
         } catch (_: Exception) {
             releaseBookEnhancer()
@@ -475,6 +506,7 @@ class PlaybackManager @Inject constructor(
     // MediaSession — it has no lock-screen UI, so it cannot touch the
     // existing single-stream session (Audiobook/Music/Stream) at all.
     private var bedPlayer: ExoPlayer? = null
+    private var bedEnhancer: LoudnessEnhancer? = null  // #5282: only past full on the slider
     // #4018: the bed follows its real player, so a bed that died overnight
     // reads Stopped (with Restart) instead of "playing" forever.
     private val _bedState = MutableStateFlow(BedState.Off)
@@ -544,6 +576,8 @@ class PlaybackManager @Inject constructor(
         "bed_url" to (bedUrl ?: ""),
         "bed_level" to "$bedCurrentVolume",
         "book_bedtime_level" to "$sleepBookLevel",  // #5282, and the bed has no boost stage left
+        "dj_voice_level" to "$djVoiceLevel",  // #5282 slice 2
+        "chime_level" to "$chimeLevel",  // #5282 slice 2
         "book_net_db" to "${bookAppliedDb()}",
         "bedtime_cut" to "${bedtimeTrimActive()}",
         "sleep_hold_index" to "${sleepHold?.index ?: ""}",
@@ -853,7 +887,7 @@ class PlaybackManager @Inject constructor(
                 }
             }
             _currentMusic.value = music.copy(currentIndex = newIndex)
-            reapplyTrackGain()  // #7109
+            clipSteering.onItemTransition()  // #7109, #5282 slice 2: a DJ clip has its own level
             fetchMusicLevels()  // #7528: a changed server target applies from this song
             // Report start of new track
             music.items.getOrNull(newIndex)?.let { current ->
@@ -938,8 +972,7 @@ class PlaybackManager @Inject constructor(
         // was (it records the pre-duck volume, never a hardcoded 1.0).
         // Via setPlayerVolume so the DJ-report volume snapshot stays coherent.
         // #4222: apply book gain as its audio attributes become active.
-        if (kind == PlayerKind.Audiobook) applyVolumeForCurrentKind()
-        else setPlayerVolume(volumeForKind(kind) * mainTrim())  // #5282
+        applyVolumeForCurrentKind()
     }
 
     private fun ensureController(onReady: (MediaController) -> Unit) {
@@ -1659,6 +1692,9 @@ class PlaybackManager @Inject constructor(
         cacheBed(url)
     }
 
+    /** #5282 slice 2: bed_play from the server. A chime rides the bed player but has its own level. */
+    fun djBedPlay(url: String, volume: Float) = bedPlay(url, MixLevels.bedCommandLevel(url, volume, chimeLevel))
+
     @OptIn(UnstableApi::class)
     private fun startBedPlayer(url: String, volume: Float) {
         disposeBedPlayer()
@@ -1693,7 +1729,7 @@ class PlaybackManager @Inject constructor(
             }
         })
         player.repeatMode = Player.REPEAT_MODE_ONE
-        bedTargetLevel = volume.coerceIn(0f, 1f)
+        bedTargetLevel = volume.coerceIn(0f, MixLevels.MAX_LEVEL)
         applyBedLevel(bedTargetLevel)
         player.setMediaItem(MediaItem.fromUri(local?.let { Uri.fromFile(it) } ?: Uri.parse(url)))
         player.prepare()
@@ -1764,29 +1800,52 @@ class PlaybackManager @Inject constructor(
         bedPlay(url, bedTargetLevel.takeIf { it > 0f } ?: sleepBedLevel)
     }
 
-    /** [volume] is plain player volume 0..1 (#5282): nothing goes past unity, the phone is the master. */
+    /** [volume] is a level (#5282): up to 1 is player volume, past it only by his choice on the slider. */
     fun bedVolume(volume: Float) {
-        bedTargetLevel = volume.coerceIn(0f, 1f)
+        bedTargetLevel = volume.coerceIn(0f, MixLevels.MAX_LEVEL)
         applyBedLevel(bedTargetLevel)
     }
 
     private fun applyBedLevel(level: Float) {
-        bedCurrentVolume = level.coerceIn(0f, 1f)
-        bedPlayer?.volume = bedCurrentVolume
+        bedCurrentVolume = level.coerceIn(0f, MixLevels.MAX_LEVEL)
+        val split = MixLevels.split(bedCurrentVolume.toDouble())
+        val player = bedPlayer ?: return
+        player.volume = split.volume
+        try {
+            if (split.boostDb > 0.0 && bedEnhancer == null && player.audioSessionId != C.AUDIO_SESSION_ID_UNSET) {
+                bedEnhancer = LoudnessEnhancer(player.audioSessionId)
+            }
+            bedEnhancer?.setTargetGain((split.boostDb * 100).toInt())  // millibels; the built-in limiter guards it
+            bedEnhancer?.enabled = split.boostDb > 0.0
+        } catch (_: Exception) {  // devices can throw from audio effects; the bed plays on at full
+            releaseBedEnhancer()
+        }
+    }
+
+    private fun releaseBedEnhancer() {
+        val enhancer = bedEnhancer
+        bedEnhancer = null
+        try { enhancer?.enabled = false } catch (_: Exception) { }
+        try { enhancer?.release() } catch (_: Exception) { }
     }
 
     private fun disposeBedPlayer() {
+        releaseBedEnhancer()
         bedPlayer?.release()
         bedPlayer = null
     }
 
     /** #4018: the slider. Saved, and applied live unless a crossfade is still waiting to bring the bed up. */
     fun setSleepBedLevel(level: Float) {
-        sleepBedLevel = level.coerceIn(0f, 1f)
+        sleepBedLevel = level.coerceIn(0f, MixLevels.MAX_LEVEL)
         scope.launch { settingsStore.setSleepBedVolume(sleepBedLevel) }
+        applySleepBedLevelLive()
+    }
+
+    private fun applySleepBedLevelLive() {
         if (_sleepEndsAtMs.value != null) {
             if (sleepBedFadeTo != null) sleepBedFadeTo = sleepBedLevel
-        } else if (bedWanted) {
+        } else if (bedWanted && !MixLevels.isChimeUrl(bedUrl)) {  // #5282 slice 2: a chime is not the bed
             bedVolume(sleepBedLevel)
         }
     }

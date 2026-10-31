@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.audiplex.app.playback.DjLinkService
+import com.audiplex.app.playback.MixCategory
 import com.audiplex.app.BuildConfig
 import com.audiplex.app.data.ApiServiceHolder
 import com.audiplex.app.data.SettingsStore
@@ -103,19 +104,15 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { settingsStore.setRestoreManualQueues(!restoreManualQueues.value) }
     }
 
-    // #997/#3111: per-channel playback levels. Default 1.0 (full).
-    val musicVolume: StateFlow<Float> = settingsStore.musicVolume
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 1f)
+    // #997/#3111, #5282 slice 2: a level for each category of sound; PlaybackManager applies them live.
+    val mixLevels: StateFlow<Map<MixCategory, Float>> = settingsStore.mixLevels
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
-    val audiobookVolume: StateFlow<Float> = settingsStore.audiobookVolume
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 1f)
+    val bedtimeShiftCappedDb: StateFlow<Float> = settingsStore.bedtimeShiftCappedDb
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0f)
 
-    fun setMusicVolume(volume: Float) {
-        viewModelScope.launch { settingsStore.setMusicVolume(volume) }
-    }
-
-    fun setAudiobookVolume(volume: Float) {
-        viewModelScope.launch { settingsStore.setAudiobookVolume(volume) }
+    fun setMixLevel(category: MixCategory, level: Float) {
+        viewModelScope.launch { settingsStore.setMixLevel(category, level) }
     }
 
     /**

@@ -540,7 +540,7 @@ class DjCommandClient @Inject constructor(
                 val volume = SleepBedRules.fromDjLevel(cmd.payload.volume ?: 0.5f)  // #5131: old 0..1 meaning
                 // #3367: a relative url (a library book) resolves against OUR base URL.
                 val absolute = SleepFade.resolveUrl(url, baseUrl)
-                withContext(Dispatchers.Main) { playbackManager.bedPlay(absolute, volume) }
+                withContext(Dispatchers.Main) { playbackManager.djBedPlay(absolute, volume) }
             }
             "bed_stop" -> withContext(Dispatchers.Main) { playbackManager.bedStop() }
             "bed_volume" -> {

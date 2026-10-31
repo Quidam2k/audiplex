@@ -45,7 +45,12 @@ def book_gain_db(lufs: float | None, target: float, max_boost_db: float) -> floa
     """Raise-only (#4222): a book is never cut. Books measure ~-16 LUFS, above
     the voices' -20 FILE level, yet sound quieter because the Pantheon app
     boosts speech up to +9.5 dB (TtsBoost), so book_target_lufs has to be the
-    voice's level as heard, not -20, before this raises anything."""
+    voice's level as heard, not -20, before this raises anything.
+
+    #5282: with raises off (max_boost_db 0) books level by cutting instead,
+    like music, or they would not be levelled at all."""
     if lufs is None:
         return None
+    if max_boost_db <= 0:
+        return round(max(MIN_GAIN_DB, min(0.0, target - lufs)), 2)
     return round(max(0.0, min(max_boost_db, target - lufs)), 2)

@@ -10,6 +10,8 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.audiplex.app.playback.MixCategory
+import com.audiplex.app.playback.MixLevels
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -65,6 +67,10 @@ class SettingsStore @Inject constructor(
     private val sleepHoldRouteKey = stringPreferencesKey("sleep_hold_route")  // #5282
     private val sleepHoldAtKey = longPreferencesKey("sleep_hold_at")  // #5282
     private val sleepHoldFinishedKey = booleanPreferencesKey("sleep_hold_finished")  // #5282
+    private val djVoiceLevelKey = floatPreferencesKey("dj_voice_level")  // #5282 slice 2
+    private val chimeLevelKey = floatPreferencesKey("chime_level")  // #5282 slice 2
+    private val bedtimeShiftAppliedKey = floatPreferencesKey("bedtime_shift_applied_db")  // #5282 slice 2
+    private val bedtimeShiftCappedKey = floatPreferencesKey("bedtime_shift_capped_db")  // #5282 slice 2
     private val skipSecondsKey = intPreferencesKey("skip_seconds")  // #4220
 
     override val serverUrl: Flow<String> = context.dataStore.data.map { prefs ->
@@ -175,7 +181,7 @@ class SettingsStore @Inject constructor(
     }
 
     suspend fun setSleepBedVolume(volume: Float) {
-        context.dataStore.edit { prefs -> prefs[sleepBedVolumeKey] = volume.coerceIn(0f, 1f) }
+        context.dataStore.edit { prefs -> prefs[sleepBedVolumeKey] = volume.coerceIn(0f, MixLevels.MAX_LEVEL) }
     }
 
     /** #5282: "Book at bedtime", applied only around sleep mode; the day dial is untouched. */
@@ -184,7 +190,10 @@ class SettingsStore @Inject constructor(
     }
 
     suspend fun setSleepBookLevel(level: Float) {
-        context.dataStore.edit { prefs -> prefs[sleepBookLevelKey] = level.coerceIn(0f, 1f) }
+        context.dataStore.edit { prefs ->
+            prefs[sleepBookLevelKey] = level.coerceIn(0f, 1f)
+            prefs.remove(bedtimeShiftCappedKey)  // he has set it himself, so a note about the cap no longer holds
+        }
     }
 
     /** #5282: once, move the saved bed boost onto the book, keeping the balance he last set. */
@@ -200,6 +209,63 @@ class SettingsStore @Inject constructor(
             }
             prefs[sleepMixAttenuateMigratedKey] = true
         }
+    }
+
+    /** #5282 slice 2: the one place the levels are read and written. PlaybackManager applies them live. */
+    private fun levelKey(category: MixCategory) = when (category) {
+        MixCategory.MUSIC -> musicVolumeKey
+        MixCategory.BOOK -> audiobookVolumeKey
+        MixCategory.DJ_VOICE -> djVoiceLevelKey
+        MixCategory.CHIMES -> chimeLevelKey
+        MixCategory.BED -> sleepBedVolumeKey
+        MixCategory.BOOK_BEDTIME -> sleepBookLevelKey
+    }
+
+    private fun defaultLevel(category: MixCategory) = when (category) {
+        MixCategory.BED -> com.audiplex.app.playback.SleepBedRules.DEFAULT_VOLUME
+        MixCategory.BOOK_BEDTIME -> com.audiplex.app.playback.SleepBedRules.DEFAULT_BOOK_LEVEL
+        else -> 1f
+    }
+
+    val mixLevels: Flow<Map<MixCategory, Float>> = context.dataStore.data.map { prefs ->
+        MixCategory.entries.associateWith { prefs[levelKey(it)] ?: defaultLevel(it) }
+    }
+
+    suspend fun setMixLevel(category: MixCategory, level: Float) {
+        if (category == MixCategory.BOOK_BEDTIME) return setSleepBookLevel(level)
+        context.dataStore.edit { prefs -> prefs[levelKey(category)] = level.coerceIn(0f, MixLevels.MAX_LEVEL) }
+    }
+
+    val djVoiceLevel: Flow<Float> = context.dataStore.data.map { prefs -> prefs[djVoiceLevelKey] ?: 1f }
+
+    val chimeLevel: Flow<Float> = context.dataStore.data.map { prefs -> prefs[chimeLevelKey] ?: 1f }
+
+    /** Once: the DJ voice starts at the music dial it used to follow. */
+    suspend fun seedDjVoiceLevel() {
+        context.dataStore.edit { prefs ->
+            MixLevels.seedDjVoice(prefs[djVoiceLevelKey], prefs[musicVolumeKey])?.let { prefs[djVoiceLevelKey] = it }
+        }
+    }
+
+    /** Dbs of the bedtime shift that did not fit below full. Zero when none. */
+    val bedtimeShiftCappedDb: Flow<Float> = context.dataStore.data.map { prefs -> prefs[bedtimeShiftCappedKey] ?: 0f }
+
+    /** Keeps "Book at bedtime" in step with the server's book raises. Read and written in one edit, so it cannot double. */
+    suspend fun syncBedtimeShift(raisesOff: Boolean): MixLevels.BedtimeShift? {
+        var result: MixLevels.BedtimeShift? = null
+        context.dataStore.edit { prefs ->
+            val shift = MixLevels.bedtimeShift(
+                prefs[sleepBookLevelKey] ?: com.audiplex.app.playback.SleepBedRules.DEFAULT_BOOK_LEVEL,
+                prefs[bedtimeShiftAppliedKey],
+                raisesOff,
+            ) ?: return@edit
+            result = shift
+            prefs[sleepBookLevelKey] = shift.level
+            prefs[bedtimeShiftCappedKey] = shift.cappedDb
+            val applied = shift.appliedDb
+            if (applied == null) prefs.remove(bedtimeShiftAppliedKey) else prefs[bedtimeShiftAppliedKey] = applied
+        }
+        return result
     }
 
     /** #5282: survives the process dying overnight, because the next morning's first sound is the point. */

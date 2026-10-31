@@ -11,11 +11,13 @@ import kotlin.math.sin
  * #8197: DJ voice clips are queued as plain items (mediaId "djclip:...") and used to
  * hard-cut against the songs. The song before a clip now fades out over its last
  * OUT_MS and the song after one fades in over its first IN_MS (equal power); the clip
- * itself stays at full level. Pure, for JVM tests.
+ * itself stays at full level. #5282: except its first CLIP_IN_MS, which cover the moment the
+ * player is still at the song's volume, before the DJ voice level lands. Pure, for JVM tests.
  */
 object ClipEdgeFade {
     const val OUT_MS = 2500L
     const val IN_MS = 1500L
+    const val CLIP_IN_MS = 150L
     const val TICK_MS = 50L
 
     fun isClip(mediaId: String?): Boolean = mediaId?.startsWith("djclip:") == true
@@ -27,7 +29,10 @@ object ClipEdgeFade {
         positionMs: Long,
         durationMs: Long
     ): Float {
-        if (curIsClip) return 1f
+        if (curIsClip) {
+            val p = positionMs.coerceAtLeast(0L)
+            return if (p < CLIP_IN_MS) sin(PI / 2 * p.toDouble() / CLIP_IN_MS).toFloat() else 1f
+        }
         var g = 1f
         if (nextIsClip && durationMs > 0) {
             val rem = durationMs - positionMs

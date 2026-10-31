@@ -34,7 +34,7 @@ class SleepFadeTest {
 
     @Test
     fun bedTargetIsClamped() {
-        assertEquals(1f, SleepFade.levels(1, 1, 1f, 0f, 3f).second!!, 1e-6f)
+        assertEquals(MixLevels.MAX_LEVEL, SleepFade.levels(1, 1, 1f, 0f, 9f).second!!, 1e-6f)  // #5282: the slider goes past full
     }
 
     @Test
