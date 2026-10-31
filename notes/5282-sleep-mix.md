@@ -27,4 +27,4 @@ He raises the phone at bedtime, and Audiplex does not write STREAM_MUSIC. So the
 ## Check after a night
 stream_volume and bed_handoff lines in playback-diag now carry book_bedtime_level, book_net_db, bedtime_cut, sleep_hold_index. bed_gain_db is gone because the stage is gone. `sleep_hold` logs when the cut ends.
 
-Release: 1.0.69. Held copy data/held/5282/, rollback data/held/rollback-1.0.68/.
+Release: 1.0.70. Held copy data/held/5282/, rollback data/held/rollback-1.0.68/.

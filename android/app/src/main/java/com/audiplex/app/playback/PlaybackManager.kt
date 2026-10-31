@@ -200,7 +200,7 @@ class PlaybackManager @Inject constructor(
         }
         scope.launch {
             settingsStore.migrateSleepMixToAttenuate()  // #5282: before the first read
-            sleepHold = settingsStore.sleepHold()
+            sleepHold = sleepHold ?: settingsStore.sleepHold()  // #5282: a bedtime already started wins
             launch {
                 settingsStore.sleepBookLevel.collect { v ->
                     val changed = v != sleepBookLevel
@@ -1882,6 +1882,7 @@ class PlaybackManager @Inject constructor(
         val wasArmed = sleepArmedWithBed
         sleepArmedWithBed = bedFadeTo != null  // #5282
         if (sleepArmedWithBed) recordSleepHold()
+        if (wasArmed && !sleepArmedWithBed) finishSleepHold()
         if (sleepArmedWithBed || wasArmed) applyVolumeForCurrentKind(ramp = true)
         sleepTimerJob = scope.launch {
             val done = SleepFade.runTimer(  // #3953: the loop lives in SleepFade so it is unit-tested
@@ -1902,7 +1903,8 @@ class PlaybackManager @Inject constructor(
             sleepFading = false
             sleepArmedWithBed = false  // #5282: from here the hold decides, at the next play
             mainFadedOut = done
-            if (done) _sleepEndsAtMs.value = null
+            _sleepEndsAtMs.value = null  // #5282: also when no player was there, or the dialog stays armed for good
+            finishSleepHold()
             if (done && bedFadeTo != null) {
                 clientLog.report("info", "bed_handoff", "book faded into the sleep bed", volumeDetail())  // #5047
             }
