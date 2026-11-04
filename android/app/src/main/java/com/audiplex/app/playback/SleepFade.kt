@@ -29,7 +29,7 @@ object SleepFade {
         val t = (i.toFloat() / steps.coerceAtLeast(1)).coerceIn(0f, 1f)
         val main = mainStart * (1f - t)
         val bed = bedTarget?.let { target ->
-            (bedStart + (target.coerceIn(0f, 1f) - bedStart) * t).coerceIn(0f, 1f)
+            (bedStart + (target.coerceIn(0f, MixLevels.MAX_LEVEL) - bedStart) * t).coerceIn(0f, MixLevels.MAX_LEVEL)
         }
         return main to bed
     }

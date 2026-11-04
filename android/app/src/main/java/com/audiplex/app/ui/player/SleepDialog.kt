@@ -33,6 +33,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.audiplex.app.data.api.SleepBed
 import com.audiplex.app.playback.BedState
+import com.audiplex.app.playback.MixLevels
 import com.audiplex.app.playback.SleepBedRules
 import com.audiplex.app.playback.SleepFade
 
@@ -291,9 +292,22 @@ fun SleepDialog(
 
 /** #4018: the bed's own volume, independent of the book; moves the playing bed live. */
 @Composable
-private fun BedVolumeRow(level: Float, onLevel: (Float) -> Unit) = LevelRow("Bed volume", level, onLevel)
+private fun BedVolumeRow(level: Float, onLevel: (Float) -> Unit) {
+    var position by remember { mutableStateOf(MixLevels.levelToSlider(level)) }  // local, as in LevelRow
+    val current = MixLevels.sliderToLevel(position)
+    Column {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("Bed volume")
+            Text(
+                MixLevels.levelText(current),
+                color = if (current > 1f) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+            )
+        }
+        PastFullSlider(position = position, onPosition = { position = it; onLevel(MixLevels.sliderToLevel(it)) })
+    }
+}
 
-/** #5282: full right is the sound's own level, never past it. The taper lives here; the level is player volume. */
+/** #5282: Book at bedtime: full right is the book's own level, never past it. */
 @Composable
 private fun LevelRow(label: String, level: Float, onLevel: (Float) -> Unit) {
     Row(

@@ -10,7 +10,7 @@ if %errorLevel% neq 0 (
     exit /b 1
 )
 
-powershell -NoProfile -Command "Register-ScheduledTask -TaskName 'Audiplex Server' -Description 'Start the Audiplex audiobook server on boot' -Trigger (New-ScheduledTaskTrigger -AtStartup) -Action (New-ScheduledTaskAction -Execute 'wscript.exe' -Argument '\"Q:\Development\audiplex\launch-hidden.vbs\"') -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0) -RunLevel Highest -User '%USERNAME%' -Force"
+powershell -NoProfile -Command "Register-ScheduledTask -TaskName 'Audiplex Server' -Description 'Start the Audiplex audiobook server on boot' -Trigger (New-ScheduledTaskTrigger -AtStartup) -Action (New-ScheduledTaskAction -Execute 'wscript.exe' -Argument '\"%~dp0launch-hidden.vbs\"') -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0) -RunLevel Highest -User '%USERNAME%' -Force"
 
 if %errorLevel% equ 0 (
     echo.

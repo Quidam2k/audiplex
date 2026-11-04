@@ -7,7 +7,7 @@ from audiplex.models import Album, Artist, Track, User
 from audiplex.routers import playback
 
 ALBUM = r"H:\Stacked Deck\Music\Artists & Albums\Rock\The Police\Synchronicity\05 - Mother.mp3"
-FASTER = r"Q:\Stacked Deck Music\Individual\faster\x.mp3"
+FASTER = r"D:\Music\Individual\faster\x.mp3"
 
 
 @pytest.fixture(autouse=True)
@@ -22,9 +22,9 @@ def state_file(tmp_path, monkeypatch):
     (ALBUM.replace("\\", "/"), True),
     (r"H:\Stacked Deck\Music\Artists & Albums\Rock\Billboard Countdowns\Billboard 1978 Top 100 Hits\x.mp3", False),
     (r"H:\Stacked Deck\Music\Artists & Albums\Rock\Top 600 Modern Rock Songs\x.mp3", False),
-    (r"Q:\Stacked Deck Music\Artists & Albums\Mixed\Ren Faire\x.mp3", False),
+    (r"D:\Music\Artists & Albums\Mixed\Ren Faire\x.mp3", False),
     (FASTER, False),
-    (r"Q:\Stacked Deck Music\Todd Walker - music\x.mp3", False),
+    (r"D:\Music\Own - music\x.mp3", False),
     (None, False),
 ])
 def test_default_for_path(path, expected):

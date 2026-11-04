@@ -94,11 +94,11 @@ def test_set_roots_keeps_exclude_for_surviving_path(tmp_path):
     cfg.write_text(yaml.safe_dump({"library_roots": [
         {"path": "H:/M", "category": "music", "exclude": ["Individual"]},
         {"path": "E:/gone", "category": "music"},
-        {"path": "P:/Books", "category": "audiobook_clean"},
+        {"path": "D:/Books", "category": "audiobook_clean"},
     ]}), encoding="utf-8")
-    set_library_roots_for_category("music", ["H:/M", "Q:/new"], config_path=str(cfg))
+    set_library_roots_for_category("music", ["H:/M", "D:/new"], config_path=str(cfg))
     roots = yaml.safe_load(cfg.read_text(encoding="utf-8"))["library_roots"]
     assert {"path": "H:/M", "category": "music", "exclude": ["Individual"]} in roots
-    assert {"path": "Q:/new", "category": "music"} in roots
+    assert {"path": "D:/new", "category": "music"} in roots
     assert not [r for r in roots if r["path"] == "E:/gone"]
-    assert {"path": "P:/Books", "category": "audiobook_clean"} in roots
+    assert {"path": "D:/Books", "category": "audiobook_clean"} in roots

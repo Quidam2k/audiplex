@@ -711,7 +711,8 @@ def get_gain(kind: str, item_id: int, db: Session = Depends(get_db), user: User 
 
     Music: to music_target_lufs, raised by at most music_max_boost_db (#4118).
     Book: raised to book_target_lufs (clamped), mode=boost_needs_limiter; the
-    app applies a raise through its limiter (#4222). gain_db=null when unmeasured.
+    app applies a raise through its limiter (#4222). With book_max_boost_db 0,
+    cut to target, mode=attenuate_only (#5282). gain_db=null when unmeasured.
     """
     from audiplex.gain import book_gain_db, music_gain_db, served_music_target  # #3501
     from audiplex.models import Book, Track
@@ -722,7 +723,8 @@ def get_gain(kind: str, item_id: int, db: Session = Depends(get_db), user: User 
         mode = "boost_needs_limiter" if s.music_max_boost_db > 0 else "attenuate_only"  # #4118
     elif kind == "book":
         row = db.get(Book, item_id)
-        target, mode = s.book_target_lufs, "boost_needs_limiter"
+        target = s.book_target_lufs
+        mode = "boost_needs_limiter" if s.book_max_boost_db > 0 else "attenuate_only"  # #5282
     else:
         raise HTTPException(status_code=400, detail="kind must be track or book")
     if row is None:

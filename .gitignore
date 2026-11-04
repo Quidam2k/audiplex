@@ -66,3 +66,12 @@ server/data/
 # DJ bridge watcher (#2858) runtime state
 data/dj_patter.json
 data/dj_bridge.log
+
+# Internal working material (kept locally, not published)
+notes/
+cascades/
+.claude/
+NOTE-*
+session-state.md
+CLAUDE.local.md
+specs/

@@ -190,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--backup-done-at", default="")
     ap.add_argument("--windows", type=int, default=6)
     ap.add_argument("--window-s", type=float, default=60)
-    ap.add_argument("--lane-status", default="Q:/Pantheon/data/audiobook_whisper/status.json")
+    ap.add_argument("--lane-status", default=os.environ.get("AUDIPLEX_LANE_STATUS", "status.json"))
     ap.add_argument("--lane", default="A")
     ap.add_argument("--baseline-s", type=float, default=900)  # lane writes every ~5 min
     ap.add_argument("--min-ratio", type=float, default=0.7)

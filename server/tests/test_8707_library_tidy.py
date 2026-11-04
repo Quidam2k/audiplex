@@ -122,8 +122,8 @@ def test_single_mp3_folder_is_indexed(db_session, tmp_path, libation_db):
 
 def test_canonical_rank_prefers_real_album():
     real = r"H:\Stacked Deck\Music\Artists & Albums\World\Adiemus\09 - Cantus.mp3"
-    mix = r"Q:\Stacked Deck Music\Bike Music\09 - Cantus.mp3"
-    ren = r"Q:\Stacked Deck Music\Artists & Albums\Mixed\Ren Faire\09 - Cantus.mp3"
+    mix = r"D:\Music\Bike Music\09 - Cantus.mp3"
+    ren = r"D:\Music\Artists & Albums\Mixed\Ren Faire\09 - Cantus.mp3"
     assert canonical_rank(real, 9) < canonical_rank(mix, 1)
     assert canonical_rank(mix, 1) < canonical_rank(ren, 2)
 
@@ -132,7 +132,7 @@ def test_duplicates_hidden_from_flat_lists_not_albums(client, db_session):
     artist = Artist(name="Adiemus")
     db_session.add(artist)
     db_session.flush()
-    mix = Album(title="Bike Music", artist_id=artist.id, folder_path=r"Q:\Stacked Deck Music\Bike Music")
+    mix = Album(title="Bike Music", artist_id=artist.id, folder_path=r"D:\Music\Bike Music")
     real = Album(title="Cantata Mundi", artist_id=artist.id,
                  folder_path=r"H:\Stacked Deck\Music\Artists & Albums\World\Adiemus")
     db_session.add_all([mix, real])

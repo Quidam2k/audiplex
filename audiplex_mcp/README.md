@@ -3,7 +3,7 @@
 A standalone [MCP](https://modelcontextprotocol.io) server that lets an agent
 act as a DJ for an Audiplex device: queue music and read now-playing state.
 It talks only to the Audiplex REST API, so it stays independent of any
-particular agent host (Pantheon or otherwise).
+particular agent host (or otherwise).
 
 ## How it works
 
@@ -35,7 +35,7 @@ the agent conclude the library is empty.
 Listening signal (#947/#948) — `dj_track_stats` reads completion RATE and where
 skips land (sharper than raw play counts: "played 8, finished 2" and "played 2,
 finished 2" have the same count and opposite meanings). `dj_check_picks` asks
-whether a proposed set would repeat something Todd just heard, at recording
+whether a proposed set would repeat something the user just heard, at recording
 level (this exact track) or work level (any version of the song, 20 min each by
 default). Both are advisory — `dj_play_now` / `dj_queue` / `dj_play_next` append
 a heads-up when a pick just played but never filter, because an explicit request
@@ -48,7 +48,7 @@ Stored MCP-side in `data/dj/taste.db` (`DJ_TASTE_DB`), gitignored.
 
 Ingest (#2945 phase B) — `dj_find_candidates` searches for a real source and
 downloads **nothing**; `dj_ingest` takes a candidate id from that search plus
-Todd's actual words of approval, then downloads, tags, files it under
+the user's actual words of approval, then downloads, tags, files it under
 `<Artist>/<Album>/` (or `Artists & Albums/<Genre>/<Artist>/<Album>/`) and
 rescans. The folder layout is not cosmetic — the scanner is path-first, so it
 is what makes the track browsable by artist. Needs `ffmpeg` on PATH.
@@ -88,7 +88,7 @@ is what makes the track browsable by artist. Needs `ffmpeg` on PATH.
 }
 ```
 
-Run from the repo root (`Q:\Development\audiplex`) so `audiplex_mcp` is importable.
+Run from the repo root so `audiplex_mcp` is importable.
 
 ## DJ voice breaks (item #431)
 
@@ -129,9 +129,8 @@ and `dj_break_brief` warns when it's unconfigured.
 `launch-dj-bridge-hidden.vbs`). It polls `GET /api/playback/state` every 2 s,
 read-only, and on every 2nd-3rd music track change runs the `DJ_BRIDGE_CMD` hook
 with the prev/now/next tags, so a voice persona can talk over the song intro.
-It never sends playback commands. The default hook is Pantheon's
-`scripts/dj_bridge_push.py`, which invites Jarvis, Karen and Orolo in rotation
-through Pantheon's own inbox path. Audiplex never imports Pantheon.
+It never sends playback commands. The hook is whatever command you configure (for example a script that
+invites an assistant to talk over the song). Audiplex never imports the host app.
 
 - On/off: the `dj_patter(on, every_min, every_max)` tool, or
   `python -m audiplex_mcp.dj_bridge_watcher on|off|status`. The setting lives in

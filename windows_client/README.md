@@ -8,7 +8,7 @@ of on the phone. When it isn't active it just polls and never takes commands.
 - Needs VLC installed (64-bit, matching Python). Python deps live in a venv (#3921, global pip is blocked):
   `C:\Python311\python -m venv .venv` then `.venv\Scripts\python -m pip install -r requirements.txt`.
 - Config: `%APPDATA%\AudiplexPC\config.json`
-  `{"base_url": "http://192.168.50.139:8100", "token": "...", "device_id": "pc-solace", "device_name": "Solace"}`
+  `{"base_url": "http://192.168.1.x:8100", "token": "...", "device_id": "pc-solace", "device_name": "Solace"}`
   (env overrides: `AUDIPLEX_PC_URL`, `AUDIPLEX_PC_TOKEN`, `AUDIPLEX_DEVICE_ID`, `AUDIPLEX_DEVICE_NAME`).
 - Token: `cd server && python -m audiplex.create_service_token --username pc-solace` (one account per PC).
 - Run: `.venv\Scripts\pythonw -m audiplex_pc` from this folder (`--debug` for verbose logging).

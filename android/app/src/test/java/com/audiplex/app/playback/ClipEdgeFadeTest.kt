@@ -85,10 +85,10 @@ class ClipEdgeFadeTest {
     }
 
     @Test
-    fun `a clip stays at full level regardless of its neighbours`() {
+    fun `a clip stays at full level after its first moments regardless of its neighbours`() {
         for (prevIsClip in listOf(false, true)) {
             for (nextIsClip in listOf(false, true)) {
-                for (positionMs in listOf(-100L, 0L, 750L, 4999L, 5000L)) {
+                for (positionMs in listOf(ClipEdgeFade.CLIP_IN_MS, 750L, 4999L, 5000L)) {
                     assertEquals(
                         1f,
                         ClipEdgeFade.level(
