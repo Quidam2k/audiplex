@@ -389,26 +389,97 @@ def _pantheon_db_path() -> Path:  # #3249
     return Path(os.environ.get("DJ_PANTHEON_DB") or "Q:/Pantheon/data/pantheon.db")
 
 
-def _recent_announcement(now: "datetime.datetime | None" = None) -> bool | None:  # #3249
-    """True if a persona mentioned the music in chat recently; None if unreadable."""
+ANNOUNCE_HELD_REFUSAL = (  # #5451 starts with the #3249 prefix so _held_kind still reads announce_first
+    "REFUSED (announce first): your intro was HELD, not heard: Pantheon has no device that "
+    "can play speech right now (seat on a muted or paused device), so this music would "
+    "start unannounced. Nothing was sent. Do this now, in this turn: voice the same line "
+    "with dj_announce(text=<your intro>, mode='now'), which plays through the music "
+    "player he can hear, then call this tool again. (A say() retry also works once the "
+    "seat has moved to his phone.)"
+)
+_HELD_STATUSES = ("muted", "swept")  # #5451 speech_queue rows that will never play on their own
+_PENDING_STATUSES = ("pending", "processing", "ready", "playing")  # #5451 'playing' = served, not yet started (Codex)
+_last_dj_announce = {"at": 0.0}  # #5451 epoch secs of this process's last queued dj_announce
+PLAYBACK_STATE_STALE_S = 30.0  # #5451 same staleness Pantheon's own reader uses
+
+
+def _pantheon_seat_cannot_play(db_path: Path, now_epoch: float) -> bool:  # #5451
+    """True only when Pantheon's FRESH playback_state says nothing can play. Unknown = False."""
+    try:
+        raw = json.loads((db_path.parent / "runtime" / "playback_state.json").read_text(encoding="utf-8"))
+        age = now_epoch - float(raw.get("written_at_monotonic") or 0)
+        return (0 <= age <= PLAYBACK_STATE_STALE_S) and raw.get("eligible") is False
+    except Exception:
+        return False
+
+
+def _heard_or_will_be(con, msg_ids: list[int], seat_dead: bool) -> set[int]:  # #5451
+    """The music-word messages that are (or can still be) HEARD. A message with no
+    speech rows, or an unreadable speech table, counts (fail-open, as before)."""
+    try:
+        q = ",".join("?" * len(msg_ids))
+        # Continuation chunks carry parent_message_id, not message_id (Codex P2).
+        rows = con.execute(f"SELECT id, COALESCE(parent_message_id, message_id), status FROM speech_queue "
+                           f"WHERE message_id IN ({q}) OR parent_message_id IN ({q})",
+                           [*msg_ids, *msg_ids]).fetchall()
+        sids = [r[0] for r in rows]
+        started = set()
+        if sids:
+            started = {r[0] for r in con.execute(
+                f"SELECT DISTINCT speech_id FROM audio_events WHERE event_type IN ('play_start','play_ack') "
+                f"AND speech_id IN ({','.join('?' * len(sids))})", sids).fetchall()}
+    except sqlite3.Error:
+        return set(msg_ids)
+    by_msg: dict[int, list] = {}
+    for sid, mid, status in rows:
+        by_msg.setdefault(mid, []).append((sid, status))
+    heard = set()
+    for mid in msg_ids:
+        clips = by_msg.get(mid)
+        if not clips or any(sid in started for sid, _ in clips):
+            heard.add(mid)
+            continue
+        statuses = {st for _, st in clips}
+        if statuses <= set(_HELD_STATUSES):
+            continue  # every clip held, none started: never heard
+        if seat_dead and statuses <= set(_HELD_STATUSES + _PENDING_STATUSES):
+            continue  # #5451 still queued, but onto a seat that cannot play: it will be held
+        heard.add(mid)
+    return heard
+
+
+def _announcement_state(now: "datetime.datetime | None" = None) -> str | None:  # #3249 #5451
+    """'heard' | 'held' (an intro exists but nobody can hear it) | 'none'; None if unreadable."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if now.timestamp() - _last_dj_announce["at"] <= ANNOUNCE_WINDOW_S:  # #5451 media-path intro
+        return "heard"
     path = _pantheon_db_path()
     if not path.exists():
         return None
-    now = now or datetime.datetime.now(datetime.timezone.utc)
     cutoff = (now - datetime.timedelta(seconds=ANNOUNCE_WINDOW_S)).strftime("%Y-%m-%dT%H:%M:%S")
     try:
         con = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=5)
         try:
             rows = con.execute(
-                "SELECT content FROM messages WHERE timestamp >= ? AND sender IN "
+                "SELECT id, content FROM messages WHERE timestamp >= ? AND sender IN "
                 f"({','.join('?' * len(_PERSONA_SENDERS))})",
                 (cutoff, *_PERSONA_SENDERS),
             ).fetchall()
+            ids = [r[0] for r in rows if _MUSIC_WORDS.search(r[1] or "")]
+            if not ids:
+                return "none"
+            heard = _heard_or_will_be(con, ids, _pantheon_seat_cannot_play(path, now.timestamp()))
         finally:
             con.close()
     except sqlite3.Error:
         return None
-    return any(_MUSIC_WORDS.search(r[0] or "") for r in rows)
+    return "heard" if heard else "held"
+
+
+def _recent_announcement(now: "datetime.datetime | None" = None) -> bool | None:  # #3249
+    """True if a persona's music announcement was (or can be) heard recently; None if unreadable."""
+    st = _announcement_state(now)
+    return None if st is None else st == "heard"
 
 
 async def _announce_gate(cmd_type: str) -> str | None:  # #3249
@@ -423,10 +494,12 @@ async def _announce_gate(cmd_type: str) -> str | None:  # #3249
         return None  # already playing: nothing new starts
     if cmd_type in ("queue", "play_next") and state.get("queue"):
         return None  # appending to a loaded (paused) queue doesn't start it
-    announced = _recent_announcement()
+    announced = _announcement_state()  # #5451
     if announced is None:
         return None  # can't read chat: don't block music on our own blindness
-    return None if announced else ANNOUNCE_REFUSAL
+    if announced == "held":  # #5451 a held intro is not an announcement
+        return ANNOUNCE_HELD_REFUSAL
+    return None if announced == "heard" else ANNOUNCE_REFUSAL
 
 
 async def _playable_split(track_ids: list[int]) -> tuple[list[int], list[int]]:  # #3249
@@ -1988,6 +2061,8 @@ async def dj_announce(
     )
     if isinstance(data, str):
         return data
+    if mode == "now":  # #5451 only an intro that plays BEFORE the music counts; 'next' waits behind a loaded song (Codex)
+        _last_dj_announce["at"] = time.time()  # #5451 an intro on the music path counts for the #3249 gate
     secs = clip.get("duration_seconds")
     length = f"{secs:.1f}s" if isinstance(secs, (int, float)) else "unknown length"
     when = "after the current track" if mode == "next" else "immediately"
