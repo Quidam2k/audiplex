@@ -29,7 +29,7 @@ Run it:
 Use that interpreter explicitly. Audiplex's deps (passlib, PyJWT, fastapi)
 live in C:\Python311 — the same interpreter production's launch.bat uses — but
 a bare `python` inside a Pantheon worker shell resolves to
-Q:\Pantheon\.venv-omnivoice, which lacks passlib and fails at import. The
+the host app's venv, which lacks passlib and fails at import. The
 uvicorn subprocess inherits sys.executable, so whichever Python starts the
 harness is the one the server runs on.
 

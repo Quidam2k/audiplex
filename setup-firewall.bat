@@ -10,7 +10,7 @@ if %errorLevel% neq 0 (
     exit /b 1
 )
 
-powershell -NoProfile -Command "New-NetFirewallRule -DisplayName 'Audiplex Server (TCP 8100)' -Direction Inbound -Protocol TCP -LocalPort 8100 -Action Allow -RemoteAddress 192.168.50.0/24 -Profile Any -Description 'Allow inbound TCP 8100 from home LAN for the Audiplex audiobook server'"
+powershell -NoProfile -Command "New-NetFirewallRule -DisplayName 'Audiplex Server (TCP 8100)' -Direction Inbound -Protocol TCP -LocalPort 8100 -Action Allow -RemoteAddress LocalSubnet -Profile Any -Description 'Allow inbound TCP 8100 from home LAN for the Audiplex audiobook server'"
 
 if %errorLevel% equ 0 (
     echo.

@@ -7,6 +7,7 @@ import bisect
 import csv
 import json
 import math
+import os
 import sqlite3
 import statistics
 import sys
@@ -1090,7 +1091,7 @@ def write_png(path, data):
 def main():
     server = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--pantheon-db", default="Q:/Pantheon/data/pantheon.db")
+    parser.add_argument("--pantheon-db", default=os.environ.get("AUDIPLEX_HOST_DB", "host.db"))
     parser.add_argument("--audiplex-db", default=str(server / "audiplex.db"))
     parser.add_argument("--since", default="2026-10-01", help="ISO UTC cutoff")
     parser.add_argument("--out-dir", required=True)

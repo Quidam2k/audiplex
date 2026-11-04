@@ -140,9 +140,9 @@ def trigger_music_scan(db: Session = Depends(get_db), user: User = Depends(get_c
 
 @router.post("/scan/audiobooks", response_model=ScanResultSchema)
 def trigger_audiobook_scan(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """Rescan ONLY the audiobook_clean roots (P:/Books). Any authenticated caller.
+    """Rescan ONLY the audiobook_clean roots. Any authenticated caller.
 
-    Pantheon #4464: "sync my Audible" downloads new books into P:/Books and
+    #4464: "sync my Audible" downloads new books into the audiobook folder and
     must get them into the books table (which feeds the Whisper queue) without
     admin and without walking every music root. Same #842 scoping as
     /scan/music: only the audiobook family is read, so only it can be swept.

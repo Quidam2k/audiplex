@@ -45,7 +45,7 @@ def storage_root_offline(file_path: str, library_root_paths: list[str]) -> bool:
     at once; Media3 treats 404 as a hard source error but will retry a 503, so
     playback self-heals once the share returns. A path under a root that DOES
     exist (or under no configured root) is a genuine 404, so this returns False.
-    #1001 — the Athena `\\\\Athena.local\\...\\Libation\\Books` share dropping
+    #1001 — a network share (UNC path to a remote Libation books folder) dropping
     404'd all 598 audiobooks on it, and the phone showed a permanent stall.
     """
     target = _norm_path(file_path)

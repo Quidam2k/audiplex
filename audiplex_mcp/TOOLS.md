@@ -1,14 +1,14 @@
 # audiplex-dj MCP — tool catalog
 
 Every tool a persona can call, one line each. Source of truth for "what can the
-DJ do?" — Pantheon's `docs/entry-points.md` points here. A test
+DJ do?" — the host app's entry-point docs point here. A test
 (`server/tests/test_ride0928_tools_catalog.py`) fails if a registered tool is
 missing from this file, so adding a tool means adding its line.
 
 **Talk guard (#ride0928):** every tool that can start audio on an idle player
 (`dj_play_now`, `dj_queue`, `dj_play_next`, `dj_queue_by`, `dj_resume`,
 `dj_play_stream`, `dj_mix`, `dj_folder`, `dj_pool_set`, `dj_transfer`, `dj_play_book`) is HELD
-while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
+while the user is talking or typing (the host app's `speech_state.json`). They lead with
 `RESULT sent= held= skipped_missing=[titles] phone_ack=`.
 
 ## Start and steer the music
@@ -20,17 +20,17 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_mix_status` — did dj_mix's song-boundary swap (old phone builds) fire yet?
 - `dj_folder` — one folder: shuffle it (via dj_mix), queue it, or save it as a playlist.
 - `dj_play_stream` — play an external HTTP stream (e.g. Radio Free Luna).
-- `dj_skip` / `dj_previous` — next / previous item in the queue. Pass `dj_skip(todd_asked=True)` only when Todd asked for the skip: those count against the song when the DJ learns from the ride (#4057).
+- `dj_skip` / `dj_previous` — next / previous item in the queue. Pass `dj_skip(todd_asked=True)` only when the user asked for the skip: those count against the song when the DJ learns from the ride (#4057).
 - `dj_pause` / `dj_resume` — pause / resume (resume is talk-guarded).
 - `dj_seek` — jump to a position in the current track.
-- `dj_volume` — app player volume 0-100, only when Todd asks (todd_quote required, #3504).
+- `dj_volume` — app player volume 0-100, only when the user asks (todd_quote required, #3504).
 - `dj_reorder` — move a queued item by index (indices from dj_now_playing).
 - `dj_upcoming` — the upcoming queue in order, with each track's `#index` and mix source.
 - `dj_remove` / `dj_insert` / `dj_swap` — edit what's still to come by `#index` (from dj_upcoming) or track id; one replace_upcoming, the current song is never touched.
 - `dj_ban` / `dj_unban` / `dj_bans` — never pick a track again (every copy of the recording) in mixes and the pool; reversible; lists who banned what and why.
-- `dj_resume` — put Todd's last music queue back on the phone at the song and spot he left it, PAUSED (he presses play). For "put my music back" after the app was closed. Old phones (<1.0.49) say they can't; `play=True` restores and starts. (#3601)
-- `dj_star` — when Todd says a rating out loud ("five stars", "four and a half"), set it: his own star field in the app, with his words + who heard it. Halves are kept (app 1.0.51+ shows them; older builds show the star below). (#6117) Replaces the old `five-star-verbal` tags; `{"kind": "rated", "query": "4"}` is a mix/pool source of his 4+ star tracks. (#3576)
-- `dj_love` — **whenever Todd says he loves a song** (chat, voice, ride, dead drop): "I love this", "one of my favorites", "this goes on anything about hope". With a number he SAID, it's `dj_star`; with none it tags `loved` + keeps his words, and sets NO stars (never invent a 5). Always pass his words; `private=True` when the reason is personal (stars count, words never go on air). `{"kind": "tag", "query": "loved"}` is a pool source. (#7230)
+- `dj_resume` — put the user's last music queue back on the phone at the song and spot he left it, PAUSED (he presses play). For "put my music back" after the app was closed. Old phones (<1.0.49) say they can't; `play=True` restores and starts. (#3601)
+- `dj_star` — when the user says a rating out loud ("five stars", "four and a half"), set it: his own star field in the app, with his words + who heard it. Halves are kept (app 1.0.51+ shows them; older builds show the star below). (#6117) Replaces the old `five-star-verbal` tags; `{"kind": "rated", "query": "4"}` is a mix/pool source of his 4+ star tracks. (#3576)
+- `dj_love` — **whenever the user says he loves a song** (chat, voice, ride, dead drop): "I love this", "one of my favorites", "this goes on anything about hope". With a number he SAID, it's `dj_star`; with none it tags `loved` + keeps his words, and sets NO stars (never invent a 5). Always pass his words; `private=True` when the reason is personal (stars count, words never go on air). `{"kind": "tag", "query": "loved"}` is a pool source. (#7230)
 - `dj_loves` — every song he's said he loves, one list: his stars with his words, then loved songs with no number. Read before building a set. `dj_break_brief` shows these for Prev/Now/Next as colour, never a quote. (#7230)
 - `dj_tag` / `dj_untag` / `dj_tags` — mood/vibe tags you apply by ear (never inferred); a tag is also a mix/pool source: `{"kind": "tag", "query": "chill"}`. (#2806)
 - `dj_energy_set` — a set ordered by MEASURED energy (0-100): arc rise / peak / wind_down / steady, optional minutes, tags, energy window. Replaces what's after the current song. Unmeasured tracks are left out and counted. (#2806)
@@ -51,7 +51,7 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 
 ## Voice
 - `dj_break_brief` — everything to write a break: daypart, time, weather, Previous / Now playing / Next, DJ pair notes, and a loudness line per track (intro quiet, fade, dips; "not measured yet" until scripts/measure_profile.py has run). #3981
-- `dj_announce` — synthesize your copy and queue it as a voice break (held while Todd talks).
+- `dj_announce` — synthesize your copy and queue it as a voice break (held while the user talks).
 - `dj_patter` — turn the bridge watcher's automatic between-song patter on/off.
 
 ## What's playing, and is the phone alive
@@ -70,8 +70,8 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_search` — find tracks by name.
 - `dj_set_kind` — mark tracks/folders music | podcast | clip | ambient (only music goes into mixes and pools).
 
-## Todd's listening and taste
-- `dj_history` — what Todd actually played, newest first.
+## the user's listening and taste
+- `dj_history` — what the user actually played, newest first.
 - `dj_cooldown` — what he heard recently enough that a pick would repeat it.
 - `dj_check_picks` — before queueing: which picks repeat something recent, and why (advisory).
 - `dj_track_ratings` — his own 1-5 star ratings from the phone.
@@ -82,8 +82,8 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_plays_well_after` — "what plays well after this, and why": library songs with stored-evidence reasons (pair note, shared writer, sample/cover link, shared theme, tag/bucket, key+tempo, energy, release year); "never after" notes veto. (#3984)
 - `dj_theme_songs` — songs about a theme ("war", "hope", "robots"): his tags, bucket names, then sourced song notes. (#3984)
 - Queue-time notes (#3984): dj_play_now / dj_queue / dj_play_next / dj_queue_by / dj_mix end with a CONTEXT block of sourced facts for the first 5 queued songs and any stored link between neighbours (CAUTION on a vetoed pair). Omitted when slow (>1.5 s), unknown, or the queue guard dropped tracks.
-- `dj_what_was_that` — Todd asked "what was that?": names the last (or current) song and has the DJ name it the next 3 plays (#3912).
-- `dj_callouts` — which songs a DJ bridge names: whole-album deep cuts yes, Todd's faster/slower picks and hits no; show or set per pool lane (#3912).
+- `dj_what_was_that` — the user asked "what was that?": names the last (or current) song and has the DJ name it the next 3 plays (#3912).
+- `dj_callouts` — which songs a DJ bridge names: whole-album deep cuts yes, the user's faster/slower picks and hits no; show or set per pool lane (#3912).
 
 ## Themed buckets
 - `dj_bucket_list` / `dj_bucket_show` — list buckets; show one.
@@ -96,7 +96,7 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 - `dj_taste` — what's been learned about his taste.
 - `dj_find_candidates` — find downloadable sources for a recommendation.
 - `dj_ingest` — download an APPROVED candidate, tag it, rescan.
-- `dj_fetch_from_playlists` — fetch a track covered by Todd's standing playlist approval (#3245).
+- `dj_fetch_from_playlists` — fetch a track covered by the user's standing playlist approval (#3245).
 
 ## Sleep engine
 - `dj_bed_play` / `dj_bed_stop` / `dj_bed_volume` — the looping sleep-bed layer.
@@ -104,9 +104,9 @@ while Todd is talking or typing (Pantheon `speech_state.json`). They lead with
 
 ## Stopping (#3505)
 - `dj_stop_after_current` — "stop after this song": trims the queue, stops the pool, latches against refills, pauses at the song's end on any phone build, then verifies playing=no.
-- `dj_stop_status` — the verdict (VERIFIED or NOT verified) and whether the stop latch is on. Never tell Todd it stopped until this says VERIFIED.
+- `dj_stop_status` — the verdict (VERIFIED or NOT verified) and whether the stop latch is on. Never tell the user it stopped until this says VERIFIED.
 - `dj_stop_cancel` — cancel the stop and lift the latch. While the latch is on, dj_queue/dj_play_next answer STOPPED; that's deliberate. dj_play_now also lifts it; it expires after 3 h.
-- `dj_stop` (reason, todd_quote) — #4011: Todd's own stop. Pauses, stops the pool, refuses pending starts, and sets a PERSISTED latch with no timer. Every start (play_now, resume, queue, play_next, play_stream, play_book, activate, announce, bed_play, refills) is refused until Todd lifts it. resume, dj_stop_cancel and DELETE scheduled-stop do NOT lift it. A stop is lifted only by Todd's own words about music.
+- `dj_stop` (reason, todd_quote) — #4011: the user's own stop. Pauses, stops the pool, refuses pending starts, and sets a PERSISTED latch with no timer. Every start (play_now, resume, queue, play_next, play_stream, play_book, activate, announce, bed_play, refills) is refused until the user lifts it. resume, dj_stop_cancel and DELETE scheduled-stop do NOT lift it. A stop is lifted only by the user's own words about music.
 - `dj_stop_lift` (todd_quote) — #4011: the only lift for dj_stop. Quote is required. Phone play, Bluetooth reconnect and audio focus never lift it.
 - Command tools (pause, skip, volume, seek, previous, reorder, bed_*) now lead with DONE only when the phone acked ok; otherwise NOT DONE.
 - `dj_sleep_start` — "sleep mode". No args: the playing book fades out after 30 min while the brown-noise bed (found by title in the library) crossfades in; `bed_mode="under"` keeps the bed underneath from the start.

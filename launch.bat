@@ -10,7 +10,7 @@ for /f "tokens=5" %%p in ('netstat -aon ^| findstr "LISTENING" ^| findstr ":8100
 timeout /t 2 /nobreak >nul
 
 echo Starting Audiplex server on http://0.0.0.0:8100 ...
-echo (LAN URL: http://192.168.50.139:8100)
+echo (reachable on the LAN at this machine's address, port 8100)
 echo.
 C:\Python311\python.exe -m uvicorn audiplex.main:app --host 0.0.0.0 --port 8100
 echo.
