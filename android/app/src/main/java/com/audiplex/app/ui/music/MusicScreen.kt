@@ -23,12 +23,14 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.activity.compose.BackHandler  // #4029
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.TrendingUp
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Shuffle  // #4029
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Warning
@@ -156,6 +158,7 @@ fun MusicScreen(
                         onOpenFolderRoot = { viewModel.openFolderRoot() },
                         onEnterFolder = { viewModel.enterFolder(it) },
                         onExitFolder = { viewModel.exitFolder() },
+                        onShuffleFolder = { path, name -> viewModel.shuffleFolder(path, name) },
                         onLongPress = { pendingItem = it }
                     )
                 }
@@ -223,6 +226,7 @@ private fun MusicContent(
     onOpenFolderRoot: () -> Unit,
     onEnterFolder: (String) -> Unit,
     onExitFolder: () -> Unit,
+    onShuffleFolder: (path: String, name: String) -> Unit,
     onLongPress: (PendingItem) -> Unit
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
@@ -316,6 +320,7 @@ private fun MusicContent(
             onOpenRoot = onOpenFolderRoot,
             onEnterFolder = onEnterFolder,
             onExitFolder = onExitFolder,
+            onShuffleFolder = onShuffleFolder,
             onAlbumClick = onAlbumClick
         )
         4 -> PlaylistsTab(
@@ -566,11 +571,15 @@ private fun FoldersTab(
     onOpenRoot: () -> Unit,
     onEnterFolder: (String) -> Unit,
     onExitFolder: () -> Unit,
+    onShuffleFolder: (path: String, name: String) -> Unit,
     onAlbumClick: (Int) -> Unit
 ) {
     LaunchedEffect(Unit) {
         if (listing == null) onOpenRoot()
     }
+    // #4029: back (and the swipe-back gesture) goes up one folder; at the
+    // roots it falls through and leaves Music as before.
+    BackHandler(enabled = listing?.path != null, onBack = onExitFolder)
     if (listing == null) {
         CenteredLoading()
         return
@@ -600,8 +609,12 @@ private fun FoldersTab(
                     text = folderDisplayPath(listing.path),
                     style = MaterialTheme.typography.bodyMedium,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
                 )
+                ShuffleFolderButton {
+                    onShuffleFolder(listing.path, listing.path.replace("\\", "/").trimEnd('/').substringAfterLast('/'))
+                }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
         }
@@ -622,7 +635,11 @@ private fun FoldersTab(
                 key = { "folder:${it.path}" },
                 span = { GridItemSpan(maxLineSpan) }
             ) { folder ->
-                FolderRow(folder = folder, onEnter = { onEnterFolder(folder.path) })
+                FolderRow(
+                    folder = folder,
+                    onEnter = { onEnterFolder(folder.path) },
+                    onShuffle = { onShuffleFolder(folder.path, folder.name) }
+                )
             }
             if (albums.isNotEmpty()) {
                 if (folders.isNotEmpty()) {
@@ -652,7 +669,8 @@ private fun FoldersTab(
 @Composable
 private fun FolderRow(
     folder: FolderNode,
-    onEnter: () -> Unit
+    onEnter: () -> Unit,
+    onShuffle: () -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -680,10 +698,23 @@ private fun FolderRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+        ShuffleFolderButton(onClick = onShuffle)
         AddToPlaylistButton(
             entityType = "folder",
             entityKey = folder.path,
             suggestedName = folder.name
+        )
+    }
+}
+
+/** #4029: shuffle everything under a folder, subfolders included. */
+@Composable
+private fun ShuffleFolderButton(onClick: () -> Unit) {
+    IconButton(onClick = onClick) {
+        Icon(
+            Icons.Default.Shuffle,
+            contentDescription = "Shuffle this folder",
+            tint = MaterialTheme.colorScheme.primary
         )
     }
 }

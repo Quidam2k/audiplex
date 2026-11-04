@@ -1,5 +1,6 @@
 package com.audiplex.app.ui.library
 
+import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.audiplex.app.data.ApiServiceHolder
@@ -80,14 +81,41 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
+    // #5421: elapsedRealtime counts deep sleep, so a phone locked overnight
+    // still reloads on unlock (nanoTime would not).
+    private val reloadGate = ReloadGate(now = { SystemClock.elapsedRealtime() })
+
+    /**
+     * #5421: called on every resume. Re-fetches the list without the Loading
+     * flash and without a server scan, so a book added while the app sat in
+     * the background shows up. Keeps the filters; on failure keeps the list.
+     */
+    fun reloadQuiet() {
+        if (_isRefreshing.value || !reloadGate.shouldReloadOnResume()) return
+        val current = _uiState.value
+        if (current is LibraryUiState.Loading || current is LibraryUiState.NoServer) return
+        val success = current as? LibraryUiState.Success
+        viewModelScope.launch {
+            doLoad(
+                success?.filterAuthor, success?.filterSeries,
+                success?.filterMode ?: LibraryFilterMode.All,
+                quiet = true
+            )
+        }
+    }
+
     private suspend fun doLoad(
         filterAuthor: String? = null,
         filterSeries: String? = null,
-        filterMode: LibraryFilterMode = LibraryFilterMode.All
+        filterMode: LibraryFilterMode = LibraryFilterMode.All,
+        quiet: Boolean = false
     ) {
+        val token = reloadGate.begin() // #5421
+        var succeeded = false
         try {
             val api = apiHolder.api ?: run {
-                _uiState.value = LibraryUiState.NoServer
+                val keepList = quiet && _uiState.value is LibraryUiState.Success
+                if (reloadGate.isCurrent(token) && !keepList) _uiState.value = LibraryUiState.NoServer
                 return
             }
             // Opportunistic offline→online flush: we have connectivity now, so
@@ -123,6 +151,10 @@ class LibraryViewModel @Inject constructor(
                 }
                 .sortedByDescending { it.progress.updatedAt }
 
+            if (!reloadGate.isCurrent(token)) return // a newer load owns the screen
+            // A quiet reload keeps the filter mode picked since it started.
+            val mode = if (quiet) (_uiState.value as? LibraryUiState.Success)?.filterMode ?: filterMode
+                else filterMode
             _uiState.value = LibraryUiState.Success(
                 books = books,
                 authors = authors,
@@ -130,11 +162,17 @@ class LibraryViewModel @Inject constructor(
                 inProgress = inProgress,
                 filterAuthor = filterAuthor,
                 filterSeries = filterSeries,
-                filterMode = filterMode
+                filterMode = mode
             )
+            succeeded = true
             favoritesStore.refresh()
         } catch (e: Exception) {
-            _uiState.value = LibraryUiState.Error(e.message ?: "Failed to load library")
+            val keepList = quiet && _uiState.value is LibraryUiState.Success
+            if (reloadGate.isCurrent(token) && !keepList) {
+                _uiState.value = LibraryUiState.Error(e.message ?: "Failed to load library")
+            }
+        } finally {
+            reloadGate.end(token, succeeded)
         }
     }
 

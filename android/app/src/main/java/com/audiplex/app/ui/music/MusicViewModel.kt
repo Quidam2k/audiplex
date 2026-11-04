@@ -11,7 +11,10 @@ import com.audiplex.app.data.api.FolderListing
 import com.audiplex.app.data.api.GenreSchema
 import com.audiplex.app.data.api.MusicArtistSchema
 import com.audiplex.app.data.api.PlaylistSummary
+import com.audiplex.app.playback.ORIGIN_MANUAL
+import com.audiplex.app.playback.PlaybackManager
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -35,7 +38,8 @@ class MusicViewModel @Inject constructor(
     private val apiHolder: ApiServiceHolder,
     private val settingsStore: SettingsStore,
     val favoritesStore: FavoritesStore,
-    val musicActions: MusicActions
+    val musicActions: MusicActions,
+    private val playbackManager: PlaybackManager // #4029
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow<MusicUiState>(MusicUiState.Loading)
@@ -129,28 +133,55 @@ class MusicViewModel @Inject constructor(
         }
     }
 
-    fun openFolderRoot() {
-        viewModelScope.launch {
+    // #4029: one folder load at a time; a newer one cancels the older, so a
+    // stale listing can never land on top of the folder you moved to.
+    private var folderJob: Job? = null
+
+    private fun loadFolder(path: String?) {
+        folderJob?.cancel()
+        folderJob = viewModelScope.launch {
             val api = apiHolder.api ?: return@launch
             // Keep the current listing on failure — nulling it would strand the
             // Folders tab on a spinner (its load-once effect won't re-fire).
-            runCatching { api.getFolders(null) }
-                .onSuccess { _folderListing.value = it }
-        }
-    }
-
-    fun enterFolder(path: String) {
-        viewModelScope.launch {
-            val api = apiHolder.api ?: return@launch
             runCatching { api.getFolders(path) }
                 .onSuccess { _folderListing.value = it }
         }
     }
 
-    /** Go up one level using the listing's parent pointer (null = roots). */
+    fun openFolderRoot() = loadFolder(null)
+
+    fun enterFolder(path: String) = loadFolder(path)
+
+    /**
+     * Go up one level using the listing's parent pointer (null = roots).
+     * #4029: ignored while a folder is still loading, so a fast double back
+     * can't compute "up" from the folder you are already leaving.
+     */
     fun exitFolder() {
-        val parent = _folderListing.value?.parent
-        if (parent == null) openFolderRoot() else enterFolder(parent)
+        if (folderJob?.isActive == true) return
+        loadFolder(_folderListing.value?.parent)
+    }
+
+    /** #4029: play everything under [path] (all subfolders), shuffled. */
+    fun shuffleFolder(path: String, name: String) {
+        viewModelScope.launch {
+            try {
+                val api = apiHolder.api ?: return@launch
+                val tracks = api.getFolderTracks(path)
+                if (tracks.isEmpty()) return@launch
+                val albumLookup = (_uiState.value as? MusicUiState.Success)
+                    ?.albums.orEmpty()
+                    .associate { it.id to (it.title to it.hasCover) }
+                playbackManager.playTracks(
+                    tracks = tracks,
+                    baseUrl = apiHolder.baseUrl,
+                    title = name,
+                    albumLookup = albumLookup,
+                    shuffle = true,
+                    origin = ORIGIN_MANUAL
+                )
+            } catch (_: Exception) { }
+        }
     }
 
     fun getBaseUrl(): String = apiHolder.baseUrl
