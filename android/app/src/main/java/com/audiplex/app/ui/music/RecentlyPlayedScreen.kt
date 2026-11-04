@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.audiplex.app.ui.common.HomeAction  // #5396
 import com.audiplex.app.data.ApiServiceHolder
 import com.audiplex.app.ui.common.SettingsAction  // #4221
 import com.audiplex.app.data.db.RecentlyPlayedDao
@@ -91,7 +92,7 @@ fun RecentlyPlayedScreen(
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                 }
             },
-            actions = { SettingsAction() },  // #4221
+            actions = { HomeAction(); SettingsAction() },  // #4221
             colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = MaterialTheme.colorScheme.surface
             )

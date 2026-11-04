@@ -14,8 +14,10 @@ import com.audiplex.app.data.db.DownloadDao
 import com.audiplex.app.data.db.DownloadEntity
 import com.squareup.moshi.Moshi
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -90,7 +92,10 @@ class DownloadRepository @Inject constructor(
 
     fun observeAllDownloads(): Flow<List<DownloadEntity>> = downloadDao.observeAll()
 
-    suspend fun getLocalPath(bookId: Int): String? {
+    suspend fun getLocalPath(bookId: Int): String? = withContext(Dispatchers.IO) { localPathOf(bookId) }
+
+    /** File and MediaStore checks are disk and binder calls; keep them off the main thread (#845). */
+    private suspend fun localPathOf(bookId: Int): String? {
         val entity = downloadDao.getById(bookId) ?: return null
         if (entity.status != DownloadEntity.Status.COMPLETED) return null
         if (MeditationStore.isContentUri(entity.localFilePath)) {
@@ -100,6 +105,16 @@ class DownloadRepository @Inject constructor(
         val file = File(entity.localFilePath)
         if (!file.exists()) return null
         return entity.localFilePath
+    }
+
+    /** #845: whether this book's download work is queued or running, so a stale PENDING row can be retried. */
+    suspend fun isWorkActive(bookId: Int): Boolean = withContext(Dispatchers.IO) {
+        try {
+            WorkManager.getInstance(context).getWorkInfosForUniqueWork(workName(bookId)).get()
+                .any { !it.state.isFinished }
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun deleteLocalCopy(pathOrUri: String) {

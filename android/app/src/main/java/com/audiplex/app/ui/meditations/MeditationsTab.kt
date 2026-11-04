@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.audiplex.app.data.api.BookSummary
 import com.audiplex.app.data.db.DownloadEntity
 
 /**
@@ -54,7 +55,7 @@ fun MeditationsTab(
         return
     }
 
-    if (state.meditations.isEmpty()) {
+    if (state.meditations.isEmpty() && state.sleepSounds.isEmpty()) {
         Column(
             modifier = Modifier.fillMaxSize().padding(32.dp),
             verticalArrangement = Arrangement.Center,
@@ -72,7 +73,7 @@ fun MeditationsTab(
     val downloadedCount = state.meditations.count {
         downloadStates[it.id] == DownloadEntity.Status.COMPLETED
     }
-    val allDownloaded = downloadedCount == state.meditations.size
+    val allDownloaded = state.meditations.isNotEmpty() && downloadedCount == state.meditations.size
 
     Column(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -116,44 +117,63 @@ fun MeditationsTab(
 
         LazyColumn(modifier = Modifier.fillMaxSize()) {
             items(state.meditations, key = { it.id }) { meditation ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onMeditationClick(meditation.id) }
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = meditation.title,
-                            style = MaterialTheme.typography.bodyLarge,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = formatDuration(meditation.durationSeconds),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    when (downloadStates[meditation.id]) {
-                        DownloadEntity.Status.COMPLETED -> Icon(
-                            Icons.Default.CheckCircle,
-                            contentDescription = "Downloaded",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        DownloadEntity.Status.DOWNLOADING,
-                        DownloadEntity.Status.PENDING -> CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp
-                        )
-                        else -> {}
-                    }
+                MeditationRow(meditation, downloadStates[meditation.id], onMeditationClick)
+            }
+            // #5465: sleep sounds in their own section, below the meditations.
+            if (state.sleepSounds.isNotEmpty()) {
+                item(key = "sleep-sounds-header") {
+                    Text(
+                        text = "Sleep sounds",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 4.dp)
+                    )
                 }
-                HorizontalDivider()
+                items(state.sleepSounds, key = { it.id }) { sound ->
+                    MeditationRow(sound, downloadStates[sound.id], onMeditationClick)
+                }
             }
         }
     }
+}
+
+@Composable
+private fun MeditationRow(meditation: BookSummary, downloadStatus: String?, onClick: (Int) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick(meditation.id) }
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = meditation.title,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = formatDuration(meditation.durationSeconds),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        when (downloadStatus) {
+            DownloadEntity.Status.COMPLETED -> Icon(
+                Icons.Default.CheckCircle,
+                contentDescription = "Downloaded",
+                tint = MaterialTheme.colorScheme.primary
+            )
+            DownloadEntity.Status.DOWNLOADING,
+            DownloadEntity.Status.PENDING -> CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp
+            )
+            else -> {}
+        }
+    }
+    HorizontalDivider()
 }
 
 private fun formatDuration(seconds: Double): String {

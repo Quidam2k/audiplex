@@ -63,6 +63,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import coil3.compose.AsyncImage
+import com.audiplex.app.ui.common.HomeAction  // #5396
 import com.audiplex.app.data.api.AudiplexApi
 import com.audiplex.app.playback.BedState
 import com.audiplex.app.playback.MusicQueueState
@@ -158,6 +159,7 @@ fun PlayerScreen(
                         )
                     }
                 }
+                HomeAction()  // #5396
                 SettingsAction()  // #4221
             },
             colors = TopAppBarDefaults.topAppBarColors(

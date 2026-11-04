@@ -1,5 +1,6 @@
 package com.audiplex.app.ui.library
 
+import androidx.activity.compose.BackHandler  // #10702
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -51,6 +52,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -73,7 +75,10 @@ import com.audiplex.app.ui.player.NowPlayingCard
 import coil3.compose.AsyncImage
 import com.audiplex.app.data.api.AudiplexApi
 import com.audiplex.app.data.api.BookSummary
+import com.audiplex.app.ui.common.HomeAction  // #5396
 import com.audiplex.app.ui.common.ItemActionSheet
+import com.audiplex.app.ui.common.LocalGoHome
+import com.audiplex.app.ui.common.LocalHomeTick
 import com.audiplex.app.ui.meditations.MeditationsTab // #839
 import com.audiplex.app.ui.meditations.MeditationsViewModel
 import com.audiplex.app.ui.common.ItemKind
@@ -93,11 +98,16 @@ fun LibraryScreen(
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
-            title = { Text("Audiplex") },
+            // #5396: the title is a Home shortcut too, alongside the visible Home button.
+            title = {
+                val goHome = LocalGoHome.current
+                Text("Audiplex", modifier = Modifier.clickable(enabled = goHome != null) { goHome?.invoke() })
+            },
             colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = MaterialTheme.colorScheme.surface
             ),
             actions = {
+                HomeAction()  // #5396
                 IconButton(onClick = onSettingsClick) {
                     Icon(Icons.Default.Settings, contentDescription = "Settings")
                 }
@@ -197,8 +207,23 @@ private fun LibraryContent(
     onFilterModeChange: (LibraryFilterMode) -> Unit,
     onRefresh: () -> Unit
 ) {
-    var selectedTab by remember { mutableIntStateOf(0) }
+    // #10702: saveable, so opening a meditation and pressing back returns to Meditations, not Books.
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     val tabs = listOf("Books", "Authors", "Series", "Meditations") // #839
+
+    // #10702: back from Authors/Series/Meditations goes to Books first, instead of leaving the app.
+    BackHandler(enabled = selectedTab != 0) { selectedTab = 0 }
+
+    // #5396: a Home tap lands on Books. handledTick survives a trip away, so returning by back
+    // does not reset the tab; only a new Home tap does.
+    val homeTick = LocalHomeTick.current
+    var handledTick by rememberSaveable { mutableIntStateOf(homeTick) }
+    LaunchedEffect(homeTick) {
+        if (homeTick != handledTick) {
+            selectedTab = 0
+            handledTick = homeTick
+        }
+    }
 
     // Active author/series filter chip
     val activeFilter = state.filterAuthor ?: state.filterSeries

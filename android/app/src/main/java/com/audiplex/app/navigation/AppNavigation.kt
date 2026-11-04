@@ -2,6 +2,8 @@ package com.audiplex.app.navigation
 
 import android.net.Uri
 import androidx.compose.runtime.Composable
+import androidx.navigation.NavController
+import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -52,6 +54,22 @@ object Routes {
     fun musicPlaylist(playlistId: Int) = "music/playlist/$playlistId"
 }
 
+/**
+ * #10702: open Now Playing without stacking a second copy. If a Player is already on the back stack,
+ * everything above it is popped and that same Player is reused, so one back from it always returns
+ * to the screen it was first opened from.
+ */
+fun NavController.openPlayer() = navigate(Routes.PLAYER) {
+    popUpTo(Routes.PLAYER)
+    launchSingleTop = true
+}
+
+/** #5396: Home is always Audiobooks > Books, with everything above it cleared. */
+fun NavController.goHome() = navigate(Routes.LIBRARY) {
+    popUpTo(graph.findStartDestination().id)
+    launchSingleTop = true
+}
+
 @Composable
 fun AppNavigation(navController: NavHostController) {
     val loginViewModel: LoginViewModel = hiltViewModel()
@@ -83,7 +101,7 @@ fun AppNavigation(navController: NavHostController) {
             LibraryScreen(
                 onBookClick = { bookId -> navController.navigate(Routes.bookDetail(bookId)) },
                 onSettingsClick = { navController.navigate(Routes.SETTINGS) },
-                onPlayerClick = { navController.navigate(Routes.PLAYER) }
+                onPlayerClick = { navController.openPlayer() }
             )
         }
 
@@ -95,7 +113,7 @@ fun AppNavigation(navController: NavHostController) {
             BookDetailScreen(
                 bookId = bookId,
                 onBack = { navController.popBackStack() },
-                onPlayerClick = { navController.navigate(Routes.PLAYER) }
+                onPlayerClick = { navController.openPlayer() }
             )
         }
 
@@ -132,28 +150,28 @@ fun AppNavigation(navController: NavHostController) {
                 onMostPlayedClick = { navController.navigate(Routes.MUSIC_MOST_PLAYED) },
                 onLikelySkipsClick = { navController.navigate(Routes.MUSIC_LIKELY_SKIPS) },
                 onRecentlyPlayedClick = { navController.navigate(Routes.MUSIC_RECENTLY_PLAYED) },
-                onPlayerClick = { navController.navigate(Routes.PLAYER) }  // #7528
+                onPlayerClick = { navController.openPlayer() }  // #7528
             )
         }
 
         composable(Routes.MUSIC_MOST_PLAYED) {
             MostPlayedScreen(
                 onBack = { navController.popBackStack() },
-                onPlayerClick = { navController.navigate(Routes.PLAYER) }
+                onPlayerClick = { navController.openPlayer() }
             )
         }
 
         composable(Routes.MUSIC_LIKELY_SKIPS) {
             LikelySkipsScreen(
                 onBack = { navController.popBackStack() },
-                onPlayerClick = { navController.navigate(Routes.PLAYER) }
+                onPlayerClick = { navController.openPlayer() }
             )
         }
 
         composable(Routes.MUSIC_RECENTLY_PLAYED) {
             RecentlyPlayedScreen(
                 onBack = { navController.popBackStack() },
-                onPlayerClick = { navController.navigate(Routes.PLAYER) }
+                onPlayerClick = { navController.openPlayer() }
             )
         }
 
@@ -177,7 +195,7 @@ fun AppNavigation(navController: NavHostController) {
                 title = title,
                 onBack = { navController.popBackStack() },
                 onAlbumClick = { albumId -> navController.navigate(Routes.musicAlbum(albumId)) },
-                onPlayerClick = { navController.navigate(Routes.PLAYER) }
+                onPlayerClick = { navController.openPlayer() }
             )
         }
 
@@ -190,7 +208,7 @@ fun AppNavigation(navController: NavHostController) {
                 artistId = artistId,
                 onBack = { navController.popBackStack() },
                 onAlbumClick = { albumId -> navController.navigate(Routes.musicAlbum(albumId)) },
-                onPlayerClick = { navController.navigate(Routes.PLAYER) }
+                onPlayerClick = { navController.openPlayer() }
             )
         }
 
@@ -202,7 +220,7 @@ fun AppNavigation(navController: NavHostController) {
             AlbumDetailScreen(
                 albumId = albumId,
                 onBack = { navController.popBackStack() },
-                onPlayerClick = { navController.navigate(Routes.PLAYER) }
+                onPlayerClick = { navController.openPlayer() }
             )
         }
 
@@ -214,7 +232,7 @@ fun AppNavigation(navController: NavHostController) {
             PlaylistDetailScreen(
                 playlistId = playlistId,
                 onBack = { navController.popBackStack() },
-                onPlayerClick = { navController.navigate(Routes.PLAYER) }
+                onPlayerClick = { navController.openPlayer() }
             )
         }
     }

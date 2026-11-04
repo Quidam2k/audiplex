@@ -15,6 +15,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider  // #4221
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf  // #5396
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -22,6 +26,8 @@ import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.audiplex.app.ui.common.LocalGoHome  // #5396
+import com.audiplex.app.ui.common.LocalHomeTick
 import com.audiplex.app.ui.common.LocalOpenSettings  // #4221
 import com.audiplex.app.ui.player.MiniPlayer
 import com.audiplex.app.ui.player.PlayerViewModel
@@ -48,14 +54,22 @@ fun RootScaffold() {
     val showMiniPlayer = hasActive && currentRoute != Routes.PLAYER
     val showBottomBar = currentRoute in rootTabs.map { it.route }
 
-    val openSettings = { navController.navigate(Routes.SETTINGS) { launchSingleTop = true } }  // #4221
-    CompositionLocalProvider(LocalOpenSettings provides openSettings) { Scaffold(  // #4221
+    val openSettings = remember(navController) {  // #4221
+        { navController.navigate(Routes.SETTINGS) { launchSingleTop = true } }
+    }
+    var homeTick by rememberSaveable { mutableIntStateOf(0) }  // #5396
+    val goHome = remember(navController) { { homeTick++; navController.goHome() } }
+    CompositionLocalProvider(
+        LocalOpenSettings provides openSettings,  // #4221
+        LocalGoHome provides goHome,  // #5396
+        LocalHomeTick provides homeTick
+    ) { Scaffold(
         modifier = Modifier.fillMaxSize(),
         bottomBar = {
             if (showMiniPlayer) {
                 MiniPlayer(
                     viewModel = playerViewModel,
-                    onClick = { navController.navigate(Routes.PLAYER) }
+                    onClick = { navController.openPlayer() }
                 )
             }
             if (showBottomBar) {

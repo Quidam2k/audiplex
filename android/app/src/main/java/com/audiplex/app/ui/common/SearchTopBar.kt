@@ -96,6 +96,7 @@ fun SearchTopBar(
                     Icon(Icons.Default.Search, contentDescription = "Search")
                 }
                 actions()
+                HomeAction()  // #5396
                 SettingsAction()  // #4221
             },
             colors = colors

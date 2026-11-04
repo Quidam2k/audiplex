@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.audiplex.app.data.ApiServiceHolder
 import com.audiplex.app.data.api.BookSummary
 import com.audiplex.app.data.download.CATEGORY_MEDITATION
+import com.audiplex.app.data.db.DownloadEntity
 import com.audiplex.app.data.download.DownloadRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,7 +17,10 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 data class MeditationsUiState(
+    /** #5465: newest first, sleep sounds taken out. */
     val meditations: List<BookSummary> = emptyList(),
+    /** #5465: the server's sleep beds, shown in their own section. */
+    val sleepSounds: List<BookSummary> = emptyList(),
     val isLoading: Boolean = true,
     val isQueueing: Boolean = false,
     val error: String? = null
@@ -51,7 +55,10 @@ class MeditationsViewModel @Inject constructor(
 
     fun load() {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isLoading = true, error = null)
+            // #10702: coming back to the tab refreshes quietly; the spinner is only for a first load.
+            val current = _uiState.value
+            val firstLoad = current.meditations.isEmpty() && current.sleepSounds.isEmpty()
+            _uiState.value = current.copy(isLoading = firstLoad, error = null)
             try {
                 val api = apiHolder.api
                 if (api == null) {
@@ -61,7 +68,14 @@ class MeditationsViewModel @Inject constructor(
                     return@launch
                 }
                 val books = api.getBooks(category = CATEGORY_MEDITATION)
-                _uiState.value = MeditationsUiState(meditations = books, isLoading = false)
+                // #5465: if the bed list can't be fetched, show every row as a meditation rather than hide any.
+                val bedIds = try { api.getSleepBeds().map { it.id }.toSet() } catch (_: Exception) { null }
+                val sections = MeditationLists.split(books, bedIds)
+                _uiState.value = MeditationsUiState(
+                    meditations = sections.meditations,
+                    sleepSounds = sections.sleepSounds,
+                    isLoading = false
+                )
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
@@ -72,7 +86,8 @@ class MeditationsViewModel @Inject constructor(
     }
 
     /**
-     * The one-tap bulk action: queue every meditation for download. Each one
+     * The one-tap bulk action: queue every meditation that isn't already on the phone (#845; sleep
+     * sounds are left out, the bed keeps its own copy). Each one
      * still goes through the normal per-item WorkManager pipeline, so progress,
      * notifications, retry and the Downloads screen all behave as they already
      * do — this only removes the ten separate taps.
@@ -86,20 +101,30 @@ class MeditationsViewModel @Inject constructor(
             val baseUrl = apiHolder.baseUrl
             val api = apiHolder.api
             var failed = 0
+            var queued = 0
             for (book in books) {
                 try {
+                    // #845: never re-fetch a copy that is already here; that delete-and-refetch was the flicker.
+                    val status = downloadStates.value[book.id]
+                    val filePresent = status == DownloadEntity.Status.COMPLETED &&
+                        downloadRepository.getLocalPath(book.id) != null
+                    val workActive = (status == DownloadEntity.Status.PENDING ||
+                        status == DownloadEntity.Status.DOWNLOADING) &&
+                        downloadRepository.isWorkActive(book.id)
+                    if (!MeditationLists.shouldQueue(status, filePresent, workActive)) continue
                     // startDownload needs the full detail (file size + metadata
                     // JSON cached for offline display), which the list endpoint
                     // does not carry.
                     val detail = api?.getBook(book.id) ?: continue
                     downloadRepository.startDownload(detail, baseUrl)
+                    queued++
                 } catch (_: Exception) {
                     failed++
                 }
             }
             _uiState.value = _uiState.value.copy(
                 isQueueing = false,
-                error = if (failed > 0) "$failed of ${books.size} could not be queued" else null
+                error = if (failed > 0) "$failed of ${failed + queued} could not be queued" else null
             )
         }
     }
