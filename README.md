@@ -29,7 +29,7 @@ artists, genres, playlists, folder browsing).
 
 ```bash
 cd server
-pip install -r requirements.txt
+pip install -e .
 # create config.yaml — see config.py for available keys:
 #   library_roots:
 #     - path: D:/Audiobooks
@@ -45,7 +45,7 @@ Register the first user via the Android app (or `POST /api/auth/register`) —
 that account is the admin. Trigger a library scan with
 `POST /api/library/scan`.
 
-Tests: `pytest` from `server/`.
+Tests: `pip install -e ".[dev]"`, then `pytest` from `server/`.
 
 ## Android client
 
