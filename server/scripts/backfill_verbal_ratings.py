@@ -1,7 +1,7 @@
 """Apply the star ratings Todd said out loud before dj_star existed (#3576).
 
 Two sources, both from the ride-era workaround:
-  * Q:/Pantheon/data/music/pending_star_ratings.md — one table row per rating,
+  * pending_star_ratings.md (path: AUDIPLEX_PENDING_RATINGS_MD or --md) — one table row per rating,
     with his words. Applied rows get an "Applied" stamp; a re-run skips them.
   * DJ tags five-star-verbal / four-half-star-verbal — any tagged track the
     table doesn't already cover is rated from the tag alone.
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -34,7 +35,7 @@ from audiplex.database import get_engine  # noqa: E402
 from audiplex.models import DjTrackTag, Track, TrackRating, User  # noqa: E402
 from audiplex.routers.playback import stored_stars, verbal_note  # noqa: E402
 
-PENDING_MD = Path("Q:/Pantheon/data/music/pending_star_ratings.md")
+PENDING_MD = Path(os.environ.get("AUDIPLEX_PENDING_RATINGS_MD", "pending_star_ratings.md"))
 TAG_STARS = {"five-star-verbal": 5.0, "four-half-star-verbal": 4.5}
 PERSONA = "ride log"
 

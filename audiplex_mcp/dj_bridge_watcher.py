@@ -2,7 +2,7 @@
 playback commands) and, every 2nd-3rd music-track change, shells out to a
 hook so a voice persona can speak a DJ bridge.
 
-Lives at Q:\\Development\\audiplex\\audiplex_mcp\\dj_bridge_watcher.py
+Lives at audiplex_mcp/dj_bridge_watcher.py
 Module: audiplex_mcp.dj_bridge_watcher
 """
 import argparse

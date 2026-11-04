@@ -85,10 +85,10 @@ def test_brief_previous_falls_back_to_history(wire):
 
 def test_dj_folder_actions(wire):
     calls, _ = wire
-    out = asyncio.run(mcp_server.dj_folder("Q:/Music/Ride", action="queue"))
+    out = asyncio.run(mcp_server.dj_folder("D:/Music/Ride", action="queue"))
     assert out.startswith("RESULT sent=2 held=no")
     assert ("CMD", "queue", {"track_ids": [1, 2]}) in calls
-    out = asyncio.run(mcp_server.dj_folder("Q:/Music/Ride/", action="playlist"))
+    out = asyncio.run(mcp_server.dj_folder("D:/Music/Ride/", action="playlist"))
     assert "Saved playlist 'Ride' (#9) with 2 track(s)" in out
     assert "Unknown action" in asyncio.run(mcp_server.dj_folder("x", action="burn"))
 
@@ -101,14 +101,14 @@ def test_dj_folder_shuffle_goes_through_dj_mix(wire, monkeypatch):
         return "mixed"
 
     monkeypatch.setattr(mcp_server, "dj_mix", fake_mix)
-    assert asyncio.run(mcp_server.dj_folder("Q:/Music/Ride", recursive=False)) == "mixed"
-    assert seen["sources"] == [{"kind": "folder", "query": "Q:/Music/Ride", "recursive": False}]
+    assert asyncio.run(mcp_server.dj_folder("D:/Music/Ride", recursive=False)) == "mixed"
+    assert seen["sources"] == [{"kind": "folder", "query": "D:/Music/Ride", "recursive": False}]
 
 
 def test_pair_note_and_set_kind_and_history(wire):
     calls, st = wire
     assert "Saved note #3 on 20 -> 30" in asyncio.run(mcp_server.dj_pair_note(20, "lift", 30, "claude"))
-    assert asyncio.run(mcp_server.dj_set_kind("podcast", folder="Q:/Pods")) == "Set 4 track(s) to podcast."
-    assert ("PUT", "/api/playback/content-kind", {"kind": "podcast", "folder": "Q:/Pods"}) in calls
+    assert asyncio.run(mcp_server.dj_set_kind("podcast", folder="D:/Pods")) == "Set 4 track(s) to podcast."
+    assert ("PUT", "/api/playback/content-kind", {"kind": "podcast", "folder": "D:/Pods"}) in calls
     st["history"] = [{"track_id": 5, "title": "Song", "artist_name": "Band", "at": 1_700_000_000}]
     assert "5 | Band - Song" in asyncio.run(mcp_server.dj_history())

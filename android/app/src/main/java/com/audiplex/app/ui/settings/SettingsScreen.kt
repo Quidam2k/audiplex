@@ -95,7 +95,7 @@ fun SettingsScreen(
                 value = serverUrl,
                 onValueChange = { viewModel.setUrl(it) },
                 label = { Text("Server URL") },
-                placeholder = { Text("http://192.168.1.100:8000") },
+                placeholder = { Text("http://your-server:8000") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )

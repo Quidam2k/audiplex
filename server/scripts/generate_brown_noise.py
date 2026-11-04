@@ -8,6 +8,7 @@ library item. Deterministic noise (fixed seed); needs numpy, scipy and ffmpeg.
 """
 
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,7 @@ sys.path.insert(0, str(SERVER_DIR))
 
 from audiplex import noise_synth  # noqa: E402
 
-DEFAULT_OUT = Path("Q:/meditations/audio/Brown Noise - Sleep Loop.m4a")
+DEFAULT_OUT = Path(os.environ.get("AUDIPLEX_BROWN_NOISE_OUT", "Brown Noise - Sleep Loop.m4a"))
 
 
 def main() -> int:

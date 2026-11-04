@@ -33,7 +33,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 REPO = Path(__file__).resolve().parents[2]
 SERVER = REPO / "server"
-BED_SRC = Path("Q:/meditations/audio/Brown Noise - Sleep Loop.m4a")
+BED_SRC = Path(os.environ.get("AUDIPLEX_BED_SRC", "Brown Noise - Sleep Loop.m4a"))
 sys.path.insert(0, str(REPO / "windows_client"))
 sys.path.insert(0, str(REPO))
 

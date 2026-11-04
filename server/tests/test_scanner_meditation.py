@@ -174,7 +174,7 @@ class TestMeditationApi:
             author=None,
             category="meditation",
             duration_seconds=600.0,
-            file_path=r"Q:\meditations\audio\Ocean Waves.m4a",
+            file_path=r"D:\meditations\audio\Ocean Waves.m4a",
             file_size=9_800_000,
         ))
         db_session.commit()
@@ -195,7 +195,7 @@ class TestMeditationApi:
             title="Daily Calm",
             category="meditation",
             duration_seconds=600.0,
-            file_path=r"Q:\meditations\audio\Daily Calm.m4a",
+            file_path=r"D:\meditations\audio\Daily Calm.m4a",
             file_size=9_300_000,
         )
         db_session.add(book)

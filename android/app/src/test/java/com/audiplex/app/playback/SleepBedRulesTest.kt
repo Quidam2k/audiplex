@@ -70,7 +70,7 @@ class SleepBedRulesTest {
 
     @Test
     fun `LAN tailnet queried and relative URLs share the same cache file`() {
-        val lan = SleepBedRules.cacheFileName("http://192.168.1.10:8100/api/stream/610")
+        val lan = SleepBedRules.cacheFileName("http://10.0.0.10:8100/api/stream/610")
         val tailnet = SleepBedRules.cacheFileName("http://100.64.0.10:8100/api/stream/610")
         assertEquals("bed_api_stream_610", lan)
         assertEquals(lan, tailnet)
