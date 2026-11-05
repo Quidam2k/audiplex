@@ -173,3 +173,58 @@ class TestMeditationOnlyScan:
         assert r.status_code == 200
         assert r.json()["removed"] == 0
         assert "nothing scanned or removed" in r.json()["errors"][0]
+
+
+class TestWatcherSweep:
+    """#5462: the watcher drops a meditation whose file is gone, never on an empty folder."""
+
+    @pytest.fixture
+    def real_watch(self, tmp_path, db_engine, monkeypatch):
+        from unittest.mock import MagicMock, patch
+        from sqlalchemy.orm import sessionmaker
+
+        from audiplex import database, meditation_watch
+        from audiplex.config import Settings
+
+        monkeypatch.setattr(database, "_SessionLocal", sessionmaker(bind=db_engine))
+        monkeypatch.setattr(meditation_watch, "get_settings",
+                            lambda: Settings(cover_cache_dir=str(tmp_path / "covers")))
+        med = tmp_path / "med"
+        med.mkdir()
+        audio = MagicMock()
+        audio.info.length = 600.0
+        audio.get.side_effect = lambda key, default=None: default
+        with patch("audiplex.scanners.meditation.mutagen.File", return_value=audio):
+            yield MeditationWatch(roots_fn=lambda: [str(med)]), med, sessionmaker(bind=db_engine)
+
+    @staticmethod
+    def _titles(Session):
+        from audiplex.models import Book
+        with Session() as s:
+            return sorted(b.title for b in s.query(Book).filter(Book.category == "meditation"))
+
+    def test_removed_file_drops_its_row(self, real_watch):
+        watch, med, Session = real_watch
+        (med / "Keep.m4a").write_bytes(b"a")
+        (med / "Gone.m4a").write_bytes(b"b")
+        assert [watch.tick(), watch.tick()] == ["unstable", "scanned"]
+        assert self._titles(Session) == ["Gone", "Keep"]
+
+        (med / "Gone.m4a").unlink()
+        assert [watch.tick(), watch.tick()] == ["unstable", "scanned"]
+        assert self._titles(Session) == ["Keep"]
+
+    def test_emptied_folder_keeps_every_row(self, real_watch):
+        watch, med, Session = real_watch
+        (med / "Only.m4a").write_bytes(b"a")
+        assert [watch.tick(), watch.tick()] == ["unstable", "scanned"]
+
+        (med / "Only.m4a").unlink()
+        for _ in range(3):
+            assert watch.tick() == "skip"
+        assert self._titles(Session) == ["Only"]
+
+    def test_sweep_refuses_when_folder_empties_mid_tick(self, real_watch):
+        watch, med, Session = real_watch
+        with pytest.raises(RuntimeError):
+            watch._scan_and_sweep([str(med)])

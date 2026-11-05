@@ -1,12 +1,19 @@
-"""Watch meditation folders for additions without deleting Books or progress (#9295)."""
+"""Watch meditation folders and keep their Book rows in step (#9295, #5462).
+
+Adds new files, and since #5462 also drops rows whose file is gone, through the
+same meditation-scoped scan_library sweep as POST /api/library/scan/meditations.
+A sweep only runs on a stable, non-empty snapshot, so an empty or unreadable
+folder (a drive hiccup) never reads as "every meditation was deleted".
+"""
 
 import asyncio
 import logging
 from pathlib import Path
 
 from audiplex import database
-from audiplex.config import get_settings
-from audiplex.scanners.meditation import _audio_files, scan_meditation
+from audiplex.config import LibraryRoot, get_settings
+from audiplex.scanner import scan_library
+from audiplex.scanners.meditation import _audio_files
 
 logger = logging.getLogger(__name__)
 TICK_S = 60.0
@@ -34,7 +41,7 @@ def snapshot(roots: list[str]) -> frozenset | None:
 class MeditationWatch:
     def __init__(self, roots_fn=meditation_roots, scan_fn=None):
         self._roots_fn = roots_fn
-        self._scan_fn = scan_fn or self._scan_add_only
+        self._scan_fn = scan_fn or self._scan_and_sweep
         self._seen = None
         self._scanned = None
 
@@ -59,16 +66,21 @@ class MeditationWatch:
         self._scanned = snap
         return "scanned"
 
-    def _scan_add_only(self, roots: list[str]) -> None:
+    def _scan_and_sweep(self, roots: list[str]) -> None:
+        # Re-check right before the sweep: the folder may have emptied since the tick looked.
+        if snapshot(roots) is None:
+            raise RuntimeError("meditation folder empty or unreadable; not sweeping")
         db = database._SessionLocal()
         try:
-            for root in roots:
-                result, _ = scan_meditation(db, root, get_settings().cover_cache_dir)
-                if result.added or result.updated:
-                    logger.info("Meditation scan %s: added=%s updated=%s",
-                                root, result.added, result.updated)
-                if result.errors:
-                    logger.warning("Meditation scan %s: errors=%s", root, result.errors)
+            result = scan_library(
+                db, [LibraryRoot(path=r, category="meditation") for r in roots],
+                get_settings().cover_cache_dir,
+            )
+            if result.added or result.updated or result.removed:
+                logger.info("Meditation scan: added=%s updated=%s removed=%s",
+                            result.added, result.updated, result.removed)
+            if result.errors:
+                logger.warning("Meditation scan errors=%s", result.errors)
             db.commit()
         except Exception:
             db.rollback()
