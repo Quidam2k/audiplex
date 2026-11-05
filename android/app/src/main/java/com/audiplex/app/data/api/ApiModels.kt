@@ -34,6 +34,13 @@ data class UserInfo(
     @Json(name = "is_admin") val isAdmin: Boolean
 )
 
+/** #5485: GET /api/files/{kind}/{id}, admin only. An album has a folder and no file name. */
+@JsonClass(generateAdapter = true)
+data class FileInfo(
+    val folder: String,
+    @Json(name = "file_name") val fileName: String?
+)
+
 @JsonClass(generateAdapter = true)
 data class LoginResponse(
     val token: String,

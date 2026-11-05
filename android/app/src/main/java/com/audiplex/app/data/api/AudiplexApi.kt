@@ -58,6 +58,9 @@ interface AudiplexApi {
     @POST("api/library/scan")
     suspend fun scanLibrary(): ScanResult
 
+    @GET("api/files/{kind}/{id}") // #5485: admin only; 403 for anyone else
+    suspend fun getFileInfo(@Path("kind") kind: String, @Path("id") id: Int): FileInfo
+
     @POST("api/library/scan/meditations") // #9295: any user, meditation family only
     suspend fun scanMeditations(): ScanResult
 

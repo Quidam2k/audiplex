@@ -138,7 +138,8 @@ fun ArtistDetailScreen(
                 onDismiss = { actionTarget = null },
                 onToggleFavorite = { viewModel.toggleFavorite("album", key) },
                 onAddToPlaylist = { pickerTarget = current },
-                onCreatePlaylist = { newPlaylistTarget = current }
+                onCreatePlaylist = { newPlaylistTarget = current },
+                itemId = current.id  // #5485
             )
         }
         else -> {}

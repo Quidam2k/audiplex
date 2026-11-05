@@ -72,6 +72,8 @@ import com.audiplex.app.playback.ChapterSeek  // #4219
 import com.audiplex.app.playback.SkipInterval  // #4220
 import com.audiplex.app.ui.common.SettingsAction  // #4221
 import androidx.compose.foundation.ExperimentalFoundationApi  // #4220
+import com.audiplex.app.ui.common.ItemActionSheet  // #5485
+import com.audiplex.app.ui.common.ItemKind
 import androidx.compose.foundation.combinedClickable  // #4220
 import androidx.compose.material.icons.filled.FastForward  // #4220
 import androidx.compose.material.icons.filled.Forward10  // #4220
@@ -106,6 +108,19 @@ fun PlayerScreen(
     val defaultSleepBedId by viewModel.defaultSleepBedId.collectAsState()
     val controllerMeta by viewModel.controllerMetadata.collectAsState()
     var showSleep by remember { mutableStateOf(false) }
+    // #5485: long-press the title for the file's location and (for a book) a download.
+    var sheetFor by remember { mutableStateOf<SheetTarget?>(null) }
+    sheetFor?.let { (sheetKind, id, title) ->
+        ItemActionSheet(
+            title = title,
+            subtitle = null,
+            kind = sheetKind,
+            isFavorited = false,
+            onDismiss = { sheetFor = null },
+            onToggleFavorite = null,
+            itemId = id
+        )
+    }
     // #7528: a queue gets the room under the controls (the cover shrinks for it).
     val queue = music?.takeIf { kind == PlayerKind.Music && it.items.size > 1 }
 
@@ -194,7 +209,8 @@ fun PlayerScreen(
                 TitleBlock(
                     title = currentBook.title,
                     subtitle = currentBook.author,
-                    detail = currentBook.chapters.getOrNull(chapterIndex)?.title
+                    detail = currentBook.chapters.getOrNull(chapterIndex)?.title,
+                    onLongPress = { sheetFor = SheetTarget(ItemKind.Book, currentBook.id, currentBook.title) }
                 )
             }
             PlayerKind.Music -> {
@@ -213,7 +229,8 @@ fun PlayerScreen(
                 TitleBlock(
                     title = track?.track?.title ?: "",
                     subtitle = track?.track?.artistName,
-                    detail = track?.albumTitle
+                    detail = track?.albumTitle,
+                    onLongPress = track?.track?.let { t -> { sheetFor = SheetTarget(ItemKind.Track, t.id, t.title) } }
                 )
                 // Rating lives on music only: the DJ picks tracks, and a
                 // chapter of an audiobook is not a thing you rate (#3024).
@@ -505,8 +522,12 @@ private fun CoverArt(
     }
 }
 
+/** #5485: what the title long-press sheet is about. */
+private data class SheetTarget(val kind: ItemKind, val id: Int, val title: String)
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun TitleBlock(title: String, subtitle: String?, detail: String?) {
+private fun TitleBlock(title: String, subtitle: String?, detail: String?, onLongPress: (() -> Unit)? = null) {
     Text(
         text = title,
         style = MaterialTheme.typography.titleLarge,
@@ -514,6 +535,7 @@ private fun TitleBlock(title: String, subtitle: String?, detail: String?) {
         maxLines = 2,
         overflow = TextOverflow.Ellipsis,
         modifier = Modifier.padding(horizontal = 32.dp)
+            .then(if (onLongPress != null) Modifier.combinedClickable(onClick = {}, onLongClick = onLongPress) else Modifier)
     )
     subtitle?.let {
         Text(

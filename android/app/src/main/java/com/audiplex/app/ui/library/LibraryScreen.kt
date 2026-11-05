@@ -192,7 +192,8 @@ fun LibraryScreen(
             isInToRead = key in favoritesByType["to_read"].orEmpty(),
             onDismiss = { pendingBook = null },
             onToggleFavorite = { viewModel.toggleBookFavorite(book.id) },
-            onToggleToRead = { viewModel.toggleBookToRead(book.id) }
+            onToggleToRead = { viewModel.toggleBookToRead(book.id) },
+            itemId = book.id  // #5485
         )
     }
 }

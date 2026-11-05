@@ -125,7 +125,8 @@ fun PlaylistDetailScreen(
             onDismiss = { actionTrack = null },
             onToggleFavorite = { viewModel.toggleFavorite("track", key) },
             onAddToPlaylist = { pickerForTrack = track },
-            onCreatePlaylist = { newPlaylistForTrack = track }
+            onCreatePlaylist = { newPlaylistForTrack = track },
+            itemId = track.id  // #5485
         )
     }
 

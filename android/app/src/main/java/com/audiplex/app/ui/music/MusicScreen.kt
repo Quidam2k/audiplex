@@ -180,7 +180,8 @@ fun MusicScreen(
             } else null,
             onCreatePlaylist = if (item.kind != ItemKind.Playlist) {
                 { newPlaylistForItem = item }
-            } else null
+            } else null,
+            itemId = item.entityKey.toIntOrNull()  // #5485: the sheet ignores it for kinds with no file
         )
     }
 
