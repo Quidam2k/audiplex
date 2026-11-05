@@ -5,8 +5,8 @@ import androidx.lifecycle.viewModelScope
 import com.audiplex.app.data.ApiServiceHolder
 import com.audiplex.app.data.api.BookSummary
 import com.audiplex.app.data.download.CATEGORY_MEDITATION
-import com.audiplex.app.data.db.DownloadEntity
 import com.audiplex.app.data.download.DownloadRepository
+import com.audiplex.app.data.download.MeditationSync
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -29,7 +29,8 @@ data class MeditationsUiState(
 @HiltViewModel
 class MeditationsViewModel @Inject constructor(
     private val apiHolder: ApiServiceHolder,
-    private val downloadRepository: DownloadRepository
+    private val downloadRepository: DownloadRepository,
+    private val meditationSync: MeditationSync
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(MeditationsUiState())
@@ -98,30 +99,8 @@ class MeditationsViewModel @Inject constructor(
 
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isQueueing = true, error = null)
-            val baseUrl = apiHolder.baseUrl
-            val api = apiHolder.api
-            var failed = 0
-            var queued = 0
-            for (book in books) {
-                try {
-                    // #845: never re-fetch a copy that is already here; that delete-and-refetch was the flicker.
-                    val status = downloadStates.value[book.id]
-                    val filePresent = status == DownloadEntity.Status.COMPLETED &&
-                        downloadRepository.getLocalPath(book.id) != null
-                    val workActive = (status == DownloadEntity.Status.PENDING ||
-                        status == DownloadEntity.Status.DOWNLOADING) &&
-                        downloadRepository.isWorkActive(book.id)
-                    if (!MeditationLists.shouldQueue(status, filePresent, workActive)) continue
-                    // startDownload needs the full detail (file size + metadata
-                    // JSON cached for offline display), which the list endpoint
-                    // does not carry.
-                    val detail = api?.getBook(book.id) ?: continue
-                    downloadRepository.startDownload(detail, baseUrl)
-                    queued++
-                } catch (_: Exception) {
-                    failed++
-                }
-            }
+            // #5462: the same pass the background auto-download runs, minus the Wi-Fi-only pin.
+            val (queued, failed) = meditationSync.queueMissing(books, unmeteredOnly = false)
             _uiState.value = _uiState.value.copy(
                 isQueueing = false,
                 error = if (failed > 0) "$failed of ${failed + queued} could not be queued" else null

@@ -107,4 +107,10 @@ class MeditationListsTest {
         assertEquals(listOf(2, 1), ids(sections.meditations))
         assertTrue(sections.sleepSounds.isEmpty())
     }
+
+    @Test
+    fun autoCandidatesNeverIncludeSleepBeds() {  // #5462
+        val books = listOf(book(1, "Rain", older), book(2, "Body Scan", newer), book(3, "Brown Noise", newer))
+        assertEquals(listOf(2), ids(MeditationLists.autoCandidates(books, setOf(1, 3))))
+    }
 }

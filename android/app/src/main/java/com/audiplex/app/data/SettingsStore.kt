@@ -25,6 +25,7 @@ class SettingsStore @Inject constructor(
 ) : AuthTokenStore {
     private val serverUrlKey = stringPreferencesKey("server_url")
     private val downloadOnCellularKey = booleanPreferencesKey("download_on_cellular")
+    private val autoDownloadMeditationsKey = booleanPreferencesKey("auto_download_meditations")  // #5462
     private val authTokenKey = stringPreferencesKey("auth_token")
     private val usernameKey = stringPreferencesKey("username")
     private val sessionExpiredKey = booleanPreferencesKey("session_expired")
@@ -232,6 +233,15 @@ class SettingsStore @Inject constructor(
         context.dataStore.edit { prefs ->
             prefs[serverUrlKey] = url
         }
+    }
+
+    /** #5462: new meditations download on their own over Wi-Fi. On unless turned off. */
+    val autoDownloadMeditations: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[autoDownloadMeditationsKey] ?: true
+    }
+
+    suspend fun setAutoDownloadMeditations(enabled: Boolean) {
+        context.dataStore.edit { prefs -> prefs[autoDownloadMeditationsKey] = enabled }
     }
 
     suspend fun setDownloadOnCellular(enabled: Boolean) {

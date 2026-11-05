@@ -30,6 +30,13 @@ object MeditationLists {
                 .thenBy { it.title.lowercase() }
         )
 
+    /**
+     * #5462: what the background auto-download may fetch. It needs the real bed list (no fallback),
+     * so a sleep sound is never downloaded as a meditation.
+     */
+    fun autoCandidates(books: List<BookSummary>, bedIds: Set<Int>): List<BookSummary> =
+        split(books, bedIds).meditations
+
     data class Sections(val meditations: List<BookSummary>, val sleepSounds: List<BookSummary>)
 
     /**

@@ -54,6 +54,7 @@ fun SettingsScreen(
     val saved by viewModel.saved.collectAsState()
     val updateState by viewModel.updateState.collectAsState()
     val downloadOnCellular by viewModel.downloadOnCellular.collectAsState()
+    val autoDownloadMeditations by viewModel.autoDownloadMeditations.collectAsState()
     val djLinkEnabled by viewModel.djLinkEnabled.collectAsState()
     val restoreManualQueues by viewModel.restoreManualQueues.collectAsState()  // #3601
     val musicVolume by viewModel.musicVolume.collectAsState()
@@ -195,6 +196,18 @@ fun SettingsScreen(
                 Switch(
                     checked = downloadOnCellular,
                     onCheckedChange = { viewModel.toggleDownloadOnCellular() }
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(  // #5462
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Auto-download new meditations (Wi-Fi)", style = MaterialTheme.typography.bodyMedium)
+                Switch(
+                    checked = autoDownloadMeditations,
+                    onCheckedChange = { viewModel.toggleAutoDownloadMeditations() }
                 )
             }
             Spacer(Modifier.height(12.dp))
