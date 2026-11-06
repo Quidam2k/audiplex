@@ -356,6 +356,61 @@ def test_chime_needs_an_active_pool_and_music_playing(engine):
     assert dj_triggers.clock_tick(bus, now=now + 5)["chime"] == "fired"
 
 
+def test_chime_stops_at_once_when_the_music_pauses(engine):  # #5585
+    _speech(engine)
+    _pool()
+    now = _at(14, 45, 2)
+    _playing_at(now)
+    assert dj_triggers.clock_tick(bus, now=now)["chime"] == "fired"
+    assert dj_triggers.clock_tick(bus, now=now + 3)["chime"] == "none"  # still playing: rings on
+    assert _cmds("bed_stop") == []
+    bus.set_state(_state(10, playing=False))
+    st, _ = bus._states["phone"]
+    bus._states["phone"] = (st, now + 5)
+    dj_triggers.clock_tick(bus, now=now + 5)
+    assert len(_cmds("bed_stop")) == 1  # stopped on the next tick, not at the timer
+    engine["scheduled"][0][1]()  # the timer still fires later: no second stop
+    assert len(_cmds("bed_stop")) == 1
+    dj_triggers.clock_tick(bus, now=now + 10)
+    assert len(_cmds("bed_stop")) == 1
+
+
+def test_chime_stops_at_once_when_todd_starts_talking(engine):  # #5585
+    _speech(engine)
+    _pool()
+    now = _at(15, 0, 1)
+    _playing_at(now)
+    assert dj_triggers.clock_tick(bus, now=now)["chime"] == "fired"
+    _speech(engine, talking=True)
+    _playing_at(now + 5)
+    dj_triggers.clock_tick(bus, now=now + 5)
+    assert len(_cmds("bed_stop")) == 1
+
+
+def test_pool_stop_mid_chime_still_lets_the_timer_stop_it(engine):  # #5585 (Codex review)
+    _speech(engine)
+    pool = _pool()
+    now = _at(16, 30, 1)
+    _playing_at(now)
+    dj_triggers.clock_tick(bus, now=now)
+    pool.stop()  # the ride ends while the chime rings: runtime wiped
+    engine["scheduled"][0][1]()
+    assert len(_cmds("bed_stop")) == 1
+
+
+def test_paused_after_the_chime_ended_sends_nothing(engine):  # #5585
+    _speech(engine)
+    _pool()
+    now = _at(9, 15, 1)
+    _playing_at(now)
+    dj_triggers.clock_tick(bus, now=now)
+    engine["scheduled"][0][1]()  # the clip ran its course
+    assert len(_cmds("bed_stop")) == 1
+    bus.set_state(_state(10, playing=False))
+    dj_triggers.clock_tick(bus, now=now + 60)
+    assert len(_cmds("bed_stop")) == 1
+
+
 def test_chime_dropped_when_talking(engine):
     _speech(engine, talking=True)
     _pool()

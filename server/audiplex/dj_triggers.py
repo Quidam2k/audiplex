@@ -725,6 +725,7 @@ def clock_tick(bus, pool=None, now: Optional[float] = None) -> dict:
     rt = pool.state.setdefault("chime_runtime", {})
     out: dict = {"chime": "none", "reason": "", "cues": []}
     _check_chime_ack(bus, pool, rt)
+    stop_chime_if_paused(bus, pool, rt, now)  # #5585
     now_dt = datetime.fromtimestamp(now)
 
     if pool.is_active():
@@ -797,9 +798,29 @@ def clock_tick(bus, pool=None, now: Optional[float] = None) -> dict:
     return finish("fired", clip["name"], f"fired {clip['name']}")
 
 
+def stop_chime_if_paused(bus, pool, rt: dict, now: float) -> bool:
+    """#5585: a chime still ringing when the music pauses, or Todd starts talking,
+    stops now instead of at its timer. The chime rides the phone's bed player, which
+    rings on regardless of the music (11/05 14:45: it outlasted two pauses)."""
+    until = rt.get("active_until")
+    ids = rt.get("chime_command_ids") or []
+    if not until or now >= until or not ids:
+        return False
+    st = bus.get_state()
+    if st and st.get("playing") and not read_speech_state()["talking"]:
+        return False
+    _chime_stop(bus, pool, ids[-1])
+    rt["early_stopped_id"] = ids[-1]  # its timer must not send a second stop
+    return True
+
+
 def _chime_stop(bus, pool, cmd_id: int) -> None:
     try:
         rt = pool.state.setdefault("chime_runtime", {})
+        # #5585 already stopped early (paused/talking). An explicit marker, not a missing
+        # active_until: pool.stop() wipes the runtime and the timer must still stop it then.
+        if rt.get("early_stopped_id") == cmd_id:
+            return
         ours = set(rt.get("chime_command_ids") or [])
         newer_bed = any(
             rec.type == "bed_play" and rec.id > cmd_id and rec.id not in ours
