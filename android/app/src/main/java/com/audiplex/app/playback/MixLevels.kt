@@ -66,6 +66,13 @@ object MixLevels {
 
     fun isChimeUrl(url: String?): Boolean = url?.contains(CHIME_PATH) == true
 
+    /** #5585: a chime plays once and ends itself; only a real bed loops. A looping chime
+     *  rang ~70 s on 11/05 when its bed_stop was lost in delivery. */
+    fun bedLoops(url: String?): Boolean = !isChimeUrl(url)
+
+    /** #5585: pausing the music ends a ringing chime; a sleep bed plays on. */
+    fun stopBedOnMainPause(url: String?): Boolean = isChimeUrl(url)
+
     /** The chime level trims what the server commands; a real bed is left as commanded. */
     fun bedCommandLevel(url: String, commanded: Float, chimeLevel: Float): Float =
         if (isChimeUrl(url)) (commanded * chimeLevel).coerceIn(0f, MAX_LEVEL) else commanded

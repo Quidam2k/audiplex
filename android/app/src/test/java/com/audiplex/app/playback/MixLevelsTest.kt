@@ -230,4 +230,16 @@ class MixLevelsTest {
         assertEquals(0f, flip.cappedDb, 1e-4f)
         assertNull(MixLevels.bedtimeShift(flip.level, flip.appliedDb, raisesOff = true))
     }
+
+    @Test
+    fun chimesPlayOnceAndStopWithTheMusicButBedsLoopOn() {  // #5585
+        val chime = "http://solace:8100/api/dj/chimes/q45"
+        val bed = "http://solace:8100/api/library/sleep-beds/1213/audio"
+        assertEquals(false, MixLevels.bedLoops(chime))
+        assertEquals(true, MixLevels.stopBedOnMainPause(chime))
+        assertEquals(true, MixLevels.bedLoops(bed))
+        assertEquals(false, MixLevels.stopBedOnMainPause(bed))
+        assertEquals(true, MixLevels.bedLoops(null))
+        assertEquals(false, MixLevels.stopBedOnMainPause(null))
+    }
 }

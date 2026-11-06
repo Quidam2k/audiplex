@@ -705,6 +705,8 @@ class PlaybackManager @Inject constructor(
          */
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
             if (!playWhenReady) reportPauseSource(reason)  // #3552
+            // #5585: the music paused, so a chime ringing on the bed player stops with it
+            if (!playWhenReady && bedPlayer != null && MixLevels.stopBedOnMainPause(bedUrl)) releaseBedPlayer()
             val focusRelated = reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS
             clientLog.report(
                 level = if (focusRelated) "error" else "info",
@@ -1719,7 +1721,10 @@ class PlaybackManager @Inject constructor(
         )
         player.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
-                if (bedPlayer === player) refreshBedState()
+                if (bedPlayer !== player) return
+                // #5585: a chime that played through releases itself, no bed_stop needed
+                if (playbackState == Player.STATE_ENDED && !MixLevels.bedLoops(url)) releaseBedPlayer()
+                else refreshBedState()
             }
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                 if (bedPlayer === player) refreshBedState()
@@ -1728,7 +1733,7 @@ class PlaybackManager @Inject constructor(
                 if (bedPlayer === player) onBedError(url, local != null, error)
             }
         })
-        player.repeatMode = Player.REPEAT_MODE_ONE
+        player.repeatMode = if (MixLevels.bedLoops(url)) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF  // #5585
         bedTargetLevel = volume.coerceIn(0f, MixLevels.MAX_LEVEL)
         applyBedLevel(bedTargetLevel)
         player.setMediaItem(MediaItem.fromUri(local?.let { Uri.fromFile(it) } ?: Uri.parse(url)))
