@@ -255,7 +255,9 @@ fun SettingsScreen(
             LevelsSection(
                 levels = mixLevels,
                 bedtimeShiftCappedDb = bedtimeShiftCappedDb,
-                onChange = viewModel::setMixLevel
+                onChange = viewModel::setMixLevel,
+                onOpenVoices = if (remember { PantheonVoices.launchIntent(context) } == null) null  // #5422
+                    else ({ PantheonVoices.open(context) })  // #5422: resolved again on tap
             )
 
             Spacer(Modifier.height(32.dp))
@@ -500,7 +502,8 @@ private val LEVEL_LABELS = listOf(
 private fun LevelsSection(
     levels: Map<MixCategory, Float>,
     bedtimeShiftCappedDb: Float,
-    onChange: (MixCategory, Float) -> Unit
+    onChange: (MixCategory, Float) -> Unit,
+    onOpenVoices: (() -> Unit)? = null,  // #5422: null when the Pantheon app isn't installed
 ) {
     Text("Levels", style = MaterialTheme.typography.titleMedium)
     Spacer(Modifier.height(4.dp))
@@ -526,6 +529,19 @@ private fun LevelsSection(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
+    // #5422: the one sound not set here; this row takes him to its slider.
+    Spacer(Modifier.height(12.dp))  // #5422
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {  // #5422
+        Column(Modifier.weight(1f)) {  // #5422
+            Text("Voices", style = MaterialTheme.typography.bodyMedium)  // #5422
+            Text(  // #5422
+                PantheonVoices.rowText(installed = onOpenVoices != null),  // #5422
+                style = MaterialTheme.typography.bodySmall,  // #5422
+                color = MaterialTheme.colorScheme.onSurfaceVariant  // #5422
+            )  // #5422
+        }  // #5422
+        if (onOpenVoices != null) OutlinedButton(onClick = onOpenVoices) { Text("Open") }  // #5422
+    }  // #5422
 }
 
 @Composable
