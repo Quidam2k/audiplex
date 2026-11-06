@@ -157,7 +157,8 @@ fun AlbumDetailScreen(
             onDismiss = { actionTarget = null },
             onToggleFavorite = { viewModel.toggleFavorite("track", key) },
             onAddToPlaylist = { pickerTarget = current },
-            onCreatePlaylist = { newPlaylistTarget = current }
+            onCreatePlaylist = { newPlaylistTarget = current },
+            itemId = current.trackId  // #5485
         )
     } else if (current is AlbumDetail) {
         val key = current.id.toString()
@@ -169,7 +170,8 @@ fun AlbumDetailScreen(
             onDismiss = { actionTarget = null },
             onToggleFavorite = { viewModel.toggleFavorite("album", key) },
             onAddToPlaylist = { pickerTarget = current },
-            onCreatePlaylist = { newPlaylistTarget = current }
+            onCreatePlaylist = { newPlaylistTarget = current },
+            itemId = current.id  // #5485
         )
     }
 

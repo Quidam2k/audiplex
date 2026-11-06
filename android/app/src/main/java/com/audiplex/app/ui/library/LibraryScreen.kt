@@ -1,6 +1,8 @@
 package com.audiplex.app.ui.library
 
 import androidx.activity.compose.BackHandler  // #10702
+import androidx.lifecycle.Lifecycle  // #5421
+import androidx.lifecycle.compose.LifecycleEventEffect  // #5421
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -94,6 +96,8 @@ fun LibraryScreen(
     val uiState by viewModel.uiState.collectAsState()
     val favoritesByType by viewModel.favoritesByType.collectAsState()
     val isRefreshing by viewModel.isRefreshing.collectAsState()
+    // #5421: pick up books added while the app sat in the background.
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.reloadQuiet() }
     var pendingBook by remember { mutableStateOf<BookSummary?>(null) }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -188,7 +192,8 @@ fun LibraryScreen(
             isInToRead = key in favoritesByType["to_read"].orEmpty(),
             onDismiss = { pendingBook = null },
             onToggleFavorite = { viewModel.toggleBookFavorite(book.id) },
-            onToggleToRead = { viewModel.toggleBookToRead(book.id) }
+            onToggleToRead = { viewModel.toggleBookToRead(book.id) },
+            itemId = book.id  // #5485
         )
     }
 }

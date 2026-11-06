@@ -11,6 +11,7 @@ import com.audiplex.app.data.SettingsStore
 import com.audiplex.app.data.api.MusicRoot
 import com.audiplex.app.data.api.MusicRootsUpdate
 import com.audiplex.app.data.download.DownloadRepository
+import com.audiplex.app.data.download.MeditationSync
 import com.audiplex.app.update.ApkInstaller
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -86,6 +87,17 @@ class SettingsViewModel @Inject constructor(
 
     val totalStorageUsed: StateFlow<Long> = downloadRepository.totalStorageUsed()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0L)
+
+    val autoDownloadMeditations: StateFlow<Boolean> = settingsStore.autoDownloadMeditations  // #5462
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    fun toggleAutoDownloadMeditations() {
+        viewModelScope.launch {
+            val enabled = !autoDownloadMeditations.value
+            settingsStore.setAutoDownloadMeditations(enabled)
+            if (enabled) MeditationSync.schedule(context)
+        }
+    }
 
     fun toggleDownloadOnCellular() {
         viewModelScope.launch {

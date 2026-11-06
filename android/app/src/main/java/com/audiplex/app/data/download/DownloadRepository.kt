@@ -34,7 +34,8 @@ class DownloadRepository @Inject constructor(
 ) {
     private val downloadsDir = context.getExternalFilesDir("downloads")
 
-    suspend fun startDownload(book: BookDetail, baseUrl: String) {
+    /** #5462: [unmeteredOnly] pins the download to Wi-Fi whatever the cellular setting says (auto-download). */
+    suspend fun startDownload(book: BookDetail, baseUrl: String, unmeteredOnly: Boolean = false) {
         // #839 — meditations go to shared storage so the Pantheon companion can
         // read them; everything else keeps the app-private path. On API < 29
         // createDestination returns null and meditations fall back to private
@@ -55,7 +56,7 @@ class DownloadRepository @Inject constructor(
             bookMetadataJson = metadataJson
         )
         downloadDao.upsert(entity)
-        enqueueWork(book.id, baseUrl)
+        enqueueWork(book.id, baseUrl, unmeteredOnly)
     }
 
     suspend fun pauseDownload(bookId: Int) {
@@ -143,8 +144,8 @@ class DownloadRepository @Inject constructor(
 
     fun totalStorageUsed(): Flow<Long> = downloadDao.observeTotalStorageUsed()
 
-    private suspend fun enqueueWork(bookId: Int, baseUrl: String) {
-        val cellular = settingsStore.downloadOnCellular.first()
+    private suspend fun enqueueWork(bookId: Int, baseUrl: String, unmeteredOnly: Boolean = false) {
+        val cellular = !unmeteredOnly && settingsStore.downloadOnCellular.first()
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(if (cellular) NetworkType.CONNECTED else NetworkType.UNMETERED)
             .build()

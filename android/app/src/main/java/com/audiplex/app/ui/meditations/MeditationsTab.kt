@@ -1,6 +1,7 @@
 package com.audiplex.app.ui.meditations
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,6 +24,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
@@ -30,6 +34,8 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.audiplex.app.data.api.BookSummary
 import com.audiplex.app.data.db.DownloadEntity
+import com.audiplex.app.ui.common.ItemActionSheet
+import com.audiplex.app.ui.common.ItemKind
 
 /**
  * Meditations tab — the whole point of it is the single "Download all"
@@ -43,6 +49,19 @@ fun MeditationsTab(
 ) {
     val state by viewModel.uiState.collectAsState()
     val downloadStates by viewModel.downloadStates.collectAsState()
+    // #5485: long-press a row for its file and a download.
+    var pending by remember { mutableStateOf<BookSummary?>(null) }
+    pending?.let { item ->
+        ItemActionSheet(
+            title = item.title,
+            subtitle = null,
+            kind = ItemKind.Book,
+            isFavorited = false,
+            onDismiss = { pending = null },
+            onToggleFavorite = null,
+            itemId = item.id
+        )
+    }
     // #9295: the view model outlives tab switches, so reload each time the tab opens.
     LaunchedEffect(Unit) { viewModel.refresh() }
 
@@ -117,7 +136,7 @@ fun MeditationsTab(
 
         LazyColumn(modifier = Modifier.fillMaxSize()) {
             items(state.meditations, key = { it.id }) { meditation ->
-                MeditationRow(meditation, downloadStates[meditation.id], onMeditationClick)
+                MeditationRow(meditation, downloadStates[meditation.id], onMeditationClick) { pending = it }
             }
             // #5465: sleep sounds in their own section, below the meditations.
             if (state.sleepSounds.isNotEmpty()) {
@@ -130,19 +149,25 @@ fun MeditationsTab(
                     )
                 }
                 items(state.sleepSounds, key = { it.id }) { sound ->
-                    MeditationRow(sound, downloadStates[sound.id], onMeditationClick)
+                    MeditationRow(sound, downloadStates[sound.id], onMeditationClick) { pending = it }
                 }
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MeditationRow(meditation: BookSummary, downloadStatus: String?, onClick: (Int) -> Unit) {
+private fun MeditationRow(
+    meditation: BookSummary,
+    downloadStatus: String?,
+    onClick: (Int) -> Unit,
+    onLongPress: (BookSummary) -> Unit
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onClick(meditation.id) }
+            .combinedClickable(onClick = { onClick(meditation.id) }, onLongClick = { onLongPress(meditation) })
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
