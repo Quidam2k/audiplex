@@ -22,6 +22,9 @@ BASE = "/api/dj/buckets"
 @pytest.fixture(autouse=True)
 def isolated_bucket_store(monkeypatch, tmp_path):
     monkeypatch.setenv("DJ_BUCKETS_DB", str(tmp_path / "b.db"))
+    from audiplex_mcp import bucket_tools
+    monkeypatch.setattr(bucket_tools, "LUFS_QUEUE", tmp_path / "lufs.txt")  # #11070 never the live queue
+    return tmp_path
 
 
 def _client(db_engine):
@@ -212,3 +215,13 @@ def test_windows_path_basename_for_missing_track(client):
     assert client.post(BASE, json={"name": "warmup"}).status_code == 201
     buckets.add_tracks("warmup", [{"track_id": 515151, "path": r"M:\Music\Gone Too.flac"}])
     assert client.get(f"{BASE}/warmup").json()["tracks"][0]["title"] == "Gone Too.flac"
+
+
+def test_web_add_queues_tracks_for_lufs(client, sample_track, db_session, isolated_bucket_store):  # #11070
+    db_session.commit()
+    queue = isolated_bucket_store / "lufs.txt"
+    queue.write_text("5,9")
+    assert client.post(BASE, json={"name": "warmup"}).status_code == 201
+    client.post(f"{BASE}/warmup/tracks", json={"track_ids": [sample_track.id, 999999]})
+    queued = {int(x) for x in queue.read_text().split(",")}
+    assert queued == {5, 9, sample_track.id}  # the unknown id is not queued

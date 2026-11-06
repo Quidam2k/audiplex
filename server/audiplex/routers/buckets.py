@@ -29,6 +29,14 @@ def _buckets():
     return buckets
 
 
+def _queue_for_loudness(track_ids: list[int]) -> None:
+    """#11070: web adds get LUFS-measured first, exactly like the MCP's dj_bucket_save (#7387)."""
+    _buckets()  # puts the repo root on sys.path when the server runs from server/
+    from audiplex_mcp import bucket_tools
+
+    bucket_tools._queue_for_loudness(track_ids)
+
+
 class BucketCreate(BaseModel):
     name: str
     description: str = ""
@@ -96,6 +104,7 @@ def add_tracks(name: str, body: BucketTracks, db: Session = Depends(get_db),
         result = _buckets().add_tracks(name, tracks, added_by=user.username)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
+    _queue_for_loudness([t["track_id"] for t in tracks])  # #11070
     return {**result, "unknown_ids": [i for i in ids if i not in library]}
 
 
