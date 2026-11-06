@@ -131,11 +131,60 @@ def work_key(title: str | None, artist: str | None) -> str:
     return f"work:{normalize(artist)}|{strip_qualifiers(title)}"
 
 
+_DASH_SPLIT = re.compile(r"\s+[-–—]\s+")  # #5488
+_NUMBERING = re.compile(r"(?:cd|disc|disk)\s*\d+|\d{1,3}")  # #5488: "02", "CD02", "Disc 2"; not "1812"
+_PLACEHOLDER = re.compile(r"(?:audio\s*)?track\s*\d+|audiotrack\s*\d+|untitled(?:\s*\d+)?")  # #5488: no song to match
+
+
+def _is_version_marker(part: str) -> bool:  # #5488: the strip_qualifiers dash-tail rule
+    words = normalize(part).split()
+    return bool(set(words) & _QUALIFIER_WORDS or words[:1] and words[0] in _LEAD_QUALIFIER_WORDS)
+
+
+def song_key(title: str | None, artist: str | None, known_artists: frozenset[str] = frozenset()) -> str:  # #5488
+    """The song, whoever sings it: "Peggy Lee - It Ain't Necessarily So" and
+    Ella's "It Ain't Necessarily So" are one song.
+
+    Rips carry album, disc, track number and artist as dash segments
+    ("Late Night Jazz - CD02 - 02 - Peggy Lee - It Ain't Necessarily So"). An
+    artist segment (this track's own artist, or a library artist of two or
+    more words) ends that prefix, so it and everything before it go; a
+    trailing artist just goes. Leading track numbers go, then version tails.
+    What is left is joined, not cut to its last segment, so "Symphony No 1 -
+    Andante" and "Moby Dick - 02" stay their own pieces. Generic titles
+    ("Home") still merge across artists: callers use this only within one
+    set, where a false merge passes over one track. A placeholder title
+    ("Track 3", "Untitled") has no song: the key is "".
+    """
+    if not title:
+        return ""
+    bare = _UNCLOSED_BRACKET.sub("", _BRACKETED.sub(" ", _PIPE_SUFFIX.sub("", title)))
+    parts = [p for p in _DASH_SPLIT.split(bare) if normalize(p)]
+    own = normalize(artist)
+
+    def is_artist(part: str) -> bool:
+        folded = normalize(part)
+        return folded == own or (folded in known_artists and len(folded.split()) > 1)
+
+    marks = [i for i, part in enumerate(parts) if is_artist(part)]
+    if marks and marks[-1] < len(parts) - 1:
+        parts = parts[marks[-1] + 1:]
+    elif marks and len(parts) > 1:
+        parts = [p for p in parts if not is_artist(p)] or parts
+    while len(parts) > 1 and _NUMBERING.fullmatch(normalize(parts[0])):
+        parts.pop(0)
+    while len(parts) > 1 and _is_version_marker(parts[-1]):  # after the prefixes: "Wings - Live and Let Die"
+        parts.pop()
+    song = strip_qualifiers(" - ".join(parts) if parts else title)
+    return "" if not song or _PLACEHOLDER.fullmatch(song) else f"song:{song}"
+
+
 @dataclass(frozen=True)
 class TrackIdentity:
     track_id: int
     recording_id: str
     work_id: str
+    song_id: str = ""  # #5488: same song, any artist (set-level only)
 
 
 class _DisjointSet:
@@ -230,6 +279,7 @@ def _identities_for(rows: list[_TrackRow]) -> dict[int, TrackIdentity]:
     for row in rows:
         clusters.setdefault(sets.find(row.id), []).append(row)
 
+    known_artists = frozenset(normalize(r.artist) for r in rows if normalize(r.artist))  # #5488
     identities: dict[int, TrackIdentity] = {}
     for members in clusters.values():
         recording_id = _label(members)
@@ -238,6 +288,7 @@ def _identities_for(rows: list[_TrackRow]) -> dict[int, TrackIdentity]:
                 track_id=row.id,
                 recording_id=recording_id,
                 work_id=work_key(row.title, row.artist),
+                song_id=song_key(row.title, row.artist, known_artists),  # #5488
             )
     return identities
 

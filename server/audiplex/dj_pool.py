@@ -206,6 +206,7 @@ class DJPool:
             "no_repeat_picks": NO_REPEAT_PICKS if no_repeat_picks is None else int(no_repeat_picks),
             "exclude_recent_hours": exclude_recent_hours,
             "played_this_session": played_this_session or [],
+            "heard_this_session": [],  # #5488: every track seen playing in this set
             "last_topup_at": None,
             "last_topup_current_track_id": None,
             "round_robin_index": 0,
@@ -404,6 +405,9 @@ class DJPool:
         # Don't top up if paused, stream (id=-1), or DJ break (id<0)
         if current_track_id is None or current_track_id < 0:
             return {"picks": [], "reason": "paused or stream/break", "pending_cues": []}
+        heard = self.state.setdefault("heard_this_session", [])  # #5488: persisted below, on every path
+        if current_track_id not in heard:  # #5488
+            heard.append(current_track_id)  # #5488
 
         # Count real tracks in upcoming AFTER current (skip current, streams, DJ breaks)
         real_count = sum(
@@ -517,6 +521,21 @@ class DJPool:
         def work_ok(tid: Any) -> bool:  # #7335
             return work_of.get(tid) not in blocked_works  # #7335
 
+        # #5488: one song per set, whoever sings it (a cover, a duet). Set-scoped  # #5488
+        # (this pool session), not the 24 h cooldown, and a preference, not a  # #5488
+        # filter: a lane whose fresh tracks are all covers still plays one, so a  # #5488
+        # small bucket never runs dry. Every version stays in the bucket.  # #5488
+        song_of = {tid: ident.song_id for tid, ident in identities.items() if getattr(ident, "song_id", "")} if identities else {}  # #5488
+        set_songs: set[str] = {  # #5488
+            song_of[t] for t in [current_track_id, *upcoming_track_ids, *(current_played_track_ids or []),  # #5488
+                                 *self.state.get("played_this_session", []), *heard, *cue_picks]  # #5488
+            if isinstance(t, int) and t in song_of  # #5488
+        }  # #5488
+
+        def new_songs_first(candidates: list[int]) -> list[int]:  # #5488
+            unheard = [t for t in candidates if song_of.get(t) not in set_songs]  # #5488
+            return unheard or candidates  # #5488
+
         def eligible(tid: Any) -> bool:
             if not isinstance(tid, int) or tid <= 0 or tid in skip_ids or not work_ok(tid):  # #7335
                 return False
@@ -603,7 +622,7 @@ class DJPool:
             ids = lane.get("track_ids", [])
             fresh = [t for t in ids if eligible(t)]
             if fresh:
-                pick = pick_from(fresh)  # #4057 #4056
+                pick = pick_from(new_songs_first(fresh))  # #4057 #4056 #5488
             else:
                 recent = recent_window()
                 recent_recs = {r for r in map(recording_of, recent) if r is not None}
@@ -616,7 +635,7 @@ class DJPool:
                         f"all {len(ids)} track(s) already played or queued, and no other lane "
                         "has fresh tracks left to recycle alongside")
                     continue
-                pick = pick_from(again)  # #4057 #4056
+                pick = pick_from(new_songs_first(again))  # #4057 #4056 #5488
             lane["why_empty"] = None
 
             picks.append(pick)
@@ -626,6 +645,8 @@ class DJPool:
             skip_ids.add(pick)
             if pick in work_of:  # #7335: this song is now spoken for in this top-up
                 blocked_works.add(work_of[pick])  # #7335
+            if pick in song_of:  # #5488
+                set_songs.add(song_of[pick])  # #5488
             rec = recording_of(pick)
             if rec is not None:
                 skip_recordings.add(rec)
