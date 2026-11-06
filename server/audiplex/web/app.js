@@ -356,7 +356,7 @@ function setCrumbs(crumbs) {
 }
 
 function render(nodes) {
-  $("content").replaceChildren(...[nodes].flat());
+  $("content").replaceChildren(...[nodes].flat().filter((n) => n != null));  // #11055 a null child printed "null"
 }
 
 function actionBar(trackIds, extra) {
