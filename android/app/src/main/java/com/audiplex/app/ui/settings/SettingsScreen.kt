@@ -60,6 +60,7 @@ fun SettingsScreen(
     val autoDownloadMeditations by viewModel.autoDownloadMeditations.collectAsState()
     val djLinkEnabled by viewModel.djLinkEnabled.collectAsState()
     val restoreManualQueues by viewModel.restoreManualQueues.collectAsState()  // #3601
+    val evenOutLoudness by viewModel.evenOutLoudness.collectAsState()  // #5626
     val mixLevels by viewModel.mixLevels.collectAsState()
     val bedtimeShiftCappedDb by viewModel.bedtimeShiftCappedDb.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -269,6 +270,8 @@ fun SettingsScreen(
                 levels = mixLevels,
                 bedtimeShiftCappedDb = bedtimeShiftCappedDb,
                 onChange = viewModel::setMixLevel,
+                evenOut = evenOutLoudness,  // #5626
+                onEvenOutChange = viewModel::setEvenOutLoudness,  // #5626
                 onOpenVoices = if (remember { PantheonVoices.launchIntent(context) } == null) null  // #5422
                     else ({ PantheonVoices.open(context) })  // #5422: resolved again on tap
             )
@@ -516,6 +519,8 @@ private fun LevelsSection(
     levels: Map<MixCategory, Float>,
     bedtimeShiftCappedDb: Float,
     onChange: (MixCategory, Float) -> Unit,
+    evenOut: Boolean,  // #5626
+    onEvenOutChange: (Boolean) -> Unit,  // #5626
     onOpenVoices: (() -> Unit)? = null,  // #5422: null when the Pantheon app isn't installed
 ) {
     Text("Levels", style = MaterialTheme.typography.titleMedium)
@@ -527,6 +532,20 @@ private fun LevelsSection(
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
+    // #5626 (Todd 56733): one switch for the evened-out levels; the sliders below work either way.
+    Spacer(Modifier.height(12.dp))
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Even out with our voices", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "Music and books about 6 dB quieter, level with Pantheon's voices. Off: as loud as before.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = evenOut, onCheckedChange = onEvenOutChange)
+    }
     LEVEL_LABELS.forEach { (category, label) ->
         val level = levels[category] ?: return@forEach  // not loaded yet
         Spacer(Modifier.height(12.dp))

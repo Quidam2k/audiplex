@@ -127,6 +127,14 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { settingsStore.setMixLevel(category, level) }
     }
 
+    // #5626: "Even out with our voices"; PlaybackManager re-levels what is playing at once.
+    val evenOutLoudness: StateFlow<Boolean> = settingsStore.evenOutLoudness
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    fun setEvenOutLoudness(enabled: Boolean) {
+        viewModelScope.launch { settingsStore.setEvenOutLoudness(enabled) }
+    }
+
     /**
      * Turning the DJ link off stops the service; turning it on starts it here,
      * where an activity is on screen and a foreground-service start is legal.

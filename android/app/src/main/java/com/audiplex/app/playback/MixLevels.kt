@@ -94,6 +94,27 @@ object MixLevels {
         else -> null
     }
 
+    /** #5626: the "Even out with our voices" switch counts as raises off, whatever the server says. */
+    fun raisesOff(gainMode: String?, evenOut: Boolean): Boolean? = if (evenOut) true else raisesOff(gainMode)
+
+    /** #5626: where "Even out with our voices" levels music and books, never raised (the 56732 flip). */
+    const val EVEN_TARGET_LUFS = -20.0
+
+    /** #5626: music target and raise cap. The switch is never louder than the server's own target. */
+    fun musicTarget(evenOut: Boolean, serverTargetLufs: Double, serverMaxBoostDb: Double): Pair<Double, Double> =
+        if (evenOut) minOf(serverTargetLufs, EVEN_TARGET_LUFS) to 0.0 else serverTargetLufs to serverMaxBoostDb
+
+    /**
+     * #5626: a book's gain. Off: the server's. On: cut to [EVEN_TARGET_LUFS] from its measured loudness,
+     * never raised and never above the server's gain; unmeasured keeps the server's cut only.
+     */
+    fun bookGainDb(evenOut: Boolean, serverGainDb: Double?, lufs: Double?): Double? {
+        if (!evenOut) return serverGainDb
+        val evened = lufs?.takeIf { it.isFinite() }?.let { EVEN_TARGET_LUFS - it }
+        val server = serverGainDb?.takeIf { it.isFinite() }
+        return listOfNotNull(evened, server).minOrNull()?.coerceAtMost(0.0)
+    }
+
     /**
      * [appliedDb] is what was added to "Book at bedtime"; null means nothing is applied.
      * [cappedDb] is the part of the shift that did not fit below full.

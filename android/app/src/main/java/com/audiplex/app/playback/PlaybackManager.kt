@@ -32,6 +32,7 @@ import com.audiplex.app.data.api.AudiplexApi
 import com.audiplex.app.data.download.DownloadRepository
 import com.audiplex.app.data.download.MeditationStore
 import com.audiplex.app.data.api.BookDetail
+import com.audiplex.app.data.api.GainResponse
 import com.audiplex.app.data.api.MusicLevelsResponse
 import com.audiplex.app.data.api.PlayStatEvent
 import com.audiplex.app.data.api.PlaylistDetail
@@ -155,6 +156,8 @@ class PlaybackManager @Inject constructor(
     private var audiobookVolume: Float = 1f
     // #4222: gain belongs to the current book and the service's actual audio session.
     private var currentBookGainDb: Double? = null
+    private var lastBookGain: GainResponse? = null  // #5626: the last server answer; applyEvenOut checks it is the current book's
+    private var evenOutLoudness = false  // #5626: "Even out with our voices"
     private var bookGainJob: Job? = null
     private var bookGainPlayer: ExoPlayer? = null
     private var bookEnhancer: LoudnessEnhancer? = null
@@ -228,6 +231,13 @@ class PlaybackManager @Inject constructor(
                 }
             }
             launch { settingsStore.chimeLevel.collect { chimeLevel = it } }  // read at the next chime; they last seconds
+            launch {
+                settingsStore.evenOutLoudness.collect { on ->  // #5626
+                    if (on == evenOutLoudness) return@collect
+                    evenOutLoudness = on
+                    applyEvenOut()
+                }
+            }
             settingsStore.sleepBedVolume.collect { v ->  // #4018
                 val changed = v != sleepBedLevel
                 sleepBedLevel = v
@@ -337,7 +347,7 @@ class PlaybackManager @Inject constructor(
      * the next change; the restore goes back to that pre-duck level.
      */
     private fun reapplyTrackGain() {
-        if (musicLevels?.normalizeMusic != true) {
+        if (!levellingOn()) {
             if (currentMusicBoostDb != 0.0) { currentMusicBoostDb = 0.0; applyBoostEnhancer() }  // #4118
             return
         }
@@ -353,6 +363,9 @@ class PlaybackManager @Inject constructor(
         applyVolumeForCurrentKind(ramp = ramping)
     }
 
+    /** #7109: the server's normalization, or #5626 the switch even with it off. Needs the levels either way. */
+    private fun levellingOn(): Boolean = musicLevels?.let { it.normalizeMusic || evenOutLoudness } == true
+
     /**
      * #7109: update the gain for the current track based on its loudness_lufs.
      * Should be called whenever the track changes.
@@ -360,17 +373,18 @@ class PlaybackManager @Inject constructor(
     private fun updateCurrentTrackGain() {
         val currentTrack = _currentMusic.value?.let { it.items.getOrNull(it.currentIndex)?.track }
         // #5282 slice 2: a clip has no loudness of its own, so it must not take the library's median gain.
-        if (currentTrack == null || clipIsCurrent() || musicLevels == null || !musicLevels!!.normalizeMusic) {
+        if (currentTrack == null || clipIsCurrent() || !levellingOn()) {
             currentMusicGain = 1.0f
             currentMusicBoostDb = 0.0
             return
         }
         // #4118: the cut goes on the player volume, the raise on the limiter.
+        val (targetLufs, maxBoostDb) = MixLevels.musicTarget(evenOutLoudness, musicLevels!!.targetLufs, musicLevels!!.maxBoostDb)  // #5626
         val gainDb = LoudnessGain.gainDbFor(
             currentTrack.loudnessLufs,
-            musicLevels!!.targetLufs,
+            targetLufs,
             musicLevels!!.fallbackLufs,
-            musicLevels!!.maxBoostDb
+            maxBoostDb
         )
         currentMusicGain = 10.0.pow(gainDb.coerceAtMost(0.0) / 20.0).toFloat()
         currentMusicBoostDb = gainDb.coerceAtLeast(0.0)
@@ -415,20 +429,37 @@ class PlaybackManager @Inject constructor(
                 if (!isActive || _playerKind.value != PlayerKind.Audiobook ||
                     _currentBook.value?.id != bookId) return@launch
                 if (gain.gainDb != null && !gain.gainDb.isFinite()) return@launch
-                currentBookGainDb = gain.gainDb
-                MixLevels.raisesOff(gain.mode)?.let { off ->  // #5282 slice 2: keeps the bedtime balance across a server flip
-                    settingsStore.syncBedtimeShift(off)?.let { shift ->
-                        clientLog.report("info", "bedtime_shift", "book at bedtime moved with the server's book raises", mapOf(
-                            "raises_off" to "$off", "level" to "${shift.level}",
-                            "applied_db" to "${shift.appliedDb ?: ""}", "capped_db" to "${shift.cappedDb}",
-                        ))
-                    }
-                }
+                lastBookGain = gain
+                currentBookGainDb = MixLevels.bookGainDb(evenOutLoudness, gain.gainDb, gain.lufs)  // #5626
+                syncBedtimeShift(gain.mode)
                 applyVolumeForCurrentKind()
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) { }
         }
+    }
+
+    /** #5282 slice 2 / #5626: keeps the bedtime balance across a server flip or the switch. */
+    private suspend fun syncBedtimeShift(gainMode: String?) {
+        val off = MixLevels.raisesOff(gainMode, evenOutLoudness) ?: return
+        settingsStore.syncBedtimeShift(off)?.let { shift ->
+            clientLog.report("info", "bedtime_shift", "book at bedtime moved with the book raises", mapOf(
+                "raises_off" to "$off", "even_out" to "$evenOutLoudness", "level" to "${shift.level}",
+                "applied_db" to "${shift.appliedDb ?: ""}", "capped_db" to "${shift.cappedDb}",
+            ))
+        }
+    }
+
+    /** #5626: the switch moved. Re-level what is playing now; the sliders are untouched. */
+    private suspend fun applyEvenOut() {
+        lastBookGain?.let { gain ->
+            if (_playerKind.value == PlayerKind.Audiobook && _currentBook.value?.id == gain.id) {
+                currentBookGainDb = MixLevels.bookGainDb(evenOutLoudness, gain.gainDb, gain.lufs)
+            }
+        }
+        syncBedtimeShift(lastBookGain?.mode)
+        clientLog.report("info", "even_loudness", "even out with our voices ${if (evenOutLoudness) "on" else "off"}", volumeDetail())
+        if (isMusic()) reapplyTrackGain() else applyVolumeForCurrentKind()
     }
 
     // #4222: MediaController has no audio session id; use the existing service player hook.
@@ -475,7 +506,7 @@ class PlaybackManager @Inject constructor(
     private fun resetBookGain() {
         bookGainJob?.cancel()
         bookGainJob = null
-        currentBookGainDb = null
+        currentBookGainDb = null  // lastBookGain outlives the book (#5626): switching off during music still undoes the bedtime shift
         releaseBookEnhancer()
         try { bookGainPlayer?.removeListener(bookAudioSessionListener) } catch (_: Exception) { }
         bookGainPlayer = null
@@ -578,6 +609,7 @@ class PlaybackManager @Inject constructor(
         "book_bedtime_level" to "$sleepBookLevel",  // #5282, and the bed has no boost stage left
         "dj_voice_level" to "$djVoiceLevel",  // #5282 slice 2
         "chime_level" to "$chimeLevel",  // #5282 slice 2
+        "even_out" to "$evenOutLoudness",  // #5626
         "book_net_db" to "${bookAppliedDb()}",
         "bedtime_cut" to "${bedtimeTrimActive()}",
         "sleep_hold_index" to "${sleepHold?.index ?: ""}",

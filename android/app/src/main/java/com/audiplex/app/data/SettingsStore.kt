@@ -70,6 +70,7 @@ class SettingsStore @Inject constructor(
     private val sleepHoldFinishedKey = booleanPreferencesKey("sleep_hold_finished")  // #5282
     private val djVoiceLevelKey = floatPreferencesKey("dj_voice_level")  // #5282 slice 2
     private val chimeLevelKey = floatPreferencesKey("chime_level")  // #5282 slice 2
+    private val evenOutLoudnessKey = booleanPreferencesKey("even_out_loudness")  // #5626
     private val bedtimeShiftAppliedKey = floatPreferencesKey("bedtime_shift_applied_db")  // #5282 slice 2
     private val bedtimeShiftCappedKey = floatPreferencesKey("bedtime_shift_capped_db")  // #5282 slice 2
     private val skipSecondsKey = intPreferencesKey("skip_seconds")  // #4220
@@ -240,6 +241,13 @@ class SettingsStore @Inject constructor(
     val djVoiceLevel: Flow<Float> = context.dataStore.data.map { prefs -> prefs[djVoiceLevelKey] ?: 1f }
 
     val chimeLevel: Flow<Float> = context.dataStore.data.map { prefs -> prefs[chimeLevelKey] ?: 1f }
+
+    /** #5626: "Even out with our voices". Off unless he turns it on, so the update changes nothing. */
+    val evenOutLoudness: Flow<Boolean> = context.dataStore.data.map { prefs -> prefs[evenOutLoudnessKey] ?: false }
+
+    suspend fun setEvenOutLoudness(enabled: Boolean) {
+        context.dataStore.edit { prefs -> prefs[evenOutLoudnessKey] = enabled }
+    }
 
     /** Once: the DJ voice starts at the music dial it used to follow. */
     suspend fun seedDjVoiceLevel() {
