@@ -152,7 +152,7 @@ def test_refill_at_none_keeps_exact_ahead_behavior(pool_db, monkeypatch):
     assert _queued() == [("queue", [ids[2], ids[3]])]
 
 
-def test_send_tracks_chunks_replace_then_queue_with_source(monkeypatch):
+def test_send_tracks_chunks_replace_then_queue_with_source(pool_db, monkeypatch):  # #5629: pool_db keeps the #7335 repeat guard off the live play history
     ids = list(range(1, 8))
     monkeypatch.setattr(playback_bus, "QUEUE_CHUNK", 3)
 
