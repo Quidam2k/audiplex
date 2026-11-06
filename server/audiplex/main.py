@@ -11,6 +11,7 @@ from audiplex.config import get_settings
 from audiplex.database import get_db, init_db
 from audiplex.routers import app as app_router
 from audiplex.routers import files as files_router  # #5485
+from audiplex.routers import buckets as buckets_router  # #11055
 from audiplex.routers import dj_learn as dj_learn_router  # #4057
 from audiplex.routers import (
     auth_router,
@@ -114,6 +115,7 @@ app.include_router(dj_learn_router.router)  # #4057
 app.include_router(music_video.router)  # #6172
 app.include_router(app_router.router)
 app.include_router(files_router.router)  # #5485
+app.include_router(buckets_router.router)  # #11055 DJ buckets for /web
 app.include_router(web.router)  # #2806 browser UI at /web
 
 

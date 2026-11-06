@@ -33,6 +33,7 @@
       <button data-tab="library" class="tab">Library</button>
       <button data-tab="folders" class="tab">Folders</button>
       <button data-tab="playlists" class="tab">Playlists</button>
+      <button data-tab="buckets" class="tab">Buckets</button><!-- #11055 -->
       <button data-tab="favorites" class="tab">Favorites</button>
       <button data-tab="queue" class="tab">Queue</button>
       <button data-tab="videos" class="tab">Videos</button>
@@ -67,6 +68,15 @@
     <div id="pick-list" class="pick-list"></div>
     <label>New playlist <input id="pick-new" placeholder="Name"></label>
     <menu><button value="cancel" class="link">Cancel</button><button id="pick-create" value="create">Create and add</button></menu>
+  </form>
+</dialog>
+
+<dialog id="pick-bucket"><!-- #11055 -->
+  <form method="dialog" class="card">
+    <h2>Add to bucket</h2>
+    <div id="pick-bucket-list" class="pick-list"></div>
+    <label>New bucket <input id="pick-bucket-new" placeholder="Name"></label>
+    <menu><button value="cancel" class="link">Cancel</button><button id="pick-bucket-create" value="create">Create and add</button></menu>
   </form>
 </dialog>
 

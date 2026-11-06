@@ -15,6 +15,7 @@ const state = {
   favorites: new Set(), // "type:key"
   ratings: new Map(),  // track id -> stars
   playlists: [],
+  buckets: [],         // #11055 DJ buckets
 };
 
 // ---- DOM helpers ----------------------------------------------------------
@@ -236,6 +237,114 @@ async function refreshPlaylists() {
   state.playlists = (await guard(() => get("/api/music/playlists"))) || state.playlists;
 }
 
+// ---- DJ buckets (#11055) ----------------------------------------------------
+// Same store the DJ tools and the ride lanes read (audiplex_mcp/buckets.py).
+
+let pickBucketIds = [];
+async function pickBucket(trackIds) {
+  pickBucketIds = trackIds;
+  await refreshBuckets();
+  const list = $("pick-bucket-list");
+  list.replaceChildren(...state.buckets.map((b) =>
+    el("button", {
+      type: "button", class: "pick",
+      onclick: async () => {
+        $("pick-bucket").close();
+        await addToBucket(b.name, pickBucketIds);
+      },
+    }, `${b.name} (${b.track_count})`)));
+  if (!state.buckets.length) list.append(el("p", { class: "muted" }, "No buckets yet."));
+  $("pick-bucket-new").value = "";
+  openDialog($("pick-bucket"));
+}
+
+async function addToBucket(name, trackIds) {
+  const r = await guard(() => api("POST", `/api/dj/buckets/${q(name)}/tracks`, { track_ids: trackIds }));
+  if (!r) return null;
+  const dup = r.skipped_duplicates ? `, ${r.skipped_duplicates} already in it` : "";
+  toast(`Added ${r.added} to ${r.name}${dup}`);
+  await refreshBuckets();
+  return r;
+}
+
+$("pick-bucket-create").addEventListener("click", async (ev) => {
+  ev.preventDefault();
+  const name = $("pick-bucket-new").value.trim();
+  if (!name) return toast("Give the bucket a name.");
+  $("pick-bucket").close();
+  const b = await guard(() => api("POST", "/api/dj/buckets", { name, description: "" }));
+  if (b) await addToBucket(b.name, pickBucketIds);
+});
+
+async function refreshBuckets() {
+  state.buckets = (await guard(() => get("/api/dj/buckets"))) || state.buckets;
+}
+
+async function showBuckets() {
+  await refreshBuckets();
+  setCrumbs([{ label: "Buckets" }]);
+  const name = el("input", { placeholder: "New bucket name", "aria-label": "New bucket name", id: "new-bucket" });
+  const desc = el("input", { placeholder: "What it's for (optional)", "aria-label": "Bucket description", id: "new-bucket-desc" });
+  render([
+    el("p", { class: "muted" }, "Buckets are the DJ's themed song pools. Add songs or whole folders from Folders, an album, or search."),
+    el("form", {
+      class: "actions",
+      onsubmit: async (ev) => {
+        ev.preventDefault();
+        const n = name.value.trim();
+        if (!n) return;
+        const b = await guard(() => api("POST", "/api/dj/buckets", { name: n, description: desc.value.trim() }), `Created ${n}`);
+        if (b) withView(() => showBucket(b.name));
+      },
+    }, name, desc, el("button", { type: "submit" }, "Create")),
+    el("ul", { class: "list" }, state.buckets.map((b) =>
+      linkRow(b.name, [`${b.track_count} tracks`, b.description].filter(Boolean).join(" · "),
+        () => withView(() => showBucket(b.name))))),
+  ]);
+}
+
+async function showBucket(name) {
+  const b = await guard(() => get(`/api/dj/buckets/${q(name)}`));
+  if (!b) return;
+  setCrumbs([{ label: "Buckets", go: () => withView(showBuckets) }, { label: b.name }]);
+  const tracks = b.tracks.map((t) => ({ ...t, id: t.track_id }));
+  const ids = tracks.filter((t) => !t.missing).map((t) => t.id);
+  const again = () => withView(() => showBucket(b.name), { replace: true });
+  render([
+    b.description ? el("p", { class: "sub" }, b.description) : null,
+    el("p", { class: "muted" }, `${tracks.length} tracks · ${fmtDuration(tracks.reduce((s, t) => s + (t.duration_seconds || 0), 0))}`),
+    actionBar(ids, [
+      el("button", {
+        onclick: async () => {
+          const d = prompt("What this bucket is for", b.description || "");
+          if (d && d.trim()) {
+            const ok = await guard(() => api("PUT", `/api/dj/buckets/${q(b.name)}`, { description: d.trim() }), "Saved");
+            if (ok) again();
+          }
+        },
+      }, "Describe"),
+      el("button", {
+        class: "danger",
+        onclick: async () => {
+          if (!confirm(`Delete the bucket "${b.name}"? The songs stay in your library.`)) return;
+          const ok = await guard(() => api("DELETE", `/api/dj/buckets/${q(b.name)}`), "Bucket deleted");
+          if (ok) withView(showBuckets, { replace: true });
+        },
+      }, "Delete bucket"),
+    ]),
+    trackList(tracks, (t) => [
+      t.missing ? el("span", { class: "muted" }, "not in library") : null,
+      el("button", {
+        class: "icon", title: "Remove from bucket", "aria-label": "Remove from bucket",
+        onclick: async () => {
+          const ok = await guard(() => api("DELETE", `/api/dj/buckets/${q(b.name)}/tracks`, { track_ids: [t.id] }), "Removed");
+          if (ok) again();
+        },
+      }, "✕"),
+    ]),
+  ]);
+}
+
 // ---- rendering --------------------------------------------------------------
 
 function setCrumbs(crumbs) {
@@ -255,6 +364,7 @@ function actionBar(trackIds, extra) {
     el("button", { onclick: () => sendPlay("play_now", trackIds) }, "Play all"),
     el("button", { onclick: () => sendPlay("queue", trackIds) }, "Queue all"),
     el("button", { onclick: () => pickPlaylist(trackIds) }, "Add to playlist"),
+    el("button", { onclick: () => pickBucket(trackIds) }, "Add to bucket"),  // #11055
     extra || []);
 }
 
@@ -269,6 +379,7 @@ function trackRow(t, extra) {
       el("button", { class: "icon", title: "Play", "aria-label": "Play", onclick: () => sendPlay("play_now", [t.id]) }, "▶"),
       el("button", { class: "icon", title: "Queue", "aria-label": "Queue", onclick: () => sendPlay("queue", [t.id]) }, "+"),
       el("button", { class: "icon", title: "Add to playlist", "aria-label": "Add to playlist", onclick: () => pickPlaylist([t.id]) }, "≡"),
+      el("button", { class: "icon", title: "Add to bucket", "aria-label": "Add to bucket", onclick: () => pickBucket([t.id]) }, "🪣"),  // #11055
       el("button", { class: "icon", title: "Music video", "aria-label": "Music video", onclick: () => openMusicVideo(t) }, "🎬"),
       extra || []));
 }
@@ -399,7 +510,8 @@ async function showFolder(path) {
     path ? el("div", { class: "actions" },
       el("button", { onclick: async () => sendPlay("play_now", shuffle((await loadAll()).map((t) => t.id))) }, "Shuffle folder"),
       el("button", { onclick: async () => sendPlay("queue", (await loadAll()).map((t) => t.id)) }, "Queue folder"),
-      el("button", { onclick: async () => pickPlaylist((await loadAll()).map((t) => t.id)) }, "Add folder to playlist"))
+      el("button", { onclick: async () => pickPlaylist((await loadAll()).map((t) => t.id)) }, "Add folder to playlist"),
+      el("button", { onclick: async () => pickBucket((await loadAll()).map((t) => t.id)) }, "Add folder to bucket"))  // #11055
       : null,
     el("ul", { class: "list" },
       data.folders.map((f) => linkRow(f.name, `${f.album_count} albums · ${f.track_count} tracks`,
@@ -1054,6 +1166,7 @@ const TABS = {
   library: showArtists,
   folders: () => showFolder(null),
   playlists: showPlaylists,
+  buckets: showBuckets,  // #11055
   favorites: showFavorites,
   videos: renderVideosView,
   queue: renderQueueView,
