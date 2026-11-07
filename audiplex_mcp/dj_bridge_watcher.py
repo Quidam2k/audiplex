@@ -89,7 +89,12 @@ def load_settings():
     except (TypeError, ValueError):
         every_max = 3
     every_max = max(every_min, every_max)
-    return {"on": bool(raw.get("on", False)), "every_min": every_min, "every_max": every_max}
+    settings = {"on": bool(raw.get("on", False)), "every_min": every_min, "every_max": every_max}
+    if raw.get("public"):  # #5648 public DJ mode: Pantheon's hook speaks the DJ voice's callout only
+        settings["public"] = True  # #5648 kept here so 'on'/'off' never silently drop it
+        if raw.get("voice"):  # #5648
+            settings["voice"] = str(raw["voice"])  # #5648
+    return settings
 
 
 def write_settings(settings):
