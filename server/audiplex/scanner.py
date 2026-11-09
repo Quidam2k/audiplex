@@ -463,4 +463,11 @@ def scan_library(db: Session, library_roots, cover_cache_dir: str) -> ScanResult
 
     db.commit()
 
+    try:  # #5683 measure what this scan brought in (loudness + true peak), in the background
+        from sqlalchemy.orm import sessionmaker
+        from audiplex import loudness_live
+        loudness_live.schedule_ingest(sessionmaker(bind=db.get_bind()))
+    except Exception:
+        logger.error("Error scheduling ingest loudness", exc_info=True)
+
     return ScanResultSchema(added=added, updated=updated, removed=removed, errors=errors)

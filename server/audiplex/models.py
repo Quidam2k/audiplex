@@ -45,6 +45,7 @@ class Book(Base):
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
     # #4222: sampled EBU R128 loudness (LUFS), filled by scripts/measure_book_loudness.py.
     loudness_lufs: Mapped[float | None] = mapped_column(Float, nullable=True)
+    true_peak_dbtp: Mapped[float | None] = mapped_column(Float, nullable=True)  # #5683 caps the raise
 
     chapters: Mapped[list["Chapter"]] = relationship(
         back_populates="book", cascade="all, delete-orphan", order_by="Chapter.index"
@@ -150,6 +151,7 @@ class Track(Base):
     )
     # #3255: EBU R128 integrated loudness (LUFS), filled by scripts/measure_loudness.py.
     loudness_lufs: Mapped[float | None] = mapped_column(Float, nullable=True)
+    true_peak_dbtp: Mapped[float | None] = mapped_column(Float, nullable=True)  # #5683 caps the raise
     # #2806: 0-100 measured energy (loudness + onset density), filled by scripts/measure_energy.py.
     energy: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # #1002: tempo + key from scripts/measure_tempo_key.py. musical_key is a Camelot

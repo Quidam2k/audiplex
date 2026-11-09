@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     # #4118: how far a quiet track may be RAISED toward the target. 0 = attenuate-only
     # (old apps never raise; a raise needs the app's LoudnessEnhancer limiter).
     music_max_boost_db: float = 0.0
+    # #5683: a raise never pushes a track's measured true peak past this (dBTP). A peak
+    # that is not measured yet keeps the raise at unknown_peak_max_boost_db (the old +6).
+    true_peak_ceiling_dbtp: float = -1.5
+    unknown_peak_max_boost_db: float = 6.0
+    # #5683: dB of peak the app's limiter may shave on a raise (what +6 always did). 0 = strict ceiling.
+    limiter_budget_db: float = 6.0
     # #3501 Todd 10/20 (Pantheon msg 46601): if a DJ ride shows 2+ too-quiet presses, the
     # DJ music drops 3 dB. Applied to the served music target ONLY while a DJ pool runs;
     # cut-only, clamped to -12. 0 = off (default). Flip on Todd's word: DJ_MUSIC_OFFSET_DB=-3.

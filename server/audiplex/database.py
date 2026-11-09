@@ -319,6 +319,17 @@ def _migrate_book_loudness(engine):  # #4222
         conn.execute(text("ALTER TABLE books ADD COLUMN loudness_lufs FLOAT"))
 
 
+def _migrate_true_peak(engine):  # #5683
+    inspector = inspect(engine)
+    for table in ("tracks", "books"):
+        if table not in inspector.get_table_names():
+            continue
+        if "true_peak_dbtp" in {col["name"] for col in inspector.get_columns(table)}:
+            continue
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN true_peak_dbtp FLOAT"))
+
+
 def _migrate_track_energy(engine):  # #2806
     inspector = inspect(engine)
     if "tracks" not in inspector.get_table_names():
@@ -442,6 +453,7 @@ def init_db(database_url: str | None = None):
     _migrate_music_video_aspect(_engine)  # #6172
     _migrate_track_audio_profile(_engine)  # #7335 / #3981
     _migrate_track_duplicate_of(_engine)  # #8707
+    _migrate_true_peak(_engine)  # #5683
     Base.metadata.create_all(bind=_engine)
     return _engine
 

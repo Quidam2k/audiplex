@@ -43,8 +43,11 @@ client simply re-issues.
 """
 
 import json
+import logging  # #5683
 import re  # #3912
 import time
+from datetime import datetime, timezone  # #5683
+from pathlib import Path  # #5683
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -705,14 +708,42 @@ def get_owner_track_identity(
     return identity
 
 
+logger = logging.getLogger(__name__)  # #5683
+BIG_RAISE_DB = 9.0  # #5683
+BIG_RAISE_LOG = Path(__file__).resolve().parents[2] / "data" / "loudness-big-raise.jsonl"  # #5683
+_big_raise_seen: set[tuple[str, int]] = set()  # #5683 one line per item per server run
+
+
+def _log_big_raise(kind: str, item_id: int, gain: float, peak, ceiling: float, ref: str) -> None:  # #5683
+    """First time an item is served a raise over BIG_RAISE_DB: one JSON line (id, raise, headroom)."""
+    if (kind, item_id) in _big_raise_seen:
+        return
+    _big_raise_seen.add((kind, item_id))
+    headroom = None if peak is None else round(ceiling - peak, 2)
+    line = {"at": datetime.now(timezone.utc).isoformat(), "kind": kind, "id": item_id,
+            "raise_db": gain, "headroom_db": headroom, "ref": ref}
+    logger.info("big raise %s", line)
+    try:
+        BIG_RAISE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with BIG_RAISE_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(line) + "\n")
+    except OSError:
+        pass
+
+
 @router.get("/gain/{kind}/{item_id}")  # #3504 / #4222
-def get_gain(kind: str, item_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def get_gain(kind: str, item_id: int, album: bool = False,  # #5683
+             db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Playback gain for one track or book, in dB (audiplex/gain.py).
 
     Music: to music_target_lufs, raised by at most music_max_boost_db (#4118).
     Book: raised to book_target_lufs (clamped), mode=boost_needs_limiter; the
     app applies a raise through its limiter (#4222). With book_max_boost_db 0,
     cut to target, mode=attenuate_only (#5282). gain_db=null when unmeasured.
+    #5683: a raise stops at the true-peak ceiling (unmeasured peak = the old +6 dB cap).
+    album=true (the phone is playing an album in order) levels the whole album as one
+    when its tags are complete, so its quiet and loud songs keep their places; ref says
+    which was used ("album" or "track").
     """
     from audiplex.gain import book_gain_db, music_gain_db, served_music_target  # #3501
     from audiplex.models import Book, Track
@@ -729,10 +760,24 @@ def get_gain(kind: str, item_id: int, db: Session = Depends(get_db), user: User 
         raise HTTPException(status_code=400, detail="kind must be track or book")
     if row is None:
         raise HTTPException(status_code=404, detail=f"{kind} not found")
-    gain = (music_gain_db(row.loudness_lufs, target, s.music_max_boost_db) if kind == "track"
-            else book_gain_db(row.loudness_lufs, target, s.book_max_boost_db))
+    from audiplex.gain import album_reference  # #5683
+    lufs, peak, ref = row.loudness_lufs, getattr(row, "true_peak_dbtp", None), kind  # #5683
+    if kind == "track" and album and row.album_id is not None:  # #5683 album gain
+        album_rows = (db.query(Track.loudness_lufs, Track.true_peak_dbtp, Track.duration_seconds,
+                               Track.track_number)
+                      .filter(Track.album_id == row.album_id, Track.content_kind == "music").all())
+        found = album_reference(album_rows)
+        if found is not None:
+            lufs, peak, ref = found[0], found[1], "album"
+    ceiling, unknown_cap, budget = s.true_peak_ceiling_dbtp, s.unknown_peak_max_boost_db, s.limiter_budget_db  # #5683
+    gain = (music_gain_db(lufs, target, s.music_max_boost_db, peak, ceiling, unknown_cap, budget) if kind == "track"
+            else book_gain_db(lufs, target, s.book_max_boost_db, peak, ceiling, unknown_cap, budget))  # #5683
+    if gain is not None and gain > BIG_RAISE_DB:  # #5683 rider: trace any pumping Todd hears
+        _log_big_raise(kind, item_id, gain, peak, ceiling, ref)
     return {"kind": kind, "id": item_id, "lufs": row.loudness_lufs,
-            "target_lufs": target, "gain_db": gain, "mode": mode}
+            "target_lufs": target, "gain_db": gain, "mode": mode,
+            "true_peak_dbtp": getattr(row, "true_peak_dbtp", None), "ref": ref,  # #5683
+            "ref_lufs": lufs}
 
 
 @router.get("/track-profile/{track_id}")  # #7335 / #3981

@@ -12,7 +12,8 @@ def test_music_gain_is_attenuate_only_like_the_phone():
 
 def test_book_gain_raises_to_the_voice_and_clamps():
     assert book_gain_db(-26.0, -20.0, 12.0) == 6.0
-    assert book_gain_db(-40.0, -20.0, 12.0) == 12.0
+    assert book_gain_db(-40.0, -20.0, 12.0) == 6.0  # #5683 peak unmeasured: the old +6 (the app's cap)
+    assert book_gain_db(-40.0, -20.0, 12.0, true_peak=-20.0) == 12.0  # #5683 measured headroom: full cap
     assert book_gain_db(-17.0, -20.0, 12.0) == 0.0  # louder than target: never cut
     assert book_gain_db(None, -20.0, 12.0) is None
 
@@ -41,7 +42,8 @@ def test_endpoint_track(client, db_session, sample_track):
     db_session.commit()
     data = client.get(f"/api/playback/gain/track/{sample_track.id}").json()
     assert data == {"kind": "track", "id": sample_track.id, "lufs": -14.0,
-                    "target_lufs": -20.0, "gain_db": -6.0, "mode": "attenuate_only"}
+                    "target_lufs": -20.0, "gain_db": -6.0, "mode": "attenuate_only",
+                    "true_peak_dbtp": None, "ref": "track", "ref_lufs": -14.0}  # #5683
 
 
 def test_endpoint_book_raise_and_unmeasured(client, db_session, sample_book):
@@ -50,8 +52,11 @@ def test_endpoint_book_raise_and_unmeasured(client, db_session, sample_book):
     sample_book.loudness_lufs = -27.5
     db_session.commit()
     data = client.get(url).json()
-    assert data["gain_db"] == 7.5
+    assert data["gain_db"] == 6.0  # #5683 peak unmeasured: the old +6
     assert data["mode"] == "boost_needs_limiter"
+    sample_book.true_peak_dbtp = -12.0  # #5683 measured headroom: the full 7.5
+    db_session.commit()
+    assert client.get(url).json()["gain_db"] == 7.5
 
 
 def test_endpoint_errors(client, sample_track):

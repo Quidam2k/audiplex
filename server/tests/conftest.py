@@ -418,6 +418,8 @@ def isolated_client_logs(tmp_path, monkeypatch):
     )
     # #3504: no background ffmpeg loudness threads against test DBs.
     monkeypatch.setattr(playback_bus, "LIVE_LOUDNESS", False)  # #3504
+    from audiplex import loudness_live  # #5683 nor the post-scan ingest measure
+    monkeypatch.setattr(loudness_live, "INGEST", False)  # #5683
     # #3601: the resume snapshot too, or a test run overwrites Todd's queue.
     monkeypatch.setattr(
         playback_bus, "LAST_QUEUE_PATH", tmp_path / "last_queue.json"

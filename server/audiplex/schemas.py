@@ -91,6 +91,7 @@ class TrackSchema(BaseModel):
     track_number: int
     duration_seconds: float
     loudness_lufs: float | None = None  # #7109: EBU R128 integrated loudness for per-track gain
+    true_peak_dbtp: float | None = None  # #5683
     model_config = {"from_attributes": True}
 
     @computed_field  # #3504 #4222 #4118: the server's gain, same math as the phone
@@ -99,7 +100,9 @@ class TrackSchema(BaseModel):
         from audiplex.config import get_settings
         from audiplex.gain import music_gain_db, served_music_target  # #3501
         s = get_settings()
-        return music_gain_db(self.loudness_lufs, served_music_target(s), s.music_max_boost_db)  # #3501
+        return music_gain_db(self.loudness_lufs, served_music_target(s), s.music_max_boost_db,  # #3501
+                             self.true_peak_dbtp, s.true_peak_ceiling_dbtp, s.unknown_peak_max_boost_db,
+                             s.limiter_budget_db)  # #5683
 
 
 class AlbumSummary(BaseModel):
