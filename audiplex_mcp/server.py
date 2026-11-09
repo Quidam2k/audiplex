@@ -408,7 +408,7 @@ def _pantheon_seat_cannot_play(db_path: Path, now_epoch: float) -> bool:  # #545
     try:
         raw = json.loads((db_path.parent / "runtime" / "playback_state.json").read_text(encoding="utf-8"))
         age = now_epoch - float(raw.get("written_at_monotonic") or 0)
-        return (0 <= age <= PLAYBACK_STATE_STALE_S) and raw.get("eligible") is False
+        return (-1.0 <= age <= PLAYBACK_STATE_STALE_S) and raw.get("eligible") is False  # #5451 datetime vs time.time can read ~0.2us apart
     except Exception:
         return False
 
