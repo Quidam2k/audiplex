@@ -397,6 +397,7 @@ def enrich_payload(payload, client, base_url, token):  # #5986
         c = calls.get(item.get("id"))
         if c:
             item["callout"], item["callout_why"] = bool(c.get("callout")), c.get("why")
+            item["fame"] = c.get("fame")  # #5694 public mode skips famous originals; None = speak
     return payload
 
 

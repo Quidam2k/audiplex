@@ -113,3 +113,22 @@ def test_routes(client, db_session, monkeypatch):
     assert r.json()["mode"] == "callout"
     assert client.get(f"/api/playback/callouts?ids={known}").json()["tracks"][str(known)]["callout"] is True
     assert client.put("/api/playback/callouts/source", json={"source": "x", "mode": "bad"}).status_code == 400
+
+
+def test_fame_tag_and_todo(client, db_session, monkeypatch):  # #5694
+    from audiplex.models import DjTrackTag, PlayStat
+
+    deep, known = _seed(db_session)
+    monkeypatch.setattr(playback, "_lane_of", lambda tid: None)
+    db_session.add_all([PlayStat(track_id=known, event="complete"), PlayStat(track_id=known, event="complete"),
+                        PlayStat(track_id=deep, event="complete")])
+    db_session.commit()
+    todo = client.get("/api/playback/callouts/fame-todo?limit=5").json()["tracks"]
+    assert [t["id"] for t in todo] == [known, deep]  # most-played first
+    assert todo[0] == {"id": known, "title": "Roxanne", "artist": "The Police", "album": "Synchronicity"}
+
+    db_session.add(DjTrackTag(track_id=known, tag=dj_callouts.FAME_PREFIX + "famous_original", persona="fame-haiku"))
+    db_session.commit()
+    r = client.get(f"/api/playback/callouts?ids={deep},{known}").json()["tracks"]
+    assert r[str(known)]["fame"] == "famous_original" and r[str(deep)]["fame"] is None
+    assert [t["id"] for t in client.get("/api/playback/callouts/fame-todo").json()["tracks"]] == [deep]

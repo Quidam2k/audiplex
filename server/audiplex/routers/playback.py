@@ -1924,6 +1924,46 @@ def _lane_of(track_id: int) -> str | None:  # #3912: the pool lane this track wa
     return labels.get(track_id) or labels.get(str(track_id))
 
 
+def _fame_of(db: Session, ids: list[int]) -> dict[int, str]:  # #5694
+    from audiplex.dj_callouts import FAME_PREFIX
+    from audiplex.models import DjTrackTag
+
+    rows = (db.query(DjTrackTag.track_id, DjTrackTag.tag)
+            .filter(DjTrackTag.track_id.in_(ids), DjTrackTag.tag.like(FAME_PREFIX + "%")).all())
+    out: dict[int, str] = {}
+    for tid, tag in rows:  # two tags on one track (a re-tag): speaking wins over famous
+        kind = tag[len(FAME_PREFIX):]
+        if out.get(tid) in (None, "famous_original"):
+            out[tid] = kind
+    return out
+
+
+@router.get("/callouts/fame-todo", tags=["dj_pool"])
+def fame_todo(limit: int = Query(200, ge=1, le=5000), db: Session = Depends(get_db),
+              user: User = Depends(get_current_user)):
+    """#5694: tracks with no fame tag yet, for the tagger (Pantheon, credit-lane Haiku).
+    The live DJ pool's tracks come first, then the most-played. Never-played tracks
+    outside the pool are left for on-demand tagging."""
+    from sqlalchemy import func
+
+    from audiplex.dj_callouts import FAME_PREFIX
+    from audiplex.dj_pool import get_pool
+    from audiplex.models import Album, Artist, DjTrackTag, PlayStat, Track
+
+    tagged = db.query(DjTrackTag.track_id).filter(DjTrackTag.tag.like(FAME_PREFIX + "%"))
+    labels = get_pool().state.get("source_labels") or {}
+    pool_ids = [int(k) for k in labels if str(k).isdigit()]
+    done = {r[0] for r in tagged.filter(DjTrackTag.track_id.in_(pool_ids)).all()} if pool_ids else set()
+    plays = (db.query(PlayStat.track_id).filter(PlayStat.track_id.notin_(tagged.scalar_subquery()))
+             .group_by(PlayStat.track_id).order_by(func.count().desc()).limit(limit).all())
+    want = list(dict.fromkeys([t for t in pool_ids if t not in done] + [r[0] for r in plays]))[:limit]
+    rows = (db.query(Track.id, Track.title, Artist.name, Album.title)
+            .outerjoin(Artist, Artist.id == Track.artist_id).outerjoin(Album, Album.id == Track.album_id)
+            .filter(Track.id.in_(want)).all()) if want else []
+    by_id = {r[0]: {"id": r[0], "title": r[1], "artist": r[2], "album": r[3]} for r in rows}
+    return {"tracks": [by_id[t] for t in want if t in by_id]}
+
+
 @router.get("/callouts", tags=["dj_pool"])
 def get_callouts(
     ids: str = Query(""),
@@ -1939,10 +1979,12 @@ def get_callouts(
     wanted = [int(x) for x in re.findall(r"\d+", ids)]
     state = dj_callouts.load_state()
     tracks = _callout_tracks(db, wanted) if wanted else {}
+    fame = _fame_of(db, wanted) if wanted else {}  # #5694
     out, changed = {}, False
     for tid in wanted:
         t = tracks.get(tid) or {"id": tid, "path": None, "artist": None, "title": None}
-        out[tid] = {**dj_callouts.decide(t, _lane_of(tid), state), "title": t["title"], "artist": t["artist"]}
+        out[tid] = {**dj_callouts.decide(t, _lane_of(tid), state), "title": t["title"], "artist": t["artist"],
+                    "fame": fame.get(tid)}  # #5694 None = not tagged yet (the public callout speaks)
         if consume and out[tid].get("exception"):
             changed |= dj_callouts.consume(state, t)
     if changed:

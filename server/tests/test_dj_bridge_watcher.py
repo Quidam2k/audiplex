@@ -274,12 +274,13 @@ class _CalloutClient:  # #3912
 
 def test_enrich_flags_each_beat_and_consumes():  # #3912
     payload = {"prev": {"id": 1}, "now": {"id": 2}, "next": {"id": 3}, "after": {"id": 4}}
-    client = _CalloutClient({"1": {"callout": True, "why": "whole album: X"}, "2": {"callout": False, "why": "picks"},
+    client = _CalloutClient({"1": {"callout": True, "why": "whole album: X"}, "2": {"callout": False, "why": "picks", "fame": "famous_original"},
                              "3": {"callout": True, "why": "you asked what this was"}})
     p = dbw.enrich_payload(payload, client, "http://x", "")
     assert client.params == {"ids": "1,2,3,4", "consume": "true"}
     assert p["prev"]["callout"] is True and p["now"]["callout"] is False and p["next"]["callout"] is True
     assert p["now"]["callout_why"] == "picks" and "callout" not in p["after"]
+    assert p["now"]["fame"] == "famous_original" and p["prev"]["fame"] is None  # #5694
 
 
 def test_enrich_without_callouts_keeps_old_payload(monkeypatch, tmp_path):  # #3912 server down = name every song, as before

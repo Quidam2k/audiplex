@@ -9,6 +9,8 @@ from pathlib import Path
 
 EXCEPTION_PLAYS = 3
 MODES = ("callout", "silent")
+# #5694 fame tags in dj_track_tags: fame:famous_original|cover|obscure|unknown. Public mode skips famous originals.
+FAME_PREFIX = "fame:"
 
 _HIT_DIRECTORY = re.compile(
     r"billboard|countdown|\btop\s*\d+|compilation|greatest hits|\bhits\b",
