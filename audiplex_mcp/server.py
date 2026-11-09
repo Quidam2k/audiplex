@@ -4692,14 +4692,22 @@ async def dj_pool_set(
     if "prime_current_id" not in body:
         return head + " A live stream or DJ break is on; the pool fills in after it."
     picks = result.get("initial_picks") or []
+    key = _pool_key(spec, lanes)
+    held = _held_picks_for(key) if body["prime_current_id"] == 0 else None
+    if held:  # #5614: the retry after an intro plays the song the intro named
+        await _forget_picks([t for t in picks if t not in held])
+        picks = held
     if not picks:
         return head + " No eligible picks right now (everything recent or already queued)."
     trim = await _trim_to_pool(picks, state)
-    if "NOTHING was sent" in trim or "refused the trim" in trim:  # #4051 undelivered picks don't count
-        try:
-            await _post("/api/playback/pool/forget", {"track_ids": picks})
-        except Exception:
-            pass
+    kind = _held_kind(trim.strip())
+    if kind == "announce_first":  # #5614: keep these picks for the retry; the intro needs "First up"
+        _HELD_PICKS.update(key=key, picks=list(picks), at=time.time())
+        return head + trim + await _first_up_notes(picks[0])
+    _HELD_PICKS.clear()  # #5614 one hold at a time: any other outcome ends it
+    if (kind != "not_sent" or "NOTHING was sent" in trim or "nothing was sent" in trim
+            or "refused the trim" in trim):  # #4051 undelivered picks don't count
+        await _forget_picks(picks)
         return head + trim
     if body["prime_current_id"] == 0:  # #4056 the pool starts the music: its first song's notes come with it
         trim += await _first_up_notes(picks[0])
@@ -4708,6 +4716,29 @@ async def dj_pool_set(
         if "DONE: skip" in trim:  # the first pick is up: its notes come with it, as #4056
             trim += await _first_up_notes(picks[0])
     return head + trim
+
+
+_HELD_PICKS: dict = {}  # #5614 {"key", "picks", "at"}: picks an announce refusal named
+
+
+def _pool_key(spec, lanes: dict) -> str:  # #5614: same spec + same resolved lanes = same pool
+    return json.dumps([spec, {k: sorted(v) for k, v in lanes.items()}], sort_keys=True)
+
+
+def _held_picks_for(key: str, now: float | None = None) -> list[int] | None:  # #5614
+    now = time.time() if now is None else now
+    if _HELD_PICKS.get("key") == key and now - _HELD_PICKS.get("at", 0) <= ANNOUNCE_WINDOW_S:
+        return list(_HELD_PICKS["picks"])
+    return None
+
+
+async def _forget_picks(track_ids: list[int]) -> None:  # #4051 undelivered picks leave history
+    if not track_ids:
+        return
+    try:
+        await _post("/api/playback/pool/forget", {"track_ids": track_ids})
+    except Exception:
+        pass
 
 
 async def _first_up_notes(track_id: int) -> str:  # #4056
