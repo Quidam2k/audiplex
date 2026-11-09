@@ -73,4 +73,23 @@ class FocusPolicyTest {
             FocusPolicy.DUCK_VOLUME < 0.2f
         )
     }
+
+    @Test
+    fun testLoadingStartResumesAfterFocusPause() {
+        // #5614: play_now still buffering when Pantheon re-takes focus: the GAIN must start it.
+        assertTrue(FocusPolicy.resumeAfterPause(false, false, isPlaying = false, playWhenReady = true))
+        assertTrue(FocusPolicy.resumeAfterPause(false, false, isPlaying = true, playWhenReady = true))
+    }
+
+    @Test
+    fun testUserPausedPlayerDoesNotResumeAfterFocusPause() {
+        assertFalse(FocusPolicy.resumeAfterPause(false, false, isPlaying = false, playWhenReady = false))
+    }
+
+    @Test
+    fun testRepeatLossKeepsTheFirstAnswer() {
+        // #5614: a second loss while already paused by focus must not forget the resume.
+        assertTrue(FocusPolicy.resumeAfterPause(true, true, isPlaying = false, playWhenReady = false))
+        assertFalse(FocusPolicy.resumeAfterPause(true, false, isPlaying = false, playWhenReady = false))
+    }
 }

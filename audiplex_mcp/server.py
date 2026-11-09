@@ -601,6 +601,7 @@ async def _acked(data, did: str) -> str:  # #3505 (Karen rider b)
 # So a start is only YES when the device acked ok AND then reported playing the
 # thing we asked for; a failed ack is NO; anything else is UNCONFIRMED.
 START_VERIFY_S = 15.0  # #2843: total cap; phone START_TIMEOUT 8 s + poll latency
+DEFERRED_VERIFY_S = 30.0  # #5614: a start the phone holds until a persona's speech ends
 VERIFY_POLL_S = 1.0  # #2843
 ALREADY_PLAYING_FRESH_S = 90.0  # #2843: queue/play_next on a live player
 VERIFY_CMDS = {"play_now", "resume", "play_stream", "play_book", "queue", "play_next"}  # #2843
@@ -638,7 +639,9 @@ async def _verify_start(command_id: int | None, cmd: str, payload: dict,
     """(YES|NO|UNCONFIRMED, why, ack row). Returns the moment the verdict is
     known; never waits longer than START_VERIFY_S in total."""
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + START_VERIFY_S
+    started = loop.time()
+    deadline = started + START_VERIFY_S
+    deferred = False  # #5614
     ack: dict | None = None
     says, fresh = None, False
     while True:
@@ -651,7 +654,10 @@ async def _verify_start(command_id: int | None, cmd: str, payload: dict,
                             ack = row
             except Exception:
                 pass
-        if ack is not None and ack.get("ack_status") != "ok":
+        if ack is not None and ack.get("ack_status") == "deferred" and not deferred:  # #5614
+            deferred = True
+            deadline = max(deadline, started + DEFERRED_VERIFY_S)
+        if ack is not None and ack.get("ack_status") not in ("ok", "deferred"):
             detail = f": {ack['ack_detail']}" if ack.get("ack_detail") else ""
             return "NO", f"the device answered {ack.get('ack_status')}{detail}", ack
         try:
@@ -672,6 +678,9 @@ async def _verify_start(command_id: int | None, cmd: str, payload: dict,
         await asyncio.sleep(VERIFY_POLL_S)
     if command_id is not None and ack is None:
         return "UNCONFIRMED", f"no answer from the device in {START_VERIFY_S:g}s", None
+    if deferred:  # #5614: never NO; it plays once the speech holding focus ends
+        return ("UNCONFIRMED", "the device is holding it until the speech that has audio focus ends "
+                f"(not playing {DEFERRED_VERIFY_S:g}s later); check dj_now_playing", ack)
     if fresh and says == "idle":
         return "NO", f"the device reports it is NOT playing {START_VERIFY_S:g}s later", ack
     if fresh and says and says.startswith("other"):

@@ -114,6 +114,9 @@ private val QUEUE_CMDS = setOf("play_now", "replace_upcoming", "queue", "play_ne
 /** How long a play_now gets to produce sound before its ack says it failed. */
 private const val START_TIMEOUT_MS = 8_000L
 
+/** #5614: the ack for a start a focus loss is holding until speech ends. */
+internal const val DEFERRED = "deferred"
+
 /** Idle now-playing heartbeat, so a restarted server never shows "never". */
 private const val IDLE_REPORT_INTERVAL_MS = 60_000L
 
@@ -129,10 +132,13 @@ internal fun startResult(
     base: DispatchResult,
     wasPlaying: Boolean = false,
     stillPlaying: Boolean = false,
+    heldByFocus: Boolean = false,
 ): DispatchResult =
     when {
         error != null -> DispatchResult("failed", "player error: $error")
         started -> base
+        // #5614: a persona is still speaking and holds focus; the GAIN starts it.
+        heldByFocus -> DispatchResult(DEFERRED, "waiting for speech to end; plays when focus returns")
         // Something was already playing and never visibly stopped: the swap
         // may have been seamless, so don't call it a failure — say it's unproven.
         wasPlaying && stillPlaying -> DispatchResult(
@@ -384,6 +390,7 @@ class DjCommandClient @Inject constructor(
             base = base,
             wasPlaying = wasPlaying,
             stillPlaying = playbackManager.isPlaying.value,
+            heldByFocus = PlayerHooks.focusManager?.awaitingFocusResume == true,  // #5614
         )
     }
 

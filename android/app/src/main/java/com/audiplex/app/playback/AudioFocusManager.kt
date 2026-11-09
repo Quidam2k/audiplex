@@ -35,8 +35,11 @@ class AudioFocusManager(
     private var preDuckVolume: Float? = null
 
     /** True if the policy paused the player (so a GAIN should resume it). */
-    private var pausedByFocus = false
-    private var wasPlaying = false
+    @Volatile private var pausedByFocus = false
+    @Volatile private var wasPlaying = false
+
+    /** #5614: a focus loss is holding playback that the next GAIN will start. */
+    val awaitingFocusResume: Boolean get() = pausedByFocus && wasPlaying
 
     // #3597 duck/restore ramps (see DuckRamp). Focus callbacks and player calls are on
     // the main looper, so the ramp steps post there too.
@@ -169,7 +172,8 @@ class AudioFocusManager(
             }
             FocusPolicy.FocusAction.Pause -> {
                 cancelRamp()  // #3597
-                wasPlaying = player.isPlaying
+                wasPlaying = FocusPolicy.resumeAfterPause(  // #5614
+                    pausedByFocus, wasPlaying, player.isPlaying, player.playWhenReady)
                 pausedByFocus = true
                 PlayerHooks.notePause("audio_focus")  // #3552
                 player.pause()

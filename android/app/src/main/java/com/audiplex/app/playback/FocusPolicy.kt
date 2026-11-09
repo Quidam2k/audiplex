@@ -54,6 +54,19 @@ object FocusPolicy {
     }
 
     /**
+     * #5614: whether a GAIN after this focus pause should resume. A play command
+     * still loading (playWhenReady, not yet isPlaying) counts: on 11/09 Pantheon
+     * re-took focus while a just-sent play_now was buffering, and the GAIN left
+     * it silent. A repeat loss while already paused by focus keeps the first answer.
+     */
+    fun resumeAfterPause(
+        alreadyPausedByFocus: Boolean,
+        wasPlaying: Boolean,
+        isPlaying: Boolean,
+        playWhenReady: Boolean,
+    ): Boolean = (alreadyPausedByFocus && wasPlaying) || isPlaying || playWhenReady
+
+    /**
      * Determine the action to take when audio focus changes.
      *
      * @param focusChange one of AudioManager.AUDIOFOCUS_*

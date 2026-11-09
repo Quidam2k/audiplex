@@ -1,6 +1,7 @@
 package com.audiplex.app.playback
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -98,5 +99,18 @@ class DjAckHonestyTest {
     @Test
     fun `redelivery with no record is never a bare ok`() {
         assertEquals("duplicate", replayResult(null, 3).status)
+    }
+
+    @Test
+    fun `a start held by a focus loss is deferred, not failed`() {
+        // #5614: 11/09 08:26 acked "failed: not playing 8s" while the intro still held focus.
+        val result = startResult(false, null, ok, heldByFocus = true)
+        assertEquals(DEFERRED, result.status)
+        assertTrue(result.detail.contains("speech"))
+    }
+
+    @Test
+    fun `a real start is ok even if focus was briefly held`() {
+        assertEquals(ok, startResult(true, null, ok, heldByFocus = true))
     }
 }

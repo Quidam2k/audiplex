@@ -164,3 +164,22 @@ def test_transfer_verdict_reads_the_target_device(dev, monkeypatch):
     out = asyncio.run(mcp.dj_transfer("e2e-test-device"))
     assert out.startswith("RESULT playing=YES on 'e2e-test-device'")
     assert any("device_id=e2e-test-device" in p for p in seen)
+
+
+def test_deferred_ack_then_playing_is_yes(dev, monkeypatch):
+    """#5614: the phone holds a start while a persona's speech has focus, then plays it."""
+    monkeypatch.setattr(mcp, "DEFERRED_VERIFY_S", 2.0)
+    dev["ack"] = lambda s: {"ack_status": "deferred", "ack_detail": "waiting for speech to end"}
+    dev["state"] = lambda s: playing(5)(s) if s > 1.2 else {"playing": False, "track": {"id": 5}}
+    out = asyncio.run(mcp.dj_play_now([5]))  # past START_VERIFY_S (1 s): the deferral widened the wait
+    assert "playing=YES" in first_line(out)
+
+
+def test_deferred_ack_never_playing_is_unconfirmed_not_no(dev, monkeypatch):
+    """#5614: a deferred start that is still waiting is never reported as DID NOT START."""
+    monkeypatch.setattr(mcp, "DEFERRED_VERIFY_S", 1.2)
+    dev["ack"] = lambda s: {"ack_status": "deferred", "ack_detail": "waiting for speech to end"}
+    dev["state"] = lambda s: {"playing": False, "track": {"id": 5}}
+    out = asyncio.run(mcp.dj_play_now([5]))
+    assert "playing=UNCONFIRMED" in first_line(out)
+    assert "holding it until the speech" in out
