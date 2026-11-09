@@ -380,12 +380,19 @@ class PlaybackManager @Inject constructor(
         }
         // #4118: the cut goes on the player volume, the raise on the limiter.
         val (targetLufs, maxBoostDb) = MixLevels.musicTarget(evenOutLoudness, musicLevels!!.targetLufs, musicLevels!!.maxBoostDb)  // #5626
-        val gainDb = LoudnessGain.gainDbFor(
+        val localDb = LoudnessGain.gainDbFor(  // #5683 the phone's own math, until the server answers
             currentTrack.loudnessLufs,
             targetLufs,
             musicLevels!!.fallbackLufs,
-            maxBoostDb
+            maxBoostDb.coerceAtMost(LOCAL_MAX_BOOST_DB)  // #5683
         )
+        // #5683: the server's gain knows the track's true peak (and the album's, in an album play).
+        val album = albumPlay()
+        val key = "${currentTrack.id}|$album|$targetLufs|$maxBoostDb"
+        val cached = if (evenOutLoudness) null else serverTrackGain[key]
+        if (!evenOutLoudness && cached == null) fetchTrackGain(key, currentTrack.id, album)
+        val serverDb = cached?.takeIf { it.isFinite() }  // NaN = asked, no answer: local math
+        val gainDb = serverDb ?: localDb
         currentMusicGain = 10.0.pow(gainDb.coerceAtMost(0.0) / 20.0).toFloat()
         currentMusicBoostDb = gainDb.coerceAtLeast(0.0)
     }
@@ -416,6 +423,36 @@ class PlaybackManager @Inject constructor(
                 delay(SleepBedRules.BOOK_RAMP_MS / volumes.size)
                 if (PlayerHooks.retargetRestore(target)) return@launch
                 setPlayerVolume(v)
+            }
+        }
+    }
+
+    /** #5683: an album play = a neighbour in the queue is from the same album (ReplayGain "auto"). */
+    private fun albumPlay(): Boolean {
+        val q = _currentMusic.value ?: return false
+        val cur = q.items.getOrNull(q.currentIndex)?.track ?: return false
+        return listOfNotNull(q.items.getOrNull(q.currentIndex - 1)?.track, q.items.getOrNull(q.currentIndex + 1)?.track)
+            .any { it.albumId == cur.albumId }
+    }
+
+    /** #5683: fetch the server's gain for [key]; a failed/offline request keeps the local math. */
+    private fun fetchTrackGain(key: String, trackId: Int, album: Boolean) {
+        if (trackGainJob?.isActive == true && pendingTrackGain == key) return
+        trackGainJob?.cancel()
+        pendingTrackGain = key
+        trackGainJob = scope.launch {
+            if (serverTrackGain.size > 500) serverTrackGain.clear()  // a long session stays small
+            try {
+                val gain = apiHolder.api?.getGain("track", trackId, album) ?: return@launch
+                val db = gain.gainDb?.takeIf { it.isFinite() }
+                serverTrackGain[key] = db ?: Double.NaN  // unmeasured: don't ask again for this key
+                if (db == null) return@launch
+                val cur = _currentMusic.value?.let { it.items.getOrNull(it.currentIndex)?.track }
+                if (isActive && isMusic() && cur?.id == trackId) reapplyTrackGain()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                serverTrackGain[key] = Double.NaN  // offline: local math for this track, no retry storm
             }
         }
     }
@@ -664,8 +701,15 @@ class PlaybackManager @Inject constructor(
     // #4222: the server also serves gain_db on TrackSchema; keep the #3504 step 3 music math.
     private var currentMusicGain: Float = 1.0f
     private var currentMusicBoostDb: Double = 0.0  // #4118: applied by the LoudnessEnhancer
-    /** #4118: the most any boost may raise playback, books or music (Jarvis option B, 10/18). */
-    private val MAX_BOOST_DB = 6.0
+    /** #4118 #5683: the most any boost may raise playback. The server holds each item under its
+     *  true-peak ceiling + limiter budget, so 12 only reaches tracks with the headroom for it. */
+    private val MAX_BOOST_DB = 12.0
+    /** #5683: the raise from the phone's own math (no peak known yet): the old +6. */
+    private val LOCAL_MAX_BOOST_DB = 6.0
+    /** #5683: the server's peak-aware gain per (track, album play); local math until it answers. */
+    private val serverTrackGain = HashMap<String, Double>()  // key: id|album|target|cap, so a DJ offset refetches
+    private var trackGainJob: Job? = null
+    private var pendingTrackGain: String? = null
     /** #7109: below this share of the expected level the player is ducked (ducks go to ~5%). */
     private val DUCKED_FRACTION = 0.5f
     private val EXTERNAL_OUTPUTS = setOf(  // #5282

@@ -175,7 +175,8 @@ interface AudiplexApi {
 
     // #4222: audiobook gain, including boosts that need a limiter.
     @GET("api/playback/gain/{kind}/{id}")
-    suspend fun getGain(@Path("kind") kind: String, @Path("id") id: Int): GainResponse
+    suspend fun getGain(@Path("kind") kind: String, @Path("id") id: Int,
+                        @Query("album") album: Boolean = false): GainResponse  // #5683 album gain
 
     // ----- DJ playback command bus (remote control) -----
 

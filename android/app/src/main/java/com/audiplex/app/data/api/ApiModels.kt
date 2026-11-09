@@ -145,7 +145,8 @@ data class GainResponse(
     val lufs: Double?,
     @Json(name = "target_lufs") val targetLufs: Double,
     @Json(name = "gain_db") val gainDb: Double?,
-    val mode: String
+    val mode: String,
+    val ref: String? = null  // #5683 "album" | "track": what the gain was levelled against
 )
 
 // ----- Music Levels (#7109) -----
