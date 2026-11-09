@@ -2085,7 +2085,8 @@ async def dj_announce(
 
 @mcp.tool()
 async def dj_patter(
-    on: bool, every_min: int | None = None, every_max: int | None = None
+    on: bool | None = None, every_min: int | None = None, every_max: int | None = None,
+    public: bool | None = None, until: str | None = None,
 ) -> str:
     """Turn DJ patter on or off ("DJ patter on/off"). #2858
 
@@ -2093,9 +2094,27 @@ async def dj_patter(
     rotation) to speak a short bridge early in the new song, on every
     every_min-every_max music track changes (default 2-3). Takes effect on
     the watcher's next 2 s tick; nothing is restarted and no music is touched.
+    on=None keeps the current on/off.
+
+    public / until (#5762): public (party) DJ mode, where only the DJ voice's fixed
+    "That was X. Cheers." callout plays, never a persona. It ends by itself at
+    `until` ("HH:MM" today, or an ISO time; default 23:59 tonight), or when the
+    pool stops. public=False ends it now.
     """
     settings = dj_bridge_watcher.load_settings()
-    settings["on"] = bool(on)
+    if on is not None:
+        settings["on"] = bool(on)
+    if public is False:  # #5762
+        settings.pop("public", None)
+        settings.pop("public_until", None)
+    elif public or until:  # #5762
+        try:
+            ends = _public_until(until)
+        except ValueError:
+            return f"ERROR: until must be HH:MM or an ISO time, not {until!r}. Nothing changed."
+        raw = _patter_raw()
+        settings.update(public=True, public_until=ends.isoformat(timespec="minutes"),
+                        voice=settings.get("voice") or raw.get("voice") or "chris")
     if every_min is not None:
         settings["every_min"] = max(1, int(every_min))
     if every_max is not None:
@@ -2103,11 +2122,33 @@ async def dj_patter(
     settings["every_max"] = max(settings["every_min"], settings["every_max"])
     dj_bridge_watcher.write_settings(settings)
     state = "on" if settings["on"] else "off"
+    mode = (f"public until {settings['public_until'][11:16]}" if settings.get("public")
+            else "private")  # #5762
     return (
         f"DJ patter {state} (a bridge every {settings['every_min']}-"
-        f"{settings['every_max']} track changes). The watcher process must be "
+        f"{settings['every_max']} track changes), mode: {mode}. The watcher process must be "
         "running (launch-dj-bridge-hidden.vbs)."
     )
+
+
+def _patter_raw() -> dict:  # #5762 the file as written (load_settings drops a private voice)
+    try:
+        raw = json.loads(dj_bridge_watcher.patter_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _public_until(until: str | None, now: datetime.datetime | None = None) -> datetime.datetime:  # #5762
+    now = now or datetime.datetime.now().astimezone()
+    if not until:
+        return dj_bridge_watcher.end_of_today(now)
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", until.strip())
+    if m:
+        ends = now.replace(hour=int(m[1]), minute=int(m[2]), second=0, microsecond=0)
+        return ends if ends > now else ends + datetime.timedelta(days=1)
+    ends = datetime.datetime.fromisoformat(until.strip())
+    return ends if ends.tzinfo else ends.astimezone()
 
 
 async def _get(path: str):
@@ -4854,9 +4895,10 @@ async def dj_chimes(
 async def dj_pool_stop() -> str:
     """Stop the rolling DJ pool (what is already queued keeps playing)."""
     result = await _delete("/api/playback/pool")
+    ended = " Public DJ mode is off too (the set is over)." if result.get("public_ended") else ""  # #5762
     if result.get("stopped"):
-        return "Stopped the rolling pool."
-    return "No rolling pool was running."
+        return "Stopped the rolling pool." + ended
+    return "No rolling pool was running." + ended
 
 
 # ----- DJ Mix Specs: create/manage persistent specs (#5477) -----

@@ -456,6 +456,7 @@ def isolated_dj_pool(tmp_path, monkeypatch):
     # #ride0928: the talk guard defaults to Pantheon's REAL speech state; a test
     # run must not flake because Todd happened to be talking. Missing = unguarded.
     monkeypatch.setenv("DJ_SPEECH_STATE_FILE", str(tmp_path / "no-speech-state.json"))
+    monkeypatch.setenv("DJ_PATTER_FILE", str(tmp_path / "dj_patter.json"))  # #5762 never the live file
     yield
     dj_pool.reset_pool_singleton()
 

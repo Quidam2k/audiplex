@@ -307,9 +307,12 @@ def test_public_mode_survives_on_off(tmp_path, monkeypatch):  # #5648
     import json  # #5648
     f = tmp_path / "dj_patter.json"  # #5648
     monkeypatch.setenv("DJ_PATTER_FILE", str(f))  # #5648
-    f.write_text(json.dumps({"on": False, "every_min": 3, "every_max": 4, "public": True, "voice": "chris"}))  # #5648
+    until = "2099-01-01T00:00:00"  # #5762 public mode needs a live public_until
+    f.write_text(json.dumps({"on": False, "every_min": 3, "every_max": 4, "public": True, "voice": "chris",
+                             "public_until": until}))  # #5648
     dbw.cmd_on(None, None)  # #5648
-    assert json.loads(f.read_text()) == {"on": True, "every_min": 3, "every_max": 4, "public": True, "voice": "chris"}  # #5648
+    assert json.loads(f.read_text()) == {"on": True, "every_min": 3, "every_max": 4, "public": True, "voice": "chris",
+                                         "public_until": until}  # #5648 #5762
     dbw.cmd_off()  # #5648
     assert json.loads(f.read_text())["public"] is True  # #5648 pre-#5648 'off' dropped it, silently going private
     f.write_text(json.dumps({"on": True}))  # #5648

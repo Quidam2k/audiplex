@@ -231,8 +231,8 @@ def specs(db_engine):
 
 def test_delete_pool_reports_stopped_then_not(client):
     dj_pool.get_pool().set_pool(3, [1, 2], {})
-    assert client.delete("/api/playback/pool").json() == {"stopped": True}
-    assert client.delete("/api/playback/pool").json() == {"stopped": False}
+    assert client.delete("/api/playback/pool").json() == {"stopped": True, "public_ended": False}  # #5762
+    assert client.delete("/api/playback/pool").json() == {"stopped": False, "public_ended": False}  # #5762
 
 
 def test_post_pool_with_lanes_sets_status_lanes(client, specs):

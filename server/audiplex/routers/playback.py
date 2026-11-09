@@ -1106,8 +1106,10 @@ def forget_pool_picks(body: dict, user: User = Depends(get_current_user)):
 def stop_pool(user: User = Depends(get_current_user)):
     """Stop the DJ pool. stopped is true only if one was running."""
     from audiplex.dj_pool import get_pool
+    from audiplex.public_mode import end_public_mode  # #5762 the set is over
 
-    return {"stopped": get_pool().stop()}
+    stopped = get_pool().stop()
+    return {"stopped": stopped, "public_ended": end_public_mode()}
 
 
 @router.post("/pool/outro", tags=["dj_pool"])

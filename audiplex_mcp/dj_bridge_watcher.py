@@ -73,6 +73,25 @@ def log_line(message):
         pass  # logging must never crash the loop
 
 
+def public_live(raw, now=None) -> bool:  # #5762
+    """Public (party) DJ mode is on only until its public_until: a missing or past
+    time is private, so a mode left on after the event (or hand-set with no
+    time) switches itself off. Naive times are local."""
+    if not isinstance(raw, dict) or not raw.get("public"):
+        return False
+    try:
+        until = datetime.fromisoformat(str(raw.get("public_until")))
+    except (TypeError, ValueError):
+        return False
+    now = now or datetime.now().astimezone()
+    return until.astimezone() > now
+
+
+def end_of_today(now=None):  # #5762 the default public_until
+    now = now or datetime.now().astimezone()
+    return now.replace(hour=23, minute=59, second=0, microsecond=0)
+
+
 def load_settings():
     try:
         raw = json.loads(patter_file().read_text(encoding="utf-8"))
@@ -90,8 +109,9 @@ def load_settings():
         every_max = 3
     every_max = max(every_min, every_max)
     settings = {"on": bool(raw.get("on", False)), "every_min": every_min, "every_max": every_max}
-    if raw.get("public"):  # #5648 public DJ mode: Pantheon's hook speaks the DJ voice's callout only
+    if public_live(raw):  # #5648 public DJ mode: Pantheon's hook speaks the DJ voice's callout only; #5762 until expiry
         settings["public"] = True  # #5648 kept here so 'on'/'off' never silently drop it
+        settings["public_until"] = str(raw["public_until"])  # #5762
         if raw.get("voice"):  # #5648
             settings["voice"] = str(raw["voice"])  # #5648
     return settings

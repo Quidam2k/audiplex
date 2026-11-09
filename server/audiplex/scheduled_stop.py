@@ -156,6 +156,9 @@ class StopController:
             from audiplex.dj_pool import get_pool
 
             get_pool().stop()
+            from audiplex.public_mode import end_public_mode  # #5762 the set is over
+
+            end_public_mode()
         except Exception as e:
             print(f"[scheduled_stop] pool stop skipped: {e}", flush=True)
 
