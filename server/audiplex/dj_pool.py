@@ -322,7 +322,7 @@ class DJPool:
             counts[label] = counts.get(label, 0) + 1
         return counts
 
-    def _select_next_lane(self) -> str | None:
+    def _select_next_lane(self, skip: frozenset[str] | set[str] = frozenset()) -> str | None:
         """#4054 strict rotation: the active lane picked least recently goes next, so
         no lane repeats until every other active lane has had a turn. Paused and
         exhausted (no eligible track this top-up) lanes are skipped, never waited on.
@@ -330,7 +330,8 @@ class DJPool:
         a skipped one two turns in a row; least-recent-first is also starvation-free."""
         lanes = self.state.get("lanes", {})
         order = list(lanes.keys())
-        active = [n for n in order if not lanes[n].get("exhausted") and not lanes[n].get("paused")]  # #2806
+        active = [n for n in order if not lanes[n].get("exhausted") and not lanes[n].get("paused")  # #2806
+                  and n not in skip]  # #5696 a lane sitting out this slot
         if not active:
             return None
         return min(active, key=lambda n: (lanes[n].get("last_pick_index", -1), order.index(n)))
@@ -550,6 +551,15 @@ class DJPool:
         queue_end = next((t for t in reversed(upcoming_track_ids) if isinstance(t, int) and t > 0), current_track_id)
         context_reasons: list[str] = []
 
+        # #5696: never the same act twice in a row (spellings folded, "feat." dropped,
+        # compilations exempt), across lanes and at the join with the queue's end.
+        artist_of = {tid: ident.artist_key for tid, ident in identities.items()
+                     if getattr(ident, "artist_key", "")} if identities else {}
+
+        def other_artist(candidates: list[int]) -> list[int]:  # #5696
+            prev = artist_of.get(picks[-1] if picks else queue_end, "")
+            return [t for t in candidates if not prev or artist_of.get(t) != prev]
+
         def pick_from(candidates: list[int]) -> int:
             seed = picks[-1] if picks else queue_end
             tilted, hits = tilt.weights(seed, candidates, weights)  # #4056
@@ -614,15 +624,25 @@ class DJPool:
         # other lanes still have fresh tracks, so a small bucket keeps its turn
         # instead of starving out. A pool with nothing fresh anywhere is done.
         held: list[dict] = []  # lanes blocked only by the window: retried after the next pick
+        waiting: set[str] = set()  # #5696 lanes whose every candidate is the last pick's artist
+        same_ok = False  # #5696 no lane has anyone else: a one-artist pool still plays
         while len(picks) < to_pick:
-            selected_lane = self._select_next_lane()
+            selected_lane = self._select_next_lane(waiting)
+            if not selected_lane and waiting:  # #5696 nobody else anywhere
+                waiting.clear()
+                same_ok = True
+                selected_lane = self._select_next_lane()
             if not selected_lane:
                 break
             lane = self.state["lanes"][selected_lane]
             ids = lane.get("track_ids", [])
             fresh = [t for t in ids if eligible(t)]
             if fresh:
-                pick = pick_from(new_songs_first(fresh))  # #4057 #4056 #5488
+                varied = fresh if same_ok else other_artist(fresh)  # #5696
+                if not varied:
+                    waiting.add(selected_lane)
+                    continue
+                pick = pick_from(new_songs_first(varied))  # #4057 #4056 #5488
             else:
                 recent = recent_window()
                 recent_recs = {r for r in map(recording_of, recent) if r is not None}
@@ -635,8 +655,17 @@ class DJPool:
                         f"all {len(ids)} track(s) already played or queued, and no other lane "
                         "has fresh tracks left to recycle alongside")
                     continue
-                pick = pick_from(new_songs_first(again))  # #4057 #4056 #5488
+                varied = again if same_ok else other_artist(again)  # #5696
+                if not varied:
+                    waiting.add(selected_lane)
+                    continue
+                pick = pick_from(new_songs_first(varied))  # #4057 #4056 #5488
             lane["why_empty"] = None
+            if waiting:  # #5696 shown in dj_pool_status with the context picks
+                context_reasons.append(f"#{pick} artist rule: {', '.join(sorted(waiting))} "
+                                       "waited a turn (same artist as the song before)")
+            waiting.clear()
+            same_ok = False
 
             picks.append(pick)
             for blocked in held:  # #7108: the window moved on, so try them again

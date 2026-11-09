@@ -99,6 +99,18 @@ def normalize(text: str | None) -> str:
     return _LEADING_ARTICLE.sub("", folded)
 
 
+_FEATURING = re.compile(r"\s+(feat|ft|featuring)\b.*$")  # #5696 "X feat. Y" is X
+_NO_ARTIST = {"", "various artists", "various", "va", "unknown artist", "unknown"}  # #5696 compilations
+
+
+def artist_key(artist: str | None) -> str:  # #5696
+    """One act, however it is spelled ("Cirque du Soleil" / "CIRQUE DU SOLEIL"),
+    with a featured guest dropped. '' for a compilation or unknown artist: no
+    same-artist rule applies to those."""
+    key = _FEATURING.sub("", normalize(artist)).strip()
+    return "" if key in _NO_ARTIST else key
+
+
 def strip_qualifiers(title: str | None) -> str:
     """"Barracuda (2004 Remaster)" -> "barracuda". The work-level title.
 
@@ -185,6 +197,7 @@ class TrackIdentity:
     recording_id: str
     work_id: str
     song_id: str = ""  # #5488: same song, any artist (set-level only)
+    artist_key: str = ""  # #5696: the act, for no-same-artist-back-to-back
 
 
 class _DisjointSet:
@@ -289,6 +302,7 @@ def _identities_for(rows: list[_TrackRow]) -> dict[int, TrackIdentity]:
                 recording_id=recording_id,
                 work_id=work_key(row.title, row.artist),
                 song_id=song_key(row.title, row.artist, known_artists),  # #5488
+                artist_key=artist_key(row.artist),  # #5696
             )
     return identities
 
