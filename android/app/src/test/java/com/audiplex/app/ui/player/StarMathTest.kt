@@ -8,10 +8,19 @@ import org.junit.Test
 
 /** #6117: half-star taps, drawing, tap-to-clear, and wire compatibility. */
 class StarMathTest {
-    @Test fun leftHalfIsAHalfStarRightHalfIsWhole() {
-        assertEquals(4.5, starValue(5, leftHalf = true), 0.0)
-        assertEquals(5.0, starValue(5, leftHalf = false), 0.0)
-        assertEquals(0.5, starValue(1, leftHalf = true), 0.0)
+    @Test fun tapSetsWholeStarAgainAddsHalfAgainGoesBack() {  // #5681
+        assertEquals(4.0, tapStar(null, 4), 0.0)
+        assertEquals(4.5, tapStar(4.0, 4), 0.0)
+        assertEquals(4.0, tapStar(4.5, 4), 0.0)
+        assertEquals(3.0, tapStar(4.5, 3), 0.0)
+        assertEquals(5.0, tapStar(5.0, 5), 0.0)  // no 5.5
+        assertEquals(5.0, tapStar(4.5, 5), 0.0)
+    }
+
+    @Test fun noTapEverWipesAnExistingRating() {  // #5681 Karen: a 4.5 can't be cleared by tapping
+        for (current in listOf(0.5, 1.0, 3.5, 4.0, 4.5, 5.0)) for (star in 1..5) {
+            assertEquals(true, tapStar(current, star) >= 1.0)
+        }
     }
 
     @Test fun fourAndAHalfDrawsFourFullOneHalf() {
@@ -20,14 +29,6 @@ class StarMathTest {
             (1..5).map { starFill(it, 4.5) },
         )
         assertEquals(List(5) { StarFill.EMPTY }, (1..5).map { starFill(it, 0.0) })
-    }
-
-    @Test fun tappingTheCurrentValueClearsIt() {
-        assertNull(nextRating(4.5, 4.5))
-        assertEquals(4.0, nextRating(4.5, 4.0)!!, 0.0)
-        assertEquals(4.5, nextRating(null, 4.5)!!, 0.0)
-        // The other half of the same star changes the value, it doesn't clear.
-        assertEquals(5.0, nextRating(4.5, 5.0)!!, 0.0)
     }
 
     @Test fun serverRowWithStarsParsesAndOldRowWithoutStarsStillParses() {

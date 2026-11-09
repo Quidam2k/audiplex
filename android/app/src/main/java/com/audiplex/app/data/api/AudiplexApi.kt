@@ -126,6 +126,9 @@ interface AudiplexApi {
     @GET("api/music/playlists/{id}")
     suspend fun getPlaylist(@Path("id") id: Int): PlaylistDetail
 
+    @POST("api/playback/pool/removed")  // #5684 a swiped-out song stays out of this DJ set
+    suspend fun poolRemoved(@Body body: Map<String, Int>): Response<ResponseBody>
+
     @POST("api/music/playlists")
     suspend fun createPlaylist(@Body body: PlaylistCreate): PlaylistDetail
 

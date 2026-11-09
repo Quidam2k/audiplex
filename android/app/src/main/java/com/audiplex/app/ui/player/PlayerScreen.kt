@@ -1,6 +1,18 @@
 package com.audiplex.app.ui.player
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background  // #5684
+import androidx.compose.foundation.gestures.detectVerticalDragGestures  // #5684
+import androidx.compose.runtime.rememberUpdatedState  // #5684
+import androidx.compose.material.icons.filled.Delete  // #5684
+import androidx.compose.material.icons.filled.DragHandle  // #5684
+import androidx.compose.material3.SwipeToDismissBox  // #5684
+import androidx.compose.material3.SwipeToDismissBoxValue  // #5684
+import androidx.compose.material3.rememberSwipeToDismissBoxState  // #5684
+import androidx.compose.ui.graphics.graphicsLayer  // #5684
+import androidx.compose.ui.zIndex  // #5684
+import com.audiplex.app.playback.MusicQueueItem  // #5684
+import com.audiplex.app.playback.dragTarget  // #5684
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -238,7 +250,8 @@ fun PlayerScreen(
                     Spacer(Modifier.height(12.dp))
                     StarRating(
                         rating = ratings[trackId] ?: 0.0,  // #6117
-                        onRate = { stars -> viewModel.rateTrack(trackId, stars) },
+                        onTap = { star -> viewModel.rateTrack(trackId, star) },  // #5681
+                        onClear = { viewModel.rateTrack(trackId, 0, clear = true) },  // #5681
                     )
                 }
             }
@@ -396,6 +409,8 @@ fun PlayerScreen(
             UpNextQueue(
                 queue = queue,
                 onTrackClick = { viewModel.seekToTrack(it) },
+                onRemove = { viewModel.removeQueueTrack(it) },  // #5684
+                onMove = { from, to -> viewModel.moveQueueTrack(from, to) },  // #5684
                 modifier = Modifier.weight(1f),
             )
         }
@@ -415,10 +430,14 @@ fun PlayerScreen(
 private fun UpNextQueue(
     queue: MusicQueueState,
     onTrackClick: (Int) -> Unit,
+    onRemove: (Int) -> Unit,  // #5684
+    onMove: (Int, Int) -> Unit,  // #5684
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = queue.currentIndex)
     LaunchedEffect(queue.currentIndex) { listState.animateScrollToItem(queue.currentIndex) }
+    var dragFrom by remember { mutableStateOf<Int?>(null) }  // #5684
+    var dragOffset by remember { mutableStateOf(0f) }  // #5684
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -434,56 +453,115 @@ private fun UpNextQueue(
             state = listState,
             modifier = Modifier.fillMaxWidth()
         ) {
-            itemsIndexed(queue.items) { index, item ->
+            itemsIndexed(queue.items, key = { index, item -> "${item.track.id}-$index" }) { index, item ->  // #5684
                 val isCurrent = index == queue.currentIndex
-                Row(
+                val dragging = dragFrom == index  // #5684
+                // #5684: a swipe either way removes the song (never the playing one). The state
+                // outlives a track change, so it reads the CURRENT isCurrent, not the first one.
+                val playingNow by rememberUpdatedState(isCurrent)
+                val swipe = rememberSwipeToDismissBoxState(confirmValueChange = { value ->
+                    if (value != SwipeToDismissBoxValue.Settled && !playingNow) { onRemove(index); true } else false
+                })
+                SwipeToDismissBox(
+                    state = swipe,
+                    enableDismissFromStartToEnd = !isCurrent,
+                    enableDismissFromEndToStart = !isCurrent,
+                    backgroundContent = {
+                        Box(
+                            Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                            contentAlignment = Alignment.CenterEnd,
+                        ) { Icon(Icons.Default.Delete, contentDescription = "Remove from queue") }
+                    },
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onTrackClick(index) }
-                        .padding(vertical = 8.dp, horizontal = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .zIndex(if (dragging) 1f else 0f)
+                        .graphicsLayer { translationY = if (dragging) dragOffset else 0f },
                 ) {
-                    if (isCurrent) {
-                        Icon(
-                            Icons.Default.MusicNote,
-                            contentDescription = "Now playing",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    } else {
-                        Text(
-                            text = "${index + 1}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.width(18.dp)
-                        )
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = item.track.title,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = if (isCurrent)
-                                MaterialTheme.colorScheme.primary
-                            else
-                                MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        item.track.artistName?.let {
-                            Text(
-                                text = it,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                    QueueRow(
+                        item = item,
+                        index = index,
+                        isCurrent = isCurrent,
+                        onClick = { onTrackClick(index) },
+                        handle = Modifier.pointerInput(index, queue.items.size) {  // #5684 drag the handle to reorder
+                            detectVerticalDragGestures(  // vertical only: never fights the swipe
+                                onDragStart = { dragFrom = index; dragOffset = 0f },
+                                onDragEnd = {
+                                    val rowPx = listState.layoutInfo.visibleItemsInfo
+                                        .firstOrNull { it.index == index }?.size?.toFloat() ?: 0f
+                                    val to = dragTarget(index, dragOffset, rowPx, queue.items.size)
+                                    dragFrom = null; dragOffset = 0f
+                                    if (to != index) onMove(index, to)
+                                },
+                                onDragCancel = { dragFrom = null; dragOffset = 0f },
+                                onVerticalDrag = { change, amount -> change.consume(); dragOffset += amount },
                             )
-                        }
-                    }
+                        },
+                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun QueueRow(  // #5684 one Up-next row; [handle] is the drag handle's gesture
+    item: MusicQueueItem,
+    index: Int,
+    isCurrent: Boolean,
+    onClick: () -> Unit,
+    handle: Modifier,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surface)  // #5684 covers the swipe background
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp, horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (isCurrent) {
+            Icon(
+                Icons.Default.MusicNote,
+                contentDescription = "Now playing",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp)
+            )
+        } else {
+            Text(
+                text = "${index + 1}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.width(18.dp)
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = item.track.title,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (isCurrent)
+                    MaterialTheme.colorScheme.primary
+                else
+                    MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            item.track.artistName?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        Icon(  // #5684
+            Icons.Default.DragHandle,
+            contentDescription = "Drag to reorder",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(40.dp).then(handle).padding(8.dp),
+        )
     }
 }
 
@@ -569,9 +647,9 @@ private fun TitleBlock(title: String, subtitle: String?, detail: String?, onLong
  * does not need a second control.
  */
 @Composable
-private fun StarRating(rating: Double, onRate: (Double) -> Unit) {
-    // #6117: halves. Tap the left half of a star for n - 0.5, the right half
-    // for n; tapping the value already set clears it.
+private fun StarRating(rating: Double, onTap: (Int) -> Unit, onClear: () -> Unit) {
+    // #5681: one tap target per star (no half zones). Tap = that star, tap again = +half,
+    // again = back to whole; long-press clears. Bigger targets for eyes-light use.
     Row(
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
@@ -581,11 +659,9 @@ private fun StarRating(rating: Double, onRate: (Double) -> Unit) {
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .size(48.dp)
+                    .size(56.dp)  // #5681 was 48
                     .pointerInput(star) {
-                        detectTapGestures { offset ->
-                            onRate(starValue(star, leftHalf = offset.x < size.width / 2f))
-                        }
+                        detectTapGestures(onTap = { onTap(star) }, onLongPress = { onClear() })  // #5681
                     },
             ) {
                 Icon(
@@ -594,7 +670,8 @@ private fun StarRating(rating: Double, onRate: (Double) -> Unit) {
                         StarFill.HALF -> Icons.AutoMirrored.Filled.StarHalf
                         StarFill.EMPTY -> Icons.Filled.StarBorder
                     },
-                    contentDescription = "Star $star: tap left half for ${star - 0.5}, right half for $star",
+                    contentDescription = "Star $star: tap for $star, tap again for ${star + 0.5}, long-press to clear",
+                    modifier = Modifier.size(36.dp),  // #5681
                     tint = if (fill != StarFill.EMPTY)
                         MaterialTheme.colorScheme.primary
                     else

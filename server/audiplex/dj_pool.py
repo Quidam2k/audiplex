@@ -207,6 +207,7 @@ class DJPool:
             "exclude_recent_hours": exclude_recent_hours,
             "played_this_session": played_this_session or [],
             "heard_this_session": [],  # #5488: every track seen playing in this set
+            "removed_this_session": [],  # #5684 swiped out of the phone queue: never re-picked this set
             "last_topup_at": None,
             "last_topup_current_track_id": None,
             "round_robin_index": 0,
@@ -454,6 +455,7 @@ class DJPool:
         skip_ids.update(t for t in (current_played_track_ids or []) if isinstance(t, int))
         skip_ids.update(t for t in upcoming_track_ids if isinstance(t, int))
         skip_ids.update(cue_picks)
+        skip_ids.update(t for t in self.state.get("removed_this_session", []) if isinstance(t, int))  # #5684
         skip_recordings: set[str] = set()
         identities: dict = {}
         banned: set[int] = set()
@@ -778,6 +780,19 @@ class DJPool:
             db=db,
         )
         return list(result.get("picks") or [])
+
+    def remove_pick(self, track_id: int) -> bool:  # #5684
+        """Todd swiped a song out of the phone queue: it stays out for the rest of this
+        set, even through a replan. The set list itself is untouched. Persisted, so an
+        app relaunch (or a server restart) mid-set keeps it out."""
+        if not self.is_active():  # no set running: nothing to keep it out of
+            return False
+        removed = self.state.setdefault("removed_this_session", [])
+        if int(track_id) in removed:
+            return False
+        removed.append(int(track_id))
+        self._persist()
+        return True
 
     def forget_picks(self, track_ids: list[int]) -> int:
         """#4051: picks that never reached the phone (trim refused / nothing sent)

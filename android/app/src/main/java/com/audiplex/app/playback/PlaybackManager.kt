@@ -1645,6 +1645,21 @@ class PlaybackManager @Inject constructor(
         }
     }
 
+    /**
+     * #5684: Todd swiped a song out of Up next. Never the playing one. The set list is
+     * untouched; the DJ pool is told so its refill won't bring the song straight back.
+     */
+    fun removeTrack(index: Int) {
+        val music = _currentMusic.value ?: return
+        val (items, current) = queueWithout(music.items, music.currentIndex, index) ?: return
+        val trackId = music.items[index].track.id
+        _currentMusic.value = music.copy(items = items, currentIndex = current)
+        ensureController { ctrl -> ctrl.removeMediaItem(index) }
+        if (trackId > 0 && music.origin == ORIGIN_DJ) {  // only a DJ set has a pool to tell
+            scope.launch { runCatching { apiHolder.api?.poolRemoved(mapOf("track_id" to trackId)) } }
+        }
+    }
+
     private fun playTrackList(
         items: List<MusicQueueItem>,
         baseUrl: String,

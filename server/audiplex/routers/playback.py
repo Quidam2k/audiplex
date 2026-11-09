@@ -1139,6 +1139,20 @@ def set_pool(
     return result
 
 
+@router.post("/pool/removed", tags=["dj_pool"])
+def pool_removed(body: dict, user: User = Depends(get_current_user)):
+    """#5684: the phone swiped a song out of its queue; the pool never re-picks it this set."""
+    from audiplex.dj_pool import get_pool
+
+    try:
+        track_id = int(body.get("track_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Give track_id.")
+    pool = get_pool()
+    return {"removed": pool.remove_pick(track_id), "track_id": track_id,
+            "removed_this_session": pool.state.get("removed_this_session", [])}
+
+
 @router.post("/pool/forget", tags=["dj_pool"])
 def forget_pool_picks(body: dict, user: User = Depends(get_current_user)):
     """#4051: drop picks that were never delivered from the session history."""

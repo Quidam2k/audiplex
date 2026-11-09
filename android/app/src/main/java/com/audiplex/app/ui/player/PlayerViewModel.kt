@@ -71,18 +71,17 @@ class PlayerViewModel @Inject constructor(
         }
     }
 
-    /** Tap a star to set it; tap the star that is already set to clear. */
-    fun rateTrack(trackId: Int, stars: Double) {  // #6117: halves
-        val next = nextRating(_ratings.value[trackId], stars)
-        val clearing = next == null
+    /** #5681: tap star N = N, tap it again = N + 0.5, again = N; [clear] (long-press) clears. */
+    fun rateTrack(trackId: Int, star: Int, clear: Boolean = false) {
+        val next = if (clear) null else tapStar(_ratings.value[trackId], star)  // #5681
         _ratings.value = _ratings.value.toMutableMap().apply {
             if (next == null) remove(trackId) else put(trackId, next)
         }
         viewModelScope.launch {
             val api = apiHolder.api ?: return@launch
             runCatching {
-                if (clearing) api.clearTrackRating(trackId)
-                else api.setTrackRating(trackId, TrackRatingCreate(stars = stars))  // #6117
+                if (next == null) api.clearTrackRating(trackId)
+                else api.setTrackRating(trackId, TrackRatingCreate(stars = next))  // #6117 #5681
             }
         }
     }
@@ -152,6 +151,10 @@ class PlayerViewModel @Inject constructor(
     fun seekToTrack(index: Int) {
         playbackManager.seekToTrack(index)
     }
+
+    fun removeQueueTrack(index: Int) = playbackManager.removeTrack(index)  // #5684
+
+    fun moveQueueTrack(from: Int, to: Int) = playbackManager.moveTrack(from, to)  // #5684
 
     fun getCurrentChapter(): ChapterSchema? {
         val book = currentBook.value ?: return null
