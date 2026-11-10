@@ -37,6 +37,7 @@ import javax.inject.Inject
 class PlaybackService : MediaSessionService() {
 
     @Inject lateinit var okHttpClient: OkHttpClient
+    @Inject lateinit var clientLog: ClientLogReporter  // #5834 focus fade timings
 
     private var mediaSession: MediaSession? = null
     private var audioFocusManager: AudioFocusManager? = null
@@ -94,7 +95,7 @@ class PlaybackService : MediaSessionService() {
             .setHandleAudioBecomingNoisy(true)
             .build()
 
-        val focusManager = AudioFocusManager(this, player)
+        val focusManager = AudioFocusManager(this, player) { clientLog.report("info", "focus_fade", it) }  // #5834
         audioFocusManager = focusManager
         PlayerHooks.exoPlayer = player  // #6913
         PlayerHooks.focusManager = focusManager  // #7528

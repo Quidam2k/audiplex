@@ -7,6 +7,8 @@ import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.Player
 
@@ -23,9 +25,13 @@ import androidx.media3.common.Player
  *  - user pause → [onUserPause] (abandon unless the pause was ours)
  *  - service destroy → [abandonFocus]
  */
+private const val TAG = "AudioFocus"  // #5834
+
 class AudioFocusManager(
     context: Context,
     private val player: Player,
+    /** #5834: fade timings, so the measured fade shows in the server's client log. */
+    private val log: (String) -> Unit = { Log.i(TAG, it) },
 ) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var focusRequest: AudioFocusRequest? = null
@@ -62,7 +68,7 @@ class AudioFocusManager(
         val state = FocusPolicy.FocusState(
             wasPlaying = wasPlaying,
             currentVolume = player.volume,
-            preDuckVolume = fader.preDuckVolume,
+            preDuckVolume = fader.restoreTarget,  // #5834 mid-fade: the dial level, not the faded one
             isSpeech = player.audioAttributes.contentType == C.AUDIO_CONTENT_TYPE_SPEECH,
         )
         applyAction(FocusPolicy.decide(focusChange, state))
@@ -105,6 +111,11 @@ class AudioFocusManager(
      * want the GAIN that will resume it.
      */
     fun onUserPause() {
+        if (fader.isFading) {  // #5834 the user paused mid-fade: theirs, not ours (ours fires after the fade)
+            fader.cancelRamp()  // lands on the dial level; the player is already paused
+            pausedByFocus = false
+            wasPlaying = false  // a later GAIN must not resume what the user paused
+        }
         if (!pausedByFocus) abandonFocus()
     }
 
@@ -138,12 +149,14 @@ class AudioFocusManager(
         when (action) {
             is FocusPolicy.FocusAction.Duck -> fader.duck(action.volume)
             FocusPolicy.FocusAction.Pause -> {
-                fader.cancelRamp()  // #3597
                 wasPlaying = FocusPolicy.resumeAfterPause(  // #5614
                     pausedByFocus, wasPlaying, player.isPlaying, player.playWhenReady)
                 pausedByFocus = true
-                PlayerHooks.notePause("audio_focus")  // #3552
-                player.pause()
+                val t0 = SystemClock.elapsedRealtime()  // #5834 measured on the device log
+                fader.fadeOutAndPause {  // #3552 #5834 500 ms fade, then pause
+                    log("#5834 focus pause: faded out in ${SystemClock.elapsedRealtime() - t0} ms")
+                    PlayerHooks.notePause("audio_focus")
+                }
             }
             FocusPolicy.FocusAction.PauseAndAbandon -> {
                 PlayerHooks.notePause("audio_focus_lost")  // #3552
@@ -151,7 +164,11 @@ class AudioFocusManager(
                 abandonFocus()
             }
             is FocusPolicy.FocusAction.Restore -> {
-                fader.restore(action.volume, action.resume)  // #3597 Pantheon #2187
+                val t0 = SystemClock.elapsedRealtime()  // #5834
+                val fromSilence = action.resume && !player.isPlaying  // #5834
+                fader.restore(action.volume, action.resume) {  // #3597 Pantheon #2187
+                    if (fromSilence) log("#5834 focus resume: faded in to ${action.volume} in ${SystemClock.elapsedRealtime() - t0} ms")
+                }
                 wasPlaying = false
                 pausedByFocus = false
             }

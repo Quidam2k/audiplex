@@ -9,6 +9,7 @@ object DuckRamp {
     // BT mic, so 10/10 Talk-ON on a headset took 1.2 s; it now waits 120 ms.
     const val DUCK_MS = 80L      // #3597 down: fast enough to clear the HFP mic switch
     const val RESTORE_MS = 500L  // #3597 up; Pantheon #2187: 500 ms on an equal-loudness curve (restoreLevel)
+    const val PAUSE_FADE_MS = 500L  // #5834 a focus pause fades out instead of cutting (Todd: "a right angle")
     const val STEP_MS = 10L      // Pantheon #7622 was 25: an 80 ms duck still gets 8 steps, not a cliff
 
     fun steps(durationMs: Long): Int = (durationMs / STEP_MS).toInt().coerceAtLeast(1)
