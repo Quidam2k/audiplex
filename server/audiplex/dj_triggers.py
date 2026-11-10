@@ -57,6 +57,11 @@ CHIME_MINUTES = (0, 15, 30, 45)
 DEFAULT_CHIME_SETTINGS = {"enabled": True, "volume": 0.12, "hour_strikes": False}
 STATE_FRESH_S = 30.0          # a renderer state older than this is not "playing"
 PAUSE_LEAD_S = 0.1            # send the after-clip pause this much before the clip ends
+OUTRO_PAUSE_RETRY_S = 3.0     # #5836 an un-acked after-outro pause is re-offered this fast, not at the bus's 60 s
+OUTRO_PAUSE_EXPIRE_S = 10.0   # #5836 ...and dropped once the next track is this far in (logged as cmd_expired)
+AGENT_AUDIO_MAX_AHEAD_S = 120.0  # #5837 an agent_audio_until further out than this is bogus: ignored (fail-open)
+OUTRO_RECHECK_S = 2.0         # #5837 a held outro (persona line on air) re-checks this often...
+OUTRO_RECHECK_CAP_S = 30.0    # #5837 ...and fires anyway after this long: the stop matters more than the overlap
 CHIME_STOP_PAD_S = 1.5        # bed_stop goes out sound_seconds + this after bed_play
 CLIP_PIN_GRACE_S = 3600.0     # a fired cue's clip stays pinned: the phone fetches it when it plays
 DEFAULT_SPEECH_STATE_FILE = "Q:/Pantheon/data/runtime/speech_state.json"
@@ -316,8 +321,18 @@ def read_speech_state() -> dict:
     return {
         "talking": any(data.get(k) for k in ("stt_active", "talk_active", "composing")),
         "last_spoke_at": _parse_ts(data.get("todd_last_spoke_at")),
+        "agent_audio_until": _parse_ts(data.get("agent_audio_until")),  # #5837 a persona clip on air until then
         "readable": True,
     }
+
+
+def agent_audio_busy(speech: dict, now: Optional[float] = None) -> bool:  # #5837
+    """A persona line is on air now. Missing, unparseable, past or bogus-far = not busy (fail-open)."""  # #5837
+    until = speech.get("agent_audio_until")  # #5837
+    if until is None:  # #5837
+        return False  # #5837
+    now = time.time() if now is None else now  # #5837
+    return now < until <= now + AGENT_AUDIO_MAX_AHEAD_S  # #5837
 
 
 def _drop(cue: dict, reason: str) -> str:
@@ -354,7 +369,9 @@ def hold_guard(cue: dict, speech: Optional[dict] = None) -> str:
             logger.info("staleness check fail-open: no todd_last_spoke_at in the speech state")
     elif reactive and rendered is not None and last > rendered:
         return _drop(cue, "stale")
-    if speech.get("talking"):
+    agent_busy = agent_audio_busy(speech)  # #5837 never start a DJ cue over a persona line
+    if speech.get("talking") or agent_busy:
+        cue["held_reason"] = "talking" if speech.get("talking") else "agent_audio"  # #5837
         cue["held_boundaries"] = int(cue.get("held_boundaries") or 0) + 1
         if cue["held_boundaries"] >= MAX_HELD_BOUNDARIES:
             return _drop(cue, "held_too_long")
@@ -490,20 +507,23 @@ def on_state(state: dict, bus, pool=None, now: Optional[float] = None) -> dict:
                 continue
         elif status != "held":
             continue
-        if speech is None:
-            speech = read_speech_state()
-        decision = hold_guard(c, speech)
-        if decision == "fire":
-            _fire(c, bus, now)
-            result["fired"].append(c.get("id"))
-        else:
-            result[decision].append(c.get("id"))
-            if decision == "dropped" and c.get("outro"):
-                # The ride is still over: skip the words, keep the stop. A song
-                # has only just started, so this is a boundary pause, not a cut.
-                bus._enqueue("pause", {}, source="dj_triggers:outro_dropped")  # #3552
-                c["pause_state"] = "paused_no_outro"
-                logger.warning("outro dropped (%s): paused without it", c.get("drop_reason"))
+        with _OUTRO_LOCK:  # #5837 the outro re-check fires on a timer thread: decide + fire atomically
+            if c.get("done") or c.get("recheck_until"):  # #5837 owned by its re-check timer: one outro, never two
+                continue
+            if speech is None:
+                speech = read_speech_state()
+            decision = hold_guard(c, speech)
+            if decision == "fire":
+                _fire(c, bus, now)
+                result["fired"].append(c.get("id"))
+            else:
+                result[decision].append(c.get("id"))
+                if decision == "dropped" and c.get("outro"):
+                    # The ride is still over: skip the words, keep the stop. A song
+                    # has only just started, so this is a boundary pause, not a cut.
+                    bus._enqueue("pause", {}, source="dj_triggers:outro_dropped")  # #3552
+                    c["pause_state"] = "paused_no_outro"
+                    logger.warning("outro dropped (%s): paused without it", c.get("drop_reason"))
     pool._persist()
     return result
 
@@ -540,8 +560,13 @@ def _send_pause(cue: dict, bus, pool) -> None:
         live = cue is pool.state.get("outro") or any(cue is c for c in pool.state.get("pending_cues") or [])
         if cue.get("pause_state") != "pausing" or not live:
             return
-        bus._enqueue("pause", {}, source="dj_triggers:outro")  # #3552
+        now = time.time()  # #5836
+        rec = bus._enqueue("pause", {}, source="dj_triggers:outro",  # #3552
+                           redeliver_after_s=OUTRO_PAUSE_RETRY_S,  # #5836 a lost long-poll reply costs 3 s, not 60
+                           expires_at=now + PAUSE_LEAD_S + OUTRO_PAUSE_EXPIRE_S,  # #5836 never a minute into the next song
+                           supersede_on_newer=True)  # #5836 a resume or newer playback command cancels it
         cue["pause_state"] = "paused"
+        cue["pause_command_id"] = rec.id  # #5836
         pool._persist()
         logger.info("cue %s: paused after its clip", cue.get("id"))
     except Exception:
@@ -583,8 +608,12 @@ def arm_outro(bus, clip_id: int, title: str, duration_seconds: Optional[float] =
     pool.state["outro"] = cue
     # The current track's boundary is now: fire immediately, the clip lands at its end.
     pool.state["trigger_last_track"] = cur
-    if hold_guard(cue) == "fire":
+    decision = hold_guard(cue)
+    if decision == "fire":
         _fire(cue, bus, now)
+    elif decision == "held" and cue.get("held_reason") == "agent_audio":  # #5837 a persona line is on air
+        cue["recheck_until"] = now + OUTRO_RECHECK_CAP_S  # #5837 the boundary path leaves it to this timer
+        _schedule(OUTRO_RECHECK_S, lambda: _outro_recheck(cue, bus, pool))  # #5837
     pool._persist()
     return {
         "armed": True,
@@ -595,6 +624,36 @@ def arm_outro(bus, clip_id: int, title: str, duration_seconds: Optional[float] =
         "command_ids": cue.get("command_ids", []),
         "drop_reason": cue.get("drop_reason"),
     }
+
+
+_OUTRO_LOCK = threading.Lock()  # #5837 the re-check timer runs on its own thread
+
+
+def _outro_recheck(cue: dict, bus, pool) -> None:  # #5837
+    """Fire a held outro once the persona line ends, or at the cap. Talking hands it back to the boundary path."""  # #5837
+    try:  # #5837
+        with _OUTRO_LOCK:  # #5837
+            if cue is not pool.state.get("outro") or cue.get("done") or not cue.get("recheck_until"):  # #5837
+                return  # #5837 replaced, disarmed or already fired: never a second outro
+            now = time.time()  # #5837
+            speech = read_speech_state()  # #5837
+            last, rendered = speech.get("last_spoke_at"), _parse_ts(cue.get("rendered_at"))  # #5837
+            stale = is_reactive(cue) and last is not None and rendered is not None and last > rendered  # #5837
+            if speech.get("talking") or stale:  # #5837 Todd talking (or spoke since the render): the boundary rules own it again
+                cue.pop("recheck_until", None)  # #5837
+                cue["held_reason"] = "talking" if speech.get("talking") else "stale"  # #5837
+            elif agent_audio_busy(speech, now) and now < cue["recheck_until"]:  # #5837
+                _schedule(OUTRO_RECHECK_S, lambda: _outro_recheck(cue, bus, pool))  # #5837
+                return  # #5837
+            else:  # #5837 the line ended, or the cap passed
+                capped = now >= cue["recheck_until"]  # #5837
+                cue.pop("recheck_until", None)  # #5837
+                _fire(cue, bus, now)  # #5837
+                if capped:  # #5837
+                    logger.warning("outro fired at the %gs re-check cap with a persona line still on air", OUTRO_RECHECK_CAP_S)  # #5837
+            pool._persist()  # #5837
+    except Exception:  # #5837
+        logger.exception("outro re-check failed")  # #5837
 
 
 def disarm_outro(pool=None) -> bool:

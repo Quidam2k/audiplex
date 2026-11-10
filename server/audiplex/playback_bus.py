@@ -152,6 +152,18 @@ QUEUE_CHUNK = 40  # #3644: same as the MCP's #3249 chunk
 # #3552: commands that leave the player paused, for pause_observed attribution.
 PAUSE_CMDS = {"pause", "deactivate", "stop_after_current", "replace_upcoming", "sleep_timer"}
 
+# #5836: commands that say what the player should be doing NOW. A newer one retires an owed
+# supersede_on_newer command (the outro pause). Queue edits (the pool's top-ups, queue,
+# play_next, announce), beds and volume do not: they arrive at every boundary on their own.
+SUPERSEDING_CMDS = {"play_now", "resume", "pause", "skip", "previous", "seek", "play_book",
+                    "play_stream", "stop_after_current", "deactivate", "activate", "sleep_timer"}
+# #5836: a paused report must stand this long before a playing one counts as a resume.
+RESUME_MIN_PAUSED_S = 1.0
+
+
+def _redeliver_after(rec: "PlaybackCommandRecord") -> float:  # #5836
+    return rec.redeliver_after_s if rec.redeliver_after_s is not None else REDELIVER_AFTER_SECONDS  # #5836
+
 
 @dataclass
 class PlaybackCommandRecord:
@@ -173,6 +185,10 @@ class PlaybackCommandRecord:
     source: str = "server"
     # #7335: what queue_guard dropped or moved on this command, shown to the caller.
     guard_notes: list[str] = field(default_factory=list)  # #7335
+    # #5836: per-command delivery policy. None = the bus default (60 s, no expiry).
+    redeliver_after_s: Optional[float] = None  # #5836 re-offer an un-acked delivery after this long
+    expires_at: Optional[float] = None  # #5836 past this it is retired as expired, never delivered
+    supersede_on_newer: bool = False  # #5836 a newer command, or the device resuming play, retires it
 
     def summary(self) -> dict[str, Any]:
         """What the DJ tools render — the whole point of the registry."""
@@ -220,6 +236,7 @@ class PlaybackBus:
         # Now-playing per device (device_id -> (state, reported_at)). Kept apart
         # so an idle PC's empty reports can't overwrite the phone's now-playing.
         self._states: dict[str, tuple[dict[str, Any], float]] = {}
+        self._paused_since: dict[str, float] = {}  # #5836 when each device's play->pause happened
         self._last_poll_at: float = 0.0
         self._last_delivered_at: float = 0.0
         self._last_delivered: Optional[PlaybackCommandRecord] = None
@@ -264,6 +281,9 @@ class PlaybackBus:
         payload: dict[str, Any],
         target_device_id: Optional[str] = None,
         source: str = "server",
+        redeliver_after_s: Optional[float] = None,  # #5836
+        expires_at: Optional[float] = None,  # #5836
+        supersede_on_newer: bool = False,  # #5836
     ) -> PlaybackCommandRecord:
         guard_notes: list[str] = []  # #7335
         if queue_guard.is_agent_source(source) and type in queue_guard.GUARDED_OPS:  # #7335
@@ -282,7 +302,12 @@ class PlaybackBus:
             target_device_id=target_device_id,
             source=source,
             guard_notes=guard_notes,  # #7335
+            redeliver_after_s=redeliver_after_s,  # #5836
+            expires_at=expires_at,  # #5836
+            supersede_on_newer=supersede_on_newer,  # #5836
         )
+        if type in SUPERSEDING_CMDS:  # #5836 a newer playback command retires a still-owed outro pause
+            self._retire_superseded(f"superseded by #{rec.id} {type}")  # #5836
         refusal = self._todd_stop_refusal(type, payload, source)  # #4011
         if refusal:  # #4011
             self._refuse(rec, refusal)  # #4011
@@ -366,6 +391,23 @@ class PlaybackBus:
                 n += 1  # #4011
         return n  # #4011
 
+    def _retire(self, rec: PlaybackCommandRecord, ack_status: str, detail: str) -> None:  # #5836
+        """End an owed command without the device: it is never delivered again."""  # #5836
+        rec.status = STATUS_FAILED  # #5836
+        rec.ack_status = ack_status  # #5836
+        rec.ack_detail = detail  # #5836
+        rec.acked_at = time.time()  # #5836
+        _append_diag(f"cmd_{ack_status}", {  # #5836 cmd_expired / cmd_superseded: how often the long-poll drops one
+            "id": rec.id, "type": rec.type, "source": rec.source,  # #5836
+            "delivery_count": rec.delivery_count, "detail": detail,  # #5836
+        })  # #5836
+        logging.getLogger(__name__).warning("command #%s %s %s: %s", rec.id, rec.type, ack_status, detail)  # #5836
+
+    def _retire_superseded(self, detail: str) -> None:  # #5836
+        for rec in self._commands.values():  # #5836
+            if rec.supersede_on_newer and rec.status in (STATUS_QUEUED, STATUS_DELIVERED):  # #5836
+                self._retire(rec, "superseded", detail)  # #5836
+
     def _claim(self, now: float, poller_id: str) -> Optional[PlaybackCommandRecord]:
         """The oldest command owed to `poller_id`, or None.
 
@@ -380,9 +422,14 @@ class PlaybackBus:
         for rec in self._commands.values():
             if (rec.target_device_id or route) != poller_id:
                 continue
+            if (rec.expires_at is not None and now >= rec.expires_at  # #5836 too late to mean anything: retire, never deliver
+                    and rec.status in (STATUS_QUEUED, STATUS_DELIVERED)):  # #5836
+                self._retire(rec, "expired", f"expired {now - rec.expires_at:.1f}s past its deadline, "  # #5836
+                             f"{rec.delivery_count} delivery(ies) unacked")  # #5836
+                continue  # #5836
             if rec.status == STATUS_QUEUED or (
                 rec.status == STATUS_DELIVERED
-                and now - rec.delivered_at >= REDELIVER_AFTER_SECONDS
+                and now - rec.delivered_at >= _redeliver_after(rec)  # #5836
             ):
                 refusal = self._todd_stop_refusal(rec.type, rec.payload, rec.source)  # #4011
                 if refusal:  # #4011
@@ -403,7 +450,7 @@ class PlaybackBus:
     def _next_redelivery_in(self, now: float) -> Optional[float]:
         """Seconds until the earliest un-acked delivery becomes re-offerable."""
         waits = [
-            REDELIVER_AFTER_SECONDS - (now - rec.delivered_at)
+            _redeliver_after(rec) - (now - rec.delivered_at)  # #5836 per-command policy
             for rec in self._commands.values()
             if rec.status == STATUS_DELIVERED
         ]
@@ -702,6 +749,14 @@ class PlaybackBus:
             })
             if prev is not None and prev[0].get("playing") and not state.get("playing"):
                 _append_diag("pause_observed", self._pause_cause(device_key))  # #3552
+            if not state.get("playing"):  # #5836 the pause start, not the last paused report
+                self._paused_since.setdefault(device_key, time.time())  # #5836
+            paused_since = self._paused_since.pop(device_key, None) if state.get("playing") else None  # #5836
+            if (paused_since is not None  # #5836 only set by an earlier paused report
+                    and time.time() - paused_since >= RESUME_MIN_PAUSED_S):  # #5836 not a sub-second gap between items
+                # Playback resumed (Todd pressed play, or anything else): an outro pause
+                # still owed must never re-pause him now.  # #5836
+                self._retire_superseded(f"device {device_key} resumed playback")  # #5836
         elif _volume_moved(prev[0].get("volume"), state.get("volume")):  # #3504 gain audit: ducks + per-track gain
             track = state.get("track") or {}  # #3504
             _append_diag("volume", {  # #3504
