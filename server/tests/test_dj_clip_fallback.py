@@ -142,3 +142,21 @@ def test_new_keyed_family_slots_in_from_the_manifest(tmp_path):
     assert dj_clip_bank.lookup(m, "feynman", "track_title", "42")[0] == "dj_back"
     assert dj_clip_bank.lookup(m, "feynman", "track_title", "99")[0] == "track_title_generic"
     assert dj_clip_bank.lookup(m, "claude", "dj_next") is None  # voice not rendered yet
+
+
+def test_5648_chris_bank_only_when_the_callout_asked_for_chris(monkeypatch, tmp_path):  # #5648
+    # Chris is home-only (#4923): a feynman (public-room) render failure never gets a Chris clip.
+    for sub in ("c", "f"):
+        (tmp_path / sub).mkdir()
+    chris = json.loads(_manifest(tmp_path / "c", voice="chris").read_text())
+    feyn = json.loads(_manifest(tmp_path / "f", voice="feynman").read_text())
+    both = {**feyn, "voices": {**chris["voices"], **feyn["voices"]}}
+    path = tmp_path / "both.json"
+    path.write_text(json.dumps(both))
+    monkeypatch.setenv("DJ_CLIP_MANIFEST", str(path))
+    monkeypatch.setenv("DJ_TTS_VOICE", "feynman")
+    assert "-feynman.wav" in dj_clip_bank.fallback_clip("dj_next")[1]
+    monkeypatch.setenv("DJ_TTS_VOICE", "chris")
+    assert "-chris.wav" in dj_clip_bank.fallback_clip("dj_next")[1]
+    path.write_text(json.dumps(feyn))
+    assert dj_clip_bank.fallback_clip("dj_next") is None  # no Chris bank -> silence, never Feynman
