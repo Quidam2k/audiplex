@@ -31,9 +31,6 @@ class AudioFocusManager(
     private var focusRequest: AudioFocusRequest? = null
     private var hasFocus = false
 
-    /** Volume before we ducked; null when not ducked. */
-    private var preDuckVolume: Float? = null
-
     /** True if the policy paused the player (so a GAIN should resume it). */
     @Volatile private var pausedByFocus = false
     @Volatile private var wasPlaying = false
@@ -41,45 +38,31 @@ class AudioFocusManager(
     /** #5614: a focus loss is holding playback that the next GAIN will start. */
     val awaitingFocusResume: Boolean get() = pausedByFocus && wasPlaying
 
-    // #3597 duck/restore ramps (see DuckRamp). Focus callbacks and player calls are on
-    // the main looper, so the ramp steps post there too.
+    // #3597 duck/restore ramps, now in FocusFader (#5834). Focus callbacks and player
+    // calls are on the main looper, so the ramp steps post there too.
     private val rampHandler = Handler(Looper.getMainLooper())
-    private var rampToken = 0
-    /** The dial level a restore ramp is heading to; a duck that interrupts it must
-     *  remember THIS, not the half-risen volume. Null when no restore is running. */
-    private var restoringTo: Float? = null
-
-    private fun rampTo(
-        target: Float, durationMs: Long,
-        curve: (Int, Int, Float, Float) -> Float = DuckRamp::level,  // Pantheon #2187
-        onDone: () -> Unit = {},
-    ) {
-        val token = ++rampToken  // cancels any ramp already running
-        rampHandler.removeCallbacksAndMessages(null)
-        val from = player.volume
-        val steps = DuckRamp.steps(durationMs)
-        fun step(i: Int) {
-            if (token != rampToken) return
-            player.volume = curve(i, steps, from, target)  // Pantheon #2187
-            if (i >= steps) onDone() else rampHandler.postDelayed({ step(i + 1) }, DuckRamp.STEP_MS)
-        }
-        step(1)
-    }
-
-    /** Stop any ramp. A restore cut short lands on its target at once, so a pause or
-     *  abandon mid-rise never leaves the dial stuck partway. */
-    private fun cancelRamp() {
-        rampToken++
-        rampHandler.removeCallbacksAndMessages(null)
-        restoringTo?.let { player.volume = it }
-        restoringTo = null
-    }
+    private val fader = FocusFader(
+        port = object : FocusFader.Port {
+            override var volume: Float
+                get() = player.volume
+                set(value) { player.volume = value }
+            override val isPlaying: Boolean get() = player.isPlaying
+            override fun pause() = player.pause()
+            override fun play() = player.play()
+        },
+        scheduler = object : FocusFader.Scheduler {
+            override fun postDelayed(delayMs: Long, block: () -> Unit) {
+                rampHandler.postDelayed(block, delayMs)
+            }
+            override fun cancelAll() = rampHandler.removeCallbacksAndMessages(null)
+        },
+    )
 
     private val focusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         val state = FocusPolicy.FocusState(
             wasPlaying = wasPlaying,
             currentVolume = player.volume,
-            preDuckVolume = preDuckVolume,
+            preDuckVolume = fader.preDuckVolume,
             isSpeech = player.audioAttributes.contentType == C.AUDIO_CONTENT_TYPE_SPEECH,
         )
         applyAction(FocusPolicy.decide(focusChange, state))
@@ -139,8 +122,7 @@ class AudioFocusManager(
             }
         }
         hasFocus = false
-        cancelRamp()  // #3597
-        preDuckVolume = null
+        fader.reset()  // #3597
         pausedByFocus = false
         wasPlaying = false
     }
@@ -150,28 +132,13 @@ class AudioFocusManager(
      * level. Mid-restore: re-aim the rising ramp at it. Returns false when
      * neither, so the caller sets the volume as usual.
      */
-    fun retargetRestore(volume: Float): Boolean =
-        when (FocusPolicy.retargetFor(preDuckVolume, restoringTo)) {
-            FocusPolicy.Retarget.PRE_DUCK -> { preDuckVolume = volume; true }
-            FocusPolicy.Retarget.RESTORE_RAMP -> {
-                restoringTo = volume
-                rampTo(volume, DuckRamp.RESTORE_MS, DuckRamp::restoreLevel) { restoringTo = null }
-                true
-            }
-            FocusPolicy.Retarget.NONE -> false
-        }
+    fun retargetRestore(volume: Float): Boolean = fader.retarget(volume)
 
     private fun applyAction(action: FocusPolicy.FocusAction) {
         when (action) {
-            is FocusPolicy.FocusAction.Duck -> {
-                // Only capture the dial level on the first duck; repeated CAN_DUCK
-                // events while already ducked must not overwrite it with 0.05.
-                if (preDuckVolume == null) preDuckVolume = restoringTo ?: player.volume  // #3597
-                restoringTo = null
-                rampTo(action.volume, DuckRamp.DUCK_MS)  // #3597 was an instant snap
-            }
+            is FocusPolicy.FocusAction.Duck -> fader.duck(action.volume)
             FocusPolicy.FocusAction.Pause -> {
-                cancelRamp()  // #3597
+                fader.cancelRamp()  // #3597
                 wasPlaying = FocusPolicy.resumeAfterPause(  // #5614
                     pausedByFocus, wasPlaying, player.isPlaying, player.playWhenReady)
                 pausedByFocus = true
@@ -184,10 +151,7 @@ class AudioFocusManager(
                 abandonFocus()
             }
             is FocusPolicy.FocusAction.Restore -> {
-                restoringTo = action.volume  // #3597
-                rampTo(action.volume, DuckRamp.RESTORE_MS, DuckRamp::restoreLevel) { restoringTo = null }  // #3597 Pantheon #2187
-                if (action.resume && !player.isPlaying) player.play()
-                preDuckVolume = null
+                fader.restore(action.volume, action.resume)  // #3597 Pantheon #2187
                 wasPlaying = false
                 pausedByFocus = false
             }
