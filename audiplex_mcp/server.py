@@ -4749,6 +4749,7 @@ async def dj_pool_set(
         picks = held
     if not picks:
         return head + " No eligible picks right now (everything recent or already queued)."
+    sent_at = time.time()  # #5476 now-playing from before this cannot count as the start
     trim = await _trim_to_pool(picks, state)
     kind = _held_kind(trim.strip())
     if kind == "announce_first":  # #5614: keep these picks for the retry; the intro needs "First up"
@@ -4760,12 +4761,49 @@ async def dj_pool_set(
         await _forget_picks(picks)
         return head + trim
     if body["prime_current_id"] == 0:  # #4056 the pool starts the music: its first song's notes come with it
-        trim += await _first_up_notes(picks[0])
+        trim += await _confirmed_first_up(picks, sent_at)  # #5476 the song the phone plays, not picks[0]
     elif start_now:  # #4114
+        skip_at = time.time()  # #5476
         trim += await _start_pool_now(trim, state)
         if "DONE: skip" in trim:  # the first pick is up: its notes come with it, as #4056
-            trim += await _first_up_notes(picks[0])
+            trim += await _confirmed_first_up(picks, skip_at)  # #5476
     return head + trim
+
+
+FIRST_UP_CONFIRM_S = 5.0  # #5476 the longest the reply waits for the phone's now-playing
+FIRST_UP_POLL_S = 0.5  # #5476
+FIRST_UP_UNCONFIRMED = (" First up: not confirmed yet - check dj_now_playing before"
+                        " naming the song.")  # #5476 never a guess
+
+
+async def _confirmed_first_up(picks: list[int], sent_at: float) -> str:  # #5476
+    """' First up: <song>...' for the track the PHONE reports playing, read from a
+    now-playing state the server received after the start was sent (the phone
+    posts one right after its ack; a state from before the command is paused or on
+    a song that is not a pick, so it cannot pass). On 11/10 the
+    server's five-star guard sent the pool's picks in another order, so naming
+    picks[0] named the second song (Todd's third report). Only a pick counts, so a
+    stale previous track is never named; no fresh state within FIRST_UP_CONFIRM_S
+    gives FIRST_UP_UNCONFIRMED. Runs after the start was sent, so it never delays music."""
+    deadline = time.monotonic() + FIRST_UP_CONFIRM_S
+    sent = set(picks)
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return FIRST_UP_UNCONFIRMED
+        try:  # a slow read never stretches the budget
+            st = await asyncio.wait_for(_get("/api/playback/state"), timeout=left)
+        except Exception:
+            st = {}
+        st = st if isinstance(st, dict) else {}
+        tid = (st.get("track") or {}).get("id")
+        if (st.get("playing") and tid in sent
+                and float(st.get("updated_at") or 0) >= sent_at):
+            return (await _first_up_notes(tid)
+                    or f" First up: track {tid} is confirmed playing; dj_now_playing has its title.")
+        if deadline - time.monotonic() < FIRST_UP_POLL_S:
+            return FIRST_UP_UNCONFIRMED
+        await asyncio.sleep(FIRST_UP_POLL_S)
 
 
 _HELD_PICKS: dict = {}  # #5614 {"key", "picks", "at"}: picks an announce refusal named

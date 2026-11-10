@@ -153,9 +153,7 @@ def apply_guard(inp: GuardInput) -> GuardResult:
     ] + [
         base + n + j for j, tid in enumerate(fixed_after) if five(tid)
     ]
-    fives = [tid for tid in candidates if five(tid)]
-    fillers = [tid for tid in candidates if not five(tid)]
-    five_count = len(fives)
+    five_count = sum(1 for tid in candidates if five(tid))
     placed_five_positions: list[int] = []
 
     def fits(pos: int) -> bool:
@@ -164,31 +162,39 @@ def apply_guard(inp: GuardInput) -> GuardResult:
             for p in fixed_five_positions + placed_five_positions
         )
 
+    # #5476: order-preserving. Tracks keep the order they were given; only a
+    # five-star too close to another waits, and takes the first later slot that
+    # fits. (The old front-greedy loop pulled any five-star into slot 0, so a
+    # pool's announced first pick played second.)
     result: list[int] = []
-    deferred: list[int] = []
-    while len(result) < n:
+    waiting: list[int] = []  # five-stars held back, oldest first
+    pending = list(candidates)
+    while pending:
         pos = base + len(result)
-        if fives and fits(pos):
-            result.append(fives.pop(0))
+        if waiting and fits(pos):
+            result.append(waiting.pop(0))
             placed_five_positions.append(pos)
-        elif fillers:
-            result.append(fillers.pop(0))
-        elif fives:
-            deferred = fives
-            fives = []
-            break
+            continue
+        tid = pending.pop(0)
+        if not five(tid):
+            result.append(tid)
+        elif fits(pos):
+            result.append(tid)
+            placed_five_positions.append(pos)
         else:
-            break
+            waiting.append(tid)
 
-    for tid in deferred:
+    deferred: list[int] = []
+    for tid in waiting:
         pos = base + len(result)
+        if not fits(pos):
+            deferred.append(tid)
+            notes.append(
+                f"moved {title(tid)} to the end of the batch: "
+                f"not enough other tracks to keep five-stars {SPACING} apart"
+            )
         result.append(tid)
         placed_five_positions.append(pos)
-        notes.append(
-            f"moved {title(tid)} to the end of the batch: "
-            f"not enough other tracks to keep five-stars {SPACING} apart"
-        )
-    result.extend(fillers)
     if result != candidates and five_count >= 2:
         notes.append(f"spaced {five_count} five-star tracks apart from each other")
 

@@ -5,6 +5,7 @@ plays those, not a re-rolled set (11/09: the intro named one song, another playe
 """
 import asyncio
 import sys
+import time  # #5476
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,6 +35,9 @@ def pool(monkeypatch):
 
     async def get(path):
         if path == "/api/playback/state":
+            if fake.trimmed and not fake.gate_closed:  # #5476: the phone now plays the first sent pick
+                return {"playing": True, "queue": [], "track": {"id": fake.trimmed[-1][0]},
+                        "updated_at": time.time() + 1}
             return {"playing": False, "queue": [], "track": {}}
         return {}
 

@@ -333,3 +333,34 @@ def test_pool_rejected_picks_are_not_consumed(monkeypatch, tmp_path):  # #7335
     assert played == len(result["picks"])
     assert 20 not in pool.state.get("played_this_session", [])
 
+
+
+def test_5476_play_now_keeps_first_pick_first_with_a_later_five_star():  # #5476
+    # 10/11 ride: [Sympathy, Tumbling Tumbleweeds(5*), ...] went out with the five-star first.
+    result = apply_guard(guard_input(op="play_now", incoming=[1722, 4932, 3821, 4573],
+                                     ratings={4932: 5}))
+    assert result.kept == [1722, 4932, 3821, 4573]
+    assert result.notes == []
+
+
+def test_5476_order_kept_when_spacing_already_holds():
+    incoming = list(range(1, 13))
+    result = apply_guard(guard_input(incoming=incoming, ratings={3: 5, 7: 5, 11: 5}))
+    assert result.kept == incoming
+
+
+def test_5476_long_batch_keeps_spacing_and_never_starves_a_five_star():
+    # 300 tracks with five-stars bunched in runs (a pool queue): all kept, spaced, none pushed far.
+    incoming = list(range(1, 301))
+    fives = set()
+    for n, start in enumerate(range(5, 290, 20)):  # runs of 1-3 five-stars, every 20 tracks
+        fives.update(incoming[start:start + 1 + n % 3])
+    ratings = {tid: 5 for tid in fives}
+    result = apply_guard(guard_input(op="play_now", incoming=incoming, ratings=ratings))
+    assert sorted(result.kept) == incoming
+    assert result.moved == []
+    assert_five_spacing(result.kept, ratings)
+    for tid in fives:  # a held five-star waits only until spacing allows
+        assert result.kept.index(tid) - incoming.index(tid) <= 3 * 4
+    fillers = [t for t in result.kept if t not in fives]
+    assert fillers == [t for t in incoming if t not in fives]  # fillers never reorder
