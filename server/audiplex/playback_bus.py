@@ -391,6 +391,21 @@ class PlaybackBus:
                 n += 1  # #4011
         return n  # #4011
 
+    def retire_todd_stop_pauses(self) -> int:  # #2345
+        """dj_stop_lift: the stop's own pause is void once Todd lifts the stop.
+
+        2026-11-11 19:41Z: dj_stop queued its pause behind 7 commands, Todd lifted the latch,
+        and the phone ran the pause 1.3 s AFTER the lift; the mix sat paused 57 s. Retire
+        every todd_stop pause still queued or delivered-unacked (an unacked one would be
+        redelivered after 60 s). Already-acked ones are history and untouched."""
+        n = 0  # #2345
+        for rec in self._commands.values():  # #2345
+            if (rec.source == "todd_stop" and rec.type == "pause"  # #2345
+                    and rec.status in (STATUS_QUEUED, STATUS_DELIVERED)):  # #2345
+                self._retire(rec, "superseded", "Todd lifted his stop before this pause was heard")  # #2345
+                n += 1  # #2345
+        return n  # #2345
+
     def _retire(self, rec: PlaybackCommandRecord, ack_status: str, detail: str) -> None:  # #5836
         """End an owed command without the device: it is never delivered again."""  # #5836
         rec.status = STATUS_FAILED  # #5836

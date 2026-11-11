@@ -350,7 +350,9 @@ def lift_stop_latch(todd_quote: str = Query(..., min_length=1), user: User = Dep
 
     if not todd_quote.strip():  # #4011
         raise HTTPException(status_code=422, detail="todd_quote is required")  # #4011
-    return todd_stop.lift(todd_quote, time.time())  # #4011
+    result = todd_stop.lift(todd_quote, time.time())  # #4011
+    retired = bus.retire_todd_stop_pauses()  # #2345 the stop's undelivered pause dies with the stop
+    return {**result, "retired_stop_pauses": retired} if isinstance(result, dict) else result  # #2345
 
 
 @router.get("/devices")
