@@ -6,6 +6,7 @@ being over, so it clears both keys. Best-effort: a stop never fails over this fi
 """
 import json
 import os
+from datetime import datetime  # #5697
 from pathlib import Path
 
 
@@ -30,4 +31,18 @@ def end_public_mode() -> bool:
         return True
     except (OSError, ValueError) as e:
         print(f"[public_mode] could not end public DJ mode: {e}", flush=True)
+        return False
+
+
+def is_public_live(now: datetime | None = None) -> bool:
+    """#5697: public mode is on only until its public_until (same rule as the DJ watcher's
+    public_live): missing or past time = private. Never raises; the phone asks this to
+    decide whether a skip crossfades."""
+    try:
+        raw = json.loads(patter_file().read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or not raw.get("public"):
+            return False
+        until = datetime.fromisoformat(str(raw.get("public_until")))
+        return until.astimezone() > (now or datetime.now().astimezone())
+    except (OSError, ValueError, TypeError):
         return False

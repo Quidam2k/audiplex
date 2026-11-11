@@ -356,6 +356,7 @@ class PlaybackManager @Inject constructor(
         val expected = mainSplit(PlayerKind.Music).volume
         updateCurrentTrackGain()
         applyBoostEnhancer()  // #4118: the raise rides on the limiter, duck or not
+        if (skipFadeJob?.isActive == true) return  // #5697 the skip fade-in reads the new gain each step
         // #7528: mid-duck, move the level the restore lands on instead.
         if (PlayerHooks.retargetRestore(mainSplit(PlayerKind.Music).volume)) return
         // #5282: a bedtime-cut ramp under way is not a duck or a fade; keep ramping, to the new track's level.
@@ -717,6 +718,7 @@ class PlaybackManager @Inject constructor(
     private var pendingTrackGain: String? = null
     /** #7109: below this share of the expected level the player is ducked (ducks go to ~5%). */
     private val DUCKED_FRACTION = 0.5f
+    private val PUBLIC_DJ_TTL_MS = 30_000L  // #5697
     private val EXTERNAL_OUTPUTS = setOf(  // #5282
         AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_USB_HEADSET,
         AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
@@ -2294,9 +2296,51 @@ class PlaybackManager @Inject constructor(
         _positionMs.value = positionMs
     }
 
+    // #5697: public DJ mode live? Cached; refreshed from the position loop (at most every PUBLIC_DJ_TTL_MS).
+    private var publicDj = false
+    private var publicDjAtMs = 0L
+    private var skipFadeJob: Job? = null
+
+    private fun refreshPublicDj() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - publicDjAtMs < PUBLIC_DJ_TTL_MS) return
+        publicDjAtMs = now
+        scope.launch {
+            runCatching { apiHolder.api?.getPublicMode() }.getOrNull()?.let { publicDj = it["public"] == true }
+        }
+    }
+
+    /**
+     * #5697: a skip in music. Public DJ mode (mid-song, not ducked) fades the song out and the
+     * next one in; everything else is the hard cut it always was. Main thread.
+     */
+    private fun skipToNextTrack() {
+        val ctrl = controller ?: return
+        refreshPublicDj()
+        skipFadeJob?.cancel()
+        val expected = mainSplit(PlayerKind.Music).volume
+        val ducked = _playerVolume.value < expected * DUCKED_FRACTION
+        if (sleepFading || !SkipFade.shouldFade(publicDj, ctrl.isPlaying, ctrl.currentPosition, ctrl.duration, ducked)) {
+            ctrl.seekToNextMediaItem()
+            if (publicDj) applyVolumeForCurrentKind()  // a fade cut short must not leave the dial low
+            return
+        }
+        skipFadeJob = scope.launch {  // a second skip cancels this and starts over from the full level
+            for (g in SkipFade.outGains()) {
+                delay(SkipFade.OUT_MS / SkipFade.STEPS_OUT)
+                setPlayerVolume(expected * g)
+            }
+            ctrl.seekToNextMediaItem()
+            for (g in SkipFade.inGains()) {
+                delay(SkipFade.IN_MS / SkipFade.STEPS_IN)
+                setPlayerVolume(mainSplit(PlayerKind.Music).volume * g)
+            }
+        }
+    }
+
     fun skipForward(stepMs: Long = 30_000) {  // #4220: the step is Todd's pick
         if (isMusic()) {
-            controller?.seekToNextMediaItem()
+            skipToNextTrack()
             return
         }
         val target = (_positionMs.value + stepMs).coerceAtMost(_durationMs.value)
@@ -2327,7 +2371,7 @@ class PlaybackManager @Inject constructor(
 
     fun nextChapter() {
         if (isMusic()) {
-            controller?.seekToNextMediaItem()
+            skipToNextTrack()
             return
         }
         seekToChapter(_currentChapterIndex.value + 1)
@@ -2406,6 +2450,7 @@ class PlaybackManager @Inject constructor(
                         _positionMs.value = currentGlobalPositionMs()
                         if (isMusic()) {
                             updateCurrentMusicIndex()
+                            refreshPublicDj()  // #5697
                         } else {
                             updateCurrentChapter()
                         }

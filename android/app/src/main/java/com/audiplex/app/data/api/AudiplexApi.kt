@@ -126,6 +126,9 @@ interface AudiplexApi {
     @GET("api/music/playlists/{id}")
     suspend fun getPlaylist(@Path("id") id: Int): PlaylistDetail
 
+    @GET("api/playback/public-mode")  // #5697 a skip fades only while public DJ mode is live
+    suspend fun getPublicMode(): Map<String, Boolean>
+
     @POST("api/playback/pool/removed")  // #5684 a swiped-out song stays out of this DJ set
     suspend fun poolRemoved(@Body body: Map<String, Int>): Response<ResponseBody>
 

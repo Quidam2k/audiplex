@@ -1161,6 +1161,14 @@ def forget_pool_picks(body: dict, user: User = Depends(get_current_user)):
     return {"forgotten": get_pool().forget_picks([int(t) for t in body.get("track_ids") or []])}
 
 
+@router.get("/public-mode", tags=["dj_pool"])
+def public_mode_state(user: User = Depends(get_current_user)):
+    """#5697: is public (party) DJ mode live? The phone fades a skip only while it is."""
+    from audiplex.public_mode import is_public_live
+
+    return {"public": is_public_live()}
+
+
 @router.delete("/pool", tags=["dj_pool"])
 def stop_pool(user: User = Depends(get_current_user)):
     """Stop the DJ pool. stopped is true only if one was running."""
