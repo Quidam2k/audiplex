@@ -509,6 +509,11 @@ def on_state(state: dict, bus, pool=None, now: Optional[float] = None) -> dict:
         return result
     ps["trigger_last_track"] = cur
     result["boundary"] = True
+    try:  # #5648 a song gone before its prepared break fired: cancel its tries / send its pause
+        from audiplex import dj_prepare
+        dj_prepare.on_boundary(cur, bus, pool, now=now)
+    except Exception:
+        logger.exception("dj_prepare boundary hook failed")
 
     _check_pause_watch(state, bus, pool, now)
     if cur < 0:  # a stream (-1) or a DJ voice break: never fire over one
@@ -741,6 +746,14 @@ def pinned_clip_ids(pool=None, now: Optional[float] = None) -> set[int]:
             for a in c.get("actions") or []:
                 if isinstance(a, dict) and a.get("type") == "insert_clip" and a.get("clip_id"):
                     pinned.add(int(a["clip_id"]))
+        for e in pool.state.get("prepared") or []:  # #5648 a prepared break's clip, until it has played
+            fired_at = e.get("fired_at") if isinstance(e, dict) else None
+            if not isinstance(e, dict) or (e.get("done") and not (
+                    isinstance(fired_at, (int, float)) and now - fired_at <= CLIP_PIN_GRACE_S)):
+                continue
+            for k in ("clip_id", "fired_clip_id"):
+                if e.get(k):
+                    pinned.add(int(e[k]))
         return pinned
     except Exception:
         logger.exception("pinned_clip_ids failed")
@@ -958,6 +971,11 @@ async def run_ticker(bus, interval: float = 5.0) -> None:
             clock_tick(bus)
         except Exception:
             logger.exception("dj trigger clock tick failed")
+        try:  # #5648 ahead-of-time DJ breaks: start due render tries, fire near the end
+            from audiplex import dj_prepare
+            dj_prepare.tick(bus)
+        except Exception:
+            logger.exception("dj_prepare tick failed")
         await asyncio.sleep(interval)
 
 

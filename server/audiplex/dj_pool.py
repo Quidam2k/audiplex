@@ -249,9 +249,17 @@ class DJPool:
         was_active = self.is_active()
         # Chime settings are Todd's preference, not session state (#5499).
         chime_settings = self.state.get("chime_settings")
+        prepare_settings = self.state.get("prepare_settings")  # #5648 Todd's fallback pick, too
+        try:  # #5648 no prepare render try outlives the reset
+            from audiplex import dj_prepare
+            dj_prepare.cancel_all(self)
+        except Exception:
+            pass
         self.state = self._empty_state()
         if chime_settings:
             self.state["chime_settings"] = chime_settings
+        if prepare_settings:  # #5648
+            self.state["prepare_settings"] = prepare_settings
         self._persist()
         return was_active
 

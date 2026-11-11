@@ -2021,6 +2021,9 @@ async def dj_announce(
     title: str = "DJ break",
     fallback_kind: str = dj_clip_bank.DEFAULT_KIND,
     artist: str | None = None,
+    for_track: int | None = None,  # #5648 at_end only
+    expect_next: int | None = None,  # #5648
+    agent: str | None = None,  # #5648
 ) -> str:
     """Speak a DJ voice break on the device: synthesizes YOUR copy to audio,
     uploads it, and drops it into the queue.
@@ -2029,8 +2032,11 @@ async def dj_announce(
            first — every character is synthesized, so no markdown, emoji, or
            bracketed stage directions.
     mode:  'next' (default — plays after the current song finishes, which is
-           how a real DJ break lands) or 'now' (interrupt and speak
-           immediately).
+           how a real DJ break lands), 'now' (interrupt and speak
+           immediately), or 'at_end' (#5648: the server renders it AHEAD,
+           retries a failed render while the song plays, and slots it in
+           ~15 s before the end; call it early in the song). at_end returns
+           at once; the render happens on the server.
     title: label shown in the queue (default "DJ break").
     fallback_kind: if live TTS fails, the pre-rendered bank clip to play
            instead (#3917): dj_next (default), dj_back, dj_station, dj_more,
@@ -2038,15 +2044,21 @@ async def dj_announce(
            that_was with artist=. Your copy is never approximated: the bank
            clip is a stock line, and if there is none, nothing is queued.
     artist: the artist for fallback_kind='that_was' (unknown -> generic line).
+    for_track / expect_next / agent: at_end only (#5648). for_track is the song the
+           break follows (default: the one playing; refused if it is not);
+           expect_next is the song it leads into (default: the queued next
+           one) and a change by the end drops the break.
     """
-    if mode not in ("next", "now"):
-        return f"Unknown mode '{mode}'. Use 'next' or 'now'."
+    if mode not in ("next", "now", "at_end"):  # #5648
+        return f"Unknown mode '{mode}'. Use 'next', 'now' or 'at_end'."
     text = (text or "").strip()
     if not text:
         return "No text given; nothing to announce."
     muted = _mute_hold("announce")  # #3493: before the talk wait and the TTS render
     if muted:
         return muted
+    if mode == "at_end":  # #5648: the server gates each try on speech, so no talk wait here
+        return await _prepare_at_end(text, title, fallback_kind, artist, for_track, expect_next, agent)
 
     # #2858: never start a break while Todd is talking. Checked at queue
     # time only; a 'next' break still plays whenever the current song ends.
@@ -2084,6 +2096,30 @@ async def dj_announce(
         f"{data.get('pending')} pending)"
         + (f" (pre-rendered fallback: {clip['fallback']}, Athena voice unavailable)." if clip.get("fallback") else ".")
     )
+
+
+async def _prepare_at_end(text, title, fallback_kind, artist, for_track, expect_next, agent) -> str:
+    """#5648: hand the line to the server's ahead-of-time render (dj_prepare)."""
+    body = {"say": text, "title": title, "fallback_kind": fallback_kind, "artist": artist,
+            "for_track": for_track, "expect_next": expect_next, "agent": agent}
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(f"{AUDIPLEX_URL}/api/playback/pool/prepared", headers=_headers(),
+                                     json={k: v for k, v in body.items() if v is not None})
+    except httpx.HTTPError as e:
+        return f"Could not reach Audiplex to prepare the break: {e}"
+    if resp.status_code == 401:
+        return "Auth failed (401). Check AUDIPLEX_TOKEN."
+    data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+    if resp.status_code == 409:
+        return f"No break prepared: {data.get('reason') or resp.text[:200]}"
+    if resp.status_code >= 400:
+        return f"Prepare failed ({resp.status_code}): {resp.text[:300]}"
+    ends = data.get("song_ends_in_s")
+    when = f"about {ends:.0f}s from now" if isinstance(ends, (int, float)) else "at the song's end"
+    return (f"Prepared break {data.get('id')} for track {data.get('for_track')}: rendering now, "
+            f"retrying if it fails, slotting in {when}"
+            + (f" (replaced {', '.join(data['replaced'])})" if data.get("replaced") else "") + ".")
 
 
 @mcp.tool()

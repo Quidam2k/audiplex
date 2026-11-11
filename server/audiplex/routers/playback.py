@@ -1219,6 +1219,60 @@ def disarm_pool_outro(user: User = Depends(get_current_user)):
     return {"disarmed": dj_triggers.disarm_outro()}
 
 
+@router.post("/pool/prepared", tags=["dj_pool"])
+def prepare_break(body: dict, user: User = Depends(get_current_user)):
+    """File a DJ break for the end of the CURRENT song, rendered ahead (#5648).
+    body: {say, title?, agent?, for_track?, expect_next?, fallback_kind?, artist?}.
+    Returns at once; the render and its retries run on the ticker. 409 when the
+    song is not playing (or for_track is not the current song)."""
+    from audiplex import dj_prepare
+
+    say = body.get("say")
+    if not isinstance(say, str) or not say.strip():
+        raise HTTPException(status_code=400, detail="say required")
+
+    def _opt_int(k):
+        v = body.get(k)
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"{k} must be an integer")
+
+    result = dj_prepare.prepare(
+        bus, say, title=body.get("title") or "DJ break", for_track=_opt_int("for_track"),
+        expect_next=_opt_int("expect_next"), agent=body.get("agent"),
+        fallback_kind=body.get("fallback_kind"), artist=body.get("artist"),
+    )
+    if not result.get("prepared"):
+        return JSONResponse(result, status_code=409)
+    return result
+
+
+@router.get("/pool/prepared", tags=["dj_pool"])
+def prepared_breaks(track_id: int | None = None, user: User = Depends(get_current_user)):
+    """Prepared DJ breaks and the fallback setting (#5648). With track_id: that
+    song's break or {"entry": null} (the watcher's T-20 backstop asks this)."""
+    from audiplex import dj_prepare
+
+    if track_id is not None:
+        e = dj_prepare.open_for(track_id)
+        return {"entry": None if e is None else {k: e.get(k) for k in ("id", "status", "for_track")}}
+    return dj_prepare.status()
+
+
+@router.put("/pool/prepared/settings", tags=["dj_pool"])
+def set_prepared_settings(body: dict, user: User = Depends(get_current_user)):
+    """{fallback: pause|bank|silent}: what a break does when every render try fails (#5648)."""
+    from audiplex import dj_prepare
+
+    try:
+        return dj_prepare.set_settings(fallback=body.get("fallback"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/ride-fallback", tags=["dj_pool"])
 async def ride_fallback_start(
     body: dict,

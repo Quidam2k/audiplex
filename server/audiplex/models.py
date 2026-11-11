@@ -391,6 +391,20 @@ class DjTrackTag(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
+class DjClipUse(Base):
+    """One play of a SAVED DJ clip (#5648): a bank clip used because every live
+    render try failed. The reuse cap reads this: none within 7 days, at most 2
+    in 30 days, so the fallback never becomes the same clips over and over."""
+
+    __tablename__ = "dj_clip_uses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    clip_key: Mapped[str] = mapped_column(String(120), index=True)
+    voice: Mapped[str] = mapped_column(String(50), default="")
+    reason: Mapped[str | None] = mapped_column(Text)
+    used_at: Mapped[datetime] = mapped_column(default=_utcnow, index=True)
+
+
 class TrackAudioProfile(Base):
     """Per-track loudness profile from scripts/measure_profile.py (#7335 / #3981).
 
