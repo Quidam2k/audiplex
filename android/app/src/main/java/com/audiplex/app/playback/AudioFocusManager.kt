@@ -94,7 +94,15 @@ class AudioFocusManager(
         },
     )
 
+    private val staleLoss = StaleLossGuard()  // #2345
+    /** #2345 its own handler: holdHandler/rampHandler queues get cleared wholesale, the settle marker must not be. */
+    private val focusHandler = Handler(Looper.getMainLooper())  // #2345
+
     private val focusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        if (focusChange < 0 && staleLoss.isStale()) {  // #2345 sent before our grant: we hold focus now
+            log("#2345 stale focus loss $focusChange ignored: queued before our latest grant")
+            return@OnAudioFocusChangeListener
+        }
         val state = FocusPolicy.FocusState(
             wasPlaying = wasPlaying,
             currentVolume = player.volume,
@@ -121,7 +129,7 @@ class AudioFocusManager(
                         .build()
                 )
                 .setWillPauseWhenDucked(false)  // policy decides duck-vs-pause per content type
-                .setOnAudioFocusChangeListener(focusListener)
+                .setOnAudioFocusChangeListener(focusListener, focusHandler)  // #2345 main looper, same queue as the settle marker
                 .build()
                 .also { focusRequest = it }
             audioManager.requestAudioFocus(request)
@@ -132,6 +140,10 @@ class AudioFocusManager(
             )
         }
         hasFocus = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        if (hasFocus) {  // #2345 losses already queued on this looper predate the grant
+            val token = staleLoss.onGranted()
+            focusHandler.post { staleLoss.onSettled(token) }
+        }
         return hasFocus
     }
 
