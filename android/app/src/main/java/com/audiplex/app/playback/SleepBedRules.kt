@@ -123,6 +123,29 @@ object SleepBedRules {
         else -> hold.copy(atMs = nowMs, finished = true)
     }
 
+    /**
+     * #5428: the bed that was wanted when the process died. Android SIGKILLs the foreground service
+     * every few days overnight (importance 125), and the bed's player dies with it, so the wish
+     * outlives the process in SettingsStore. The level is not kept: the slider already is.
+     */
+    data class BedWish(val url: String, val startedAtMs: Long)
+
+    /** #5428: a wish older than this is last night's, not tonight's. */
+    const val BED_WISH_MAX_MS = 12 * 60 * 60_000L
+
+    /**
+     * #5428: why the bed must NOT come back after a kill, or null to bring it back. The bed never
+     * returns over something he chose, so any playback he has started since wins.
+     */
+    fun resumeSkipReason(wish: BedWish?, nowMs: Long, userPlayingOther: Boolean, bedAlreadyUp: Boolean): String? = when {
+        wish == null -> "no_wish"
+        nowMs - wish.startedAtMs >= BED_WISH_MAX_MS -> "wish_expired"
+        nowMs < wish.startedAtMs -> "clock_went_back"
+        userPlayingOther -> "user_playing_other"
+        bedAlreadyUp -> "bed_already_up"
+        else -> null
+    }
+
     const val BOOK_RAMP_MS = 2_000L
     const val BOOK_RAMP_STEPS = 16
 

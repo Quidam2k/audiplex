@@ -38,6 +38,7 @@ class PlaybackService : MediaSessionService() {
 
     @Inject lateinit var okHttpClient: OkHttpClient
     @Inject lateinit var clientLog: ClientLogReporter  // #5834 focus fade timings
+    @Inject lateinit var playbackManager: PlaybackManager  // #5428 brings the sleep bed back after a kill
 
     private var mediaSession: MediaSession? = null
     private var audioFocusManager: AudioFocusManager? = null
@@ -223,6 +224,15 @@ class PlaybackService : MediaSessionService() {
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? =
         mediaSession
+
+    /**
+     * #5428: a null intent is the system restarting a sticky service after it killed the process
+     * (Android SIGKILLs us at foreground importance every few days). Bring the sleep bed back.
+     */
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent == null) playbackManager.resumeBedAfterKill()
+        return super.onStartCommand(intent, flags, startId)
+    }
 
     /**
      * #4018: the sleep bed is a private player outside the session, so when the

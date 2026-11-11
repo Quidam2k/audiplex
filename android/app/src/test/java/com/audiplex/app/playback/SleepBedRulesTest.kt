@@ -95,4 +95,35 @@ class SleepBedRulesTest {
         assertEquals("/waves", SleepBedRules.pickFallback(listOf("Rain" to "/rain", "Waves" to "/waves")))
         assertNull(SleepBedRules.pickFallback(emptyList()))
     }
+
+    // #5428: the bed comes back after Android kills the process overnight
+    private val wish = SleepBedRules.BedWish("http://solace:8100/bed.mp3", startedAtMs = 1_000_000L)
+    private val hour = 60 * 60_000L
+
+    @Test
+    fun `a fresh wish with nothing else playing resumes`() {
+        assertNull(SleepBedRules.resumeSkipReason(wish, wish.startedAtMs + 4 * hour, userPlayingOther = false, bedAlreadyUp = false))
+    }
+
+    @Test
+    fun `a wish past twelve hours is last night's and does not resume`() {
+        assertNull(SleepBedRules.resumeSkipReason(wish, wish.startedAtMs + 12 * hour - 1, false, false))
+        assertEquals("wish_expired", SleepBedRules.resumeSkipReason(wish, wish.startedAtMs + 12 * hour, false, false))
+    }
+
+    @Test
+    fun `the bed never comes back over something he chose`() {
+        assertEquals("user_playing_other", SleepBedRules.resumeSkipReason(wish, wish.startedAtMs + hour, true, false))
+    }
+
+    @Test
+    fun `a bed already up or a cleared wish needs nothing`() {
+        assertEquals("bed_already_up", SleepBedRules.resumeSkipReason(wish, wish.startedAtMs + hour, false, true))
+        assertEquals("no_wish", SleepBedRules.resumeSkipReason(null, wish.startedAtMs, false, false))
+    }
+
+    @Test
+    fun `a clock that went backwards does not resume`() {
+        assertEquals("clock_went_back", SleepBedRules.resumeSkipReason(wish, wish.startedAtMs - 1, false, false))
+    }
 }

@@ -68,6 +68,8 @@ class SettingsStore @Inject constructor(
     private val sleepHoldRouteKey = stringPreferencesKey("sleep_hold_route")  // #5282
     private val sleepHoldAtKey = longPreferencesKey("sleep_hold_at")  // #5282
     private val sleepHoldFinishedKey = booleanPreferencesKey("sleep_hold_finished")  // #5282
+    private val bedWishUrlKey = stringPreferencesKey("bed_wish_url")  // #5428
+    private val bedWishAtKey = longPreferencesKey("bed_wish_at")  // #5428
     private val djVoiceLevelKey = floatPreferencesKey("dj_voice_level")  // #5282 slice 2
     private val chimeLevelKey = floatPreferencesKey("chime_level")  // #5282 slice 2
     private val evenOutLoudnessKey = booleanPreferencesKey("even_out_loudness")  // #5626
@@ -299,6 +301,25 @@ class SettingsStore @Inject constructor(
                 prefs[sleepHoldRouteKey] = hold.route
                 prefs[sleepHoldAtKey] = hold.atMs
                 prefs[sleepHoldFinishedKey] = hold.finished
+            }
+        }
+    }
+
+    /** #5428: the bed he wanted, kept so a process kill overnight does not end it for good. */
+    suspend fun bedWish(): com.audiplex.app.playback.SleepBedRules.BedWish? {
+        val prefs = context.dataStore.data.first()
+        val url = prefs[bedWishUrlKey] ?: return null
+        return com.audiplex.app.playback.SleepBedRules.BedWish(url, prefs[bedWishAtKey] ?: return null)
+    }
+
+    suspend fun setBedWish(wish: com.audiplex.app.playback.SleepBedRules.BedWish?) {
+        context.dataStore.edit { prefs ->
+            if (wish == null) {
+                prefs.remove(bedWishUrlKey)
+                prefs.remove(bedWishAtKey)
+            } else {
+                prefs[bedWishUrlKey] = wish.url
+                prefs[bedWishAtKey] = wish.startedAtMs
             }
         }
     }

@@ -1779,7 +1779,7 @@ class PlaybackManager @Inject constructor(
      * then falls back to the local brown-noise bed. While it plays,
      * PlaybackService keeps the process foreground (PlayerHooks.bedState).
      */
-    fun bedPlay(url: String, volume: Float) {
+    fun bedPlay(url: String, volume: Float, wishAtMs: Long = System.currentTimeMillis()) {  // #5428
         bedRetryJob?.cancel()
         bedWanted = true
         bedUrl = url
@@ -1787,6 +1787,36 @@ class PlaybackManager @Inject constructor(
         bedFailures = 0
         startBedPlayer(url, volume)
         cacheBed(url)
+        // #5428: Android kills the process overnight; keep the wish so the service restart can bring the bed back.
+        // A chime or the Hear-the-mix preview is not a bed he wants kept.
+        if (!MixLevels.isChimeUrl(url) && !_mixPreview.value) {
+            scope.launch { settingsStore.setBedWish(SleepBedRules.BedWish(url, wishAtMs)) }
+        }
+    }
+
+    /**
+     * #5428: the service came back from a system kill (null start intent). Bring the sleep bed back
+     * if he still wanted it and has started nothing else since; every verdict is logged so the next
+     * overnight kill says what happened.
+     */
+    fun resumeBedAfterKill() {
+        scope.launch {
+            val wish = settingsStore.bedWish()
+            val now = System.currentTimeMillis()
+            val why = SleepBedRules.resumeSkipReason(wish, now, userPlayingOther = isPlaying.value, bedAlreadyUp = bedWanted)
+            if (wish == null) return@launch
+            val detail = mapOf("url" to wish.url, "age_min" to ((now - wish.startedAtMs) / 60_000).toString())
+            if (why != null) {
+                if (why == "wish_expired" || why == "clock_went_back") settingsStore.setBedWish(null)
+            } else {
+                bedPlay(wish.url, settingsStore.sleepBedVolume.first(), wish.startedAtMs)
+            }
+            // sendWhenReady, not report(): after a headless restart the API client does not exist yet.
+            launch {
+                if (why != null) clientLog.sendWhenReady("info", "bed_resume_skipped", why, detail)
+                else clientLog.sendWhenReady("info", "bed_resume_after_kill", "sleep bed restarted after the process was killed", detail)
+            }
+        }
     }
 
     /** #5282 slice 2: bed_play from the server. A chime rides the bed player but has its own level. */
@@ -2017,6 +2047,7 @@ class PlaybackManager @Inject constructor(
         disposeBedPlayer()
         bedCurrentVolume = 0f
         bedTargetLevel = 0f  // #5131
+        scope.launch { settingsStore.setBedWish(null) }  // #5428: stopped on purpose, nothing to bring back
         refreshBedState()
         finishSleepHold()  // #5282
     }
