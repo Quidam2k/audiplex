@@ -46,19 +46,6 @@ def gap_seconds(
     return float(max(floor, 0.5 * total_duration / max(counts.values())))
 
 
-def _insert_at(result: list[ShuffleItem], item: ShuffleItem, start: float) -> float:
-    """Insert item so it starts at the first boundary >= start (or at the end).
-    Returns the end time of the item in the new list."""
-    clock = 0.0
-    for index, other in enumerate(result):
-        if clock >= start:
-            result.insert(index, item)
-            return clock + _duration_seconds(item)
-        clock += _duration_seconds(other)
-    result.append(item)
-    return clock + _duration_seconds(item)
-
-
 def spaced_shuffle(
     items: Iterable[ShuffleItem],
     rng: Random | None = None,
@@ -66,12 +53,14 @@ def spaced_shuffle(
 ) -> list[int]:
     """Shuffle tracks so versions of one work stay gap_seconds() apart.
 
-    Works with one track are shuffled as filler. Each work with several
-    versions is then placed, version by version, at a random start time at
-    least one gap after the previous version and early enough to leave room
-    for the rest. Inserting other tracks only widens existing gaps, so earlier
-    placements hold. A list too short for the gap degrades to the widest
-    spacing that fits. Every input occurrence is kept, duplicates included.
+    Works with one track are shuffled as filler and laid on a time axis. Each
+    work with several versions then gets random positions on that axis, each
+    one step (gap + that version + the longest filler, so rounding to a filler
+    boundary cannot eat the gap) after the previous and early enough to leave
+    room for the rest; everything is sorted by position. Other versions
+    landing in between only widen a gap. A list too short for the gap spreads
+    the versions evenly instead. O(n log n). Every input occurrence is kept,
+    duplicates included.
     """
     rng = rng or Random()
     all_items = list(items)
@@ -80,19 +69,29 @@ def spaced_shuffle(
     groups: dict[str, list[ShuffleItem]] = {}
     for item in all_items:
         groups.setdefault(item.work_id, []).append(item)
-    result = [g[0] for g in groups.values() if len(g) == 1]
-    rng.shuffle(result)
-    multi = [g for g in groups.values() if len(g) > 1]
-    rng.shuffle(multi)
-    multi.sort(key=len, reverse=True)
+    fillers = [g[0] for g in groups.values() if len(g) == 1]
+    rng.shuffle(fillers)
 
-    for versions in multi:
+    keyed: list[tuple[float, int, int]] = []  # (position, tie-break, track_id)
+    clock = 0.0
+    for item in fillers:
+        keyed.append((clock, 0, item.track_id))
+        clock += _duration_seconds(item)
+    total = clock
+    longest = max((_duration_seconds(i) for i in fillers), default=0.0)
+
+    for versions in groups.values():
+        count = len(versions)
+        if count < 2:
+            continue
         rng.shuffle(versions)
-        prev_end: float | None = None
+        step = min(gap + longest + max(_duration_seconds(v) for v in versions), total / (count - 1))
+        position = None
         for placed, item in enumerate(versions):
-            total = sum(_duration_seconds(i) for i in result)
-            low = 0.0 if prev_end is None else prev_end + gap
-            high = total - (len(versions) - placed - 1) * gap
-            start = rng.uniform(low, high) if high > low else low
-            prev_end = _insert_at(result, item, start)
-    return [item.track_id for item in result]
+            low = 0.0 if position is None else position + step
+            high = total - (count - placed - 1) * step
+            position = rng.uniform(low, high) if high > low else low
+            keyed.append((position, 1, item.track_id))
+
+    keyed.sort(key=lambda k: (k[0], k[1]))
+    return [track_id for _, _, track_id in keyed]

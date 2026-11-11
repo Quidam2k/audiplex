@@ -969,19 +969,21 @@ def shuffle_order(  # #5867
     """The same tracks in a random order where versions of one song (live, remaster, edit)
     stay an hour or more apart. Unknown ids keep their place as one-off songs, so the set is
     never changed, only its order."""
+    from audiplex.identity import work_key  # #5867
     from audiplex.shuffle_spacing import ShuffleItem, spaced_shuffle
 
     ids = list(dict.fromkeys(body.track_ids))
-    durations = dict(db.query(Track.id, Track.duration_seconds).filter(Track.id.in_(ids)).all())
-    identities = build_identity_map(db)
-    items = [
-        ShuffleItem(
-            tid,
-            identities[tid].work_id if tid in identities else f"unknown:{tid}",
-            float(durations.get(tid) or 0.0),
+    known: dict[int, ShuffleItem] = {}
+    for start in range(0, len(ids), 900):  # stay under SQLite's variable limit
+        rows = (
+            db.query(Track.id, Track.title, Track.duration_seconds, Artist.name)
+            .join(Artist, Artist.id == Track.artist_id)
+            .filter(Track.id.in_(ids[start:start + 900]))
+            .all()
         )
-        for tid in ids
-    ]
+        # work_key needs only the track's own title and artist, so skip the DB-wide identity map (1.6 s at 37k tracks).
+        known.update({tid: ShuffleItem(tid, work_key(title, artist), float(dur or 0.0)) for tid, title, dur, artist in rows})
+    items = [known.get(tid) or ShuffleItem(tid, f"unknown:{tid}", 0.0) for tid in ids]
     floor = get_settings().shuffle_work_gap_minutes * 60.0
     return ShuffleOrderResponse(track_ids=spaced_shuffle(items, floor=floor))
 
