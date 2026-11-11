@@ -578,7 +578,9 @@ class DjCommandClient @Inject constructor(
                         clipId = clipId,
                         title = title,
                         durationSeconds = cmd.payload.durationSeconds,
-                        playNow = cmd.payload.mode == "now"
+                        playNow = cmd.payload.mode == "now",
+                        pauseAfter = cmd.payload.then == "pause",  // #5836
+                        fadeMs = DjClipRules.fadeMs(cmd.payload.fadeMs),  // #5836
                     )
                 }
             }

@@ -354,6 +354,10 @@ data class DjCommandPayload(
     @Json(name = "duration_seconds") val durationSeconds: Double? = null,
     // 'next' (play after the current track) or 'now' (interrupt).
     val mode: String? = null,
+    // #5836: 'announce' then="pause" = stop when the clip ends (the outro); fade_ms is the
+    // fade used only if the next song has already started.
+    val then: String? = null,
+    @Json(name = "fade_ms") val fadeMs: Long? = null,
     // 'sleep_timer' (#1728): fade the main player out after `minutes`, ramping
     // over the last `fade_seconds` of that.
     val minutes: Float? = null,

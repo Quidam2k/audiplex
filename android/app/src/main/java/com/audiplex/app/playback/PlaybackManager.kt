@@ -1552,8 +1552,12 @@ class PlaybackManager @Inject constructor(
         clipId: Long,
         title: String,
         durationSeconds: Double?,
-        playNow: Boolean
+        playNow: Boolean,
+        pauseAfter: Boolean = false,  // #5836 then="pause": stop when this clip ends
+        fadeMs: Long = DjClipRules.DEFAULT_FADE_MS,  // #5836
     ) {
+        // #5836: armed before the clip reaches the timeline, so a "now" clip's transition sees it.
+        if (pauseAfter) PlayerHooks.pauseAfterClip = DjClipRules.PauseAfter(DjClipRules.clipMediaId(clipId), fadeMs)
         val clipItem = MusicQueueItem(
             track = TrackSchema(
                 // Session-unique negative id. Deliberately NOT -clipId: clipId
@@ -1573,7 +1577,7 @@ class PlaybackManager @Inject constructor(
         )
         val mediaItem = MediaItem.Builder()
             .setUri(clipUrl)
-            .setMediaId("djclip:$clipId")
+            .setMediaId(DjClipRules.clipMediaId(clipId))  // #5836 "djclip:<id>"
             .setMediaMetadata(
                 MediaMetadata.Builder()
                     .setTitle(title)

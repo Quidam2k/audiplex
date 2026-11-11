@@ -44,6 +44,36 @@ class AudioFocusManager(
     /** #5614: a focus loss is holding playback that the next GAIN will start. */
     val awaitingFocusResume: Boolean get() = pausedByFocus && wasPlaying
 
+    /** #5837 F: ducked under another app's audio (a persona line). */
+    val isDucked: Boolean get() = fader.preDuckVolume != null
+
+    /** #5837 F: a DJ clip waiting paused for that app's GAIN (rules in [ClipHold]). */
+    private val holdHandler = Handler(Looper.getMainLooper())
+    private val clipHold = ClipHold(
+        port = object : ClipHold.Port {
+            override val ducked: Boolean get() = isDucked
+            override val playWhenReady: Boolean get() = player.playWhenReady
+            override fun markOurPause() {
+                pausedByFocus = true
+                wasPlaying = true
+                PlayerHooks.notePause("dj_clip_hold")  // #3552
+            }
+            override fun clearOurPause() {
+                pausedByFocus = false
+                wasPlaying = false
+            }
+            override fun pause() = player.pause()
+            override fun play() = player.play()
+            override fun log(message: String) = this@AudioFocusManager.log(message)
+        },
+        scheduler = object : FocusFader.Scheduler {
+            override fun postDelayed(delayMs: Long, block: () -> Unit) {
+                holdHandler.postDelayed(block, delayMs)
+            }
+            override fun cancelAll() = holdHandler.removeCallbacksAndMessages(null)
+        },
+    )
+
     // #3597 duck/restore ramps, now in FocusFader (#5834). Focus callbacks and player
     // calls are on the main looper, so the ramp steps post there too.
     private val rampHandler = Handler(Looper.getMainLooper())
@@ -133,9 +163,29 @@ class AudioFocusManager(
             }
         }
         hasFocus = false
+        clipHold.reset()  // #5837
         fader.reset()  // #3597
         pausedByFocus = false
         wasPlaying = false
+    }
+
+    /** #5837 F: a media item is starting; hold it if it is a DJ clip under another app's duck. Main thread. */
+    fun holdClipWhileDucked(mediaId: String?): Boolean = clipHold.onItemStart(mediaId)
+
+    /** #5837 F: any play (the GAIN's resume, or Todd's tap) ends a hold. Main thread. */
+    fun onPlayRequested() = clipHold.onPlayRequested()
+
+    /**
+     * #5836: the outro's then="pause" stop did not happen at the clip's end and the next
+     * song started: fade out over [durationMs] and pause. A real stop, so focus is
+     * abandoned as for a user pause. Main thread.
+     */
+    fun fadeOutAndStop(durationMs: Long) {
+        val t0 = SystemClock.elapsedRealtime()
+        fader.fadeOutAndPause(durationMs) {
+            log("#5836 outro stop: faded out in ${SystemClock.elapsedRealtime() - t0} ms")
+            PlayerHooks.notePause("dj_then_pause")
+        }
     }
 
     /**

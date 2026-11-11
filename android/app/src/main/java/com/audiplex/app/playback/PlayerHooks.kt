@@ -35,6 +35,10 @@ object PlayerHooks {
         return true
     }
 
+    /** #5836: the outro clip that must stop the player when it ends (announce then="pause"). */
+    @Volatile
+    var pauseAfterClip: DjClipRules.PauseAfter? = null
+
     /** Drop a pending stop-after-this-song. Main thread. */
     fun cancelStopAfterCurrent() {
         exoPlayer?.pauseAtEndOfMediaItems = false

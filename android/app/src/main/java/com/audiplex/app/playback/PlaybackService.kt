@@ -48,6 +48,7 @@ class PlaybackService : MediaSessionService() {
     private var lastClipEdge = 1f
     private val clipEdgeHandler = Handler(Looper.getMainLooper())
     private var clipEdgeTick: Runnable? = null
+    private var lastMediaId: String? = null  // #5836 the item a transition leaves
 
     @OptIn(UnstableApi::class)
     override fun onCreate() {
@@ -112,10 +113,14 @@ class PlaybackService : MediaSessionService() {
                 if (isPlaying) tick.run()
             }
 
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) = updateClipEdge(player)  // #8197
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                updateClipEdge(player)  // #8197
+                onDjClipEdge(player, focusManager, mediaItem?.mediaId, reason)  // #5836 #5837
+            }
 
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                 if (playWhenReady) {
+                    focusManager.onPlayRequested()  // #5837 a play ends a DJ clip hold
                     // Every play re-requests (idempotent); denied focus means we
                     // must not start over a call or another exclusive holder.
                     if (!focusManager.requestFocus()) {
@@ -176,6 +181,28 @@ class PlaybackService : MediaSessionService() {
         PlayerHooks.onBedStateChanged = {
             mediaSession?.let { onUpdateNotification(it, mediaForegroundRequired(it.player)) }
         }
+    }
+
+    /**
+     * #5836 then="pause" and #5837 F hold, at each media-item transition (rules in
+     * [DjClipRules]). Main thread.
+     */
+    private fun onDjClipEdge(player: ExoPlayer, focus: AudioFocusManager, to: String?, reason: Int) {
+        val from = lastMediaId
+        lastMediaId = to
+        val armed = PlayerHooks.pauseAfterClip
+        val auto = reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO
+        when (val edge = DjClipRules.onTransition(from, to, auto, armed, player.pauseAtEndOfMediaItems)) {
+            DjClipRules.Edge.ArmPauseAtEnd -> player.pauseAtEndOfMediaItems = true
+            DjClipRules.Edge.CancelPauseAtEnd -> player.pauseAtEndOfMediaItems = false
+            is DjClipRules.Edge.FadeAndPause -> {
+                player.pauseAtEndOfMediaItems = false
+                focus.fadeOutAndStop(edge.fadeMs)
+            }
+            DjClipRules.Edge.None -> Unit
+        }
+        PlayerHooks.pauseAfterClip = DjClipRules.armedAfter(from, to, armed)
+        focus.holdClipWhileDucked(to)
     }
 
     /** #8197: fade the song next to a DJ clip. Sends only on change, onto the playback thread. */

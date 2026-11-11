@@ -75,7 +75,7 @@ class FocusFader(private val port: Port, private val scheduler: Scheduler) {
      * ([beforePause] runs just before the pause). A restore or duck that lands mid-fade
      * takes over the ramp, so no pause happens. Not playing: no fade, the old instant path.
      */
-    fun fadeOutAndPause(beforePause: () -> Unit) {
+    fun fadeOutAndPause(durationMs: Long = DuckRamp.PAUSE_FADE_MS, beforePause: () -> Unit) {  // #5836 the outro stop fades 3 s
         if (!port.isPlaying) {
             cancelRamp()
             beforePause()
@@ -89,7 +89,7 @@ class FocusFader(private val port: Port, private val scheduler: Scheduler) {
         afterPauseLevel = restoringTo ?: port.volume
         restoringTo = null  // a rise cut short is NOT landed first: no jump up before the fade
         pauseFadeLevel = level
-        rampTo(0f, DuckRamp.PAUSE_FADE_MS) {
+        rampTo(0f, durationMs) {  // #5836
             val after = if (preDuckVolume != null) afterPauseLevel else pauseFadeLevel
             pauseFadeLevel = null
             afterPauseLevel = null

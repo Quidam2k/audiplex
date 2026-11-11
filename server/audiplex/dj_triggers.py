@@ -403,15 +403,34 @@ def _schedule(delay_s: float, fn: Callable[[], Any]) -> None:
 # ----- actions -----
 
 
-def _announce_payload(clip_id: int, title: Optional[str], duration: Optional[float]) -> dict:
+# #5836 step 3: from this app build the phone pauses itself when an outro clip ends
+# (announce then="pause"), so no timed pause has to win a race over the long-poll.
+THEN_PAUSE_MIN_VERSION_CODE = 80  # #5836
+THEN_PAUSE_FADE_MS = 3000  # #5836 used only if the next song has already started
+
+
+def phone_pauses_after_clip(bus) -> bool:  # #5836
+    """True when the reporting phone build handles announce then="pause"."""  # #5836
+    try:  # #5836
+        code = (bus.get_state() or {}).get("app_version_code")  # #5836
+    except Exception:  # #5836
+        return False  # #5836
+    return isinstance(code, int) and code >= THEN_PAUSE_MIN_VERSION_CODE  # #5836
+
+
+def _announce_payload(clip_id: int, title: Optional[str], duration: Optional[float],
+                      then_pause: bool = False) -> dict:
     # mode is always "next": the clip lands between songs, never over one.
-    return {
+    payload = {
         "clip_id": int(clip_id),
         "clip_url": f"/api/dj/clips/{int(clip_id)}",
         "title": title or "DJ break",
         "duration_seconds": duration,
         "mode": "next",
     }
+    if then_pause:  # #5836
+        payload.update(then="pause", fade_ms=THEN_PAUSE_FADE_MS)  # #5836
+    return payload
 
 
 def execute_actions(cue: dict, bus, now: float) -> list[int]:
@@ -427,9 +446,12 @@ def execute_actions(cue: dict, bus, now: float) -> list[int]:
             ids.append(bus._enqueue("play_next", {"track_ids": [int(a["track_id"])]},
                                     source="dj_triggers:cue").id)
     # After play_next so the clip (also inserted right after the current item) plays first.
+    wants_pause = any(a.get("type") == "pause" for a in actions)  # #5836
+    phone_pauses = wants_pause and phone_pauses_after_clip(bus)  # #5836
     for a in actions:
         if a.get("type") == "insert_clip" and not latched:
-            payload = _announce_payload(a["clip_id"], cue.get("clip_title"), cue.get("clip_duration"))
+            payload = _announce_payload(a["clip_id"], cue.get("clip_title"), cue.get("clip_duration"),
+                                        then_pause=phone_pauses)  # #5836
             ids.append(bus._enqueue("announce", payload, source="dj_triggers:cue").id)
     for a in actions:
         if a.get("type") == "bed_chime":
@@ -444,8 +466,10 @@ def execute_actions(cue: dict, bus, now: float) -> list[int]:
             })
             ids.append(rec.id)
             _schedule(a.get("duration_s") or 3.0, lambda: bus._enqueue("bed_stop", {}))
-    if any(a.get("type") == "pause" for a in actions):
-        cue["pause_state"] = "armed"
+    if wants_pause:
+        # #5836: "phone" = the phone pauses at the clip's end itself; the server keeps
+        # only the late backstop (a real track started anyway), never the timed pause.
+        cue["pause_state"] = "phone" if phone_pauses else "armed"
     return ids
 
 
@@ -465,6 +489,8 @@ def on_state(state: dict, bus, pool=None, now: Optional[float] = None) -> dict:
         return result
     track = state.get("track") or {}
     cur = track.get("id") if isinstance(track, dict) else None
+    if isinstance(cur, int) and not state.get("playing"):  # #5836
+        _note_phone_paused(state, cur, _get_pool(pool))  # #5836
     if not isinstance(cur, int) or not state.get("playing"):
         return result
     pool = _get_pool(pool)
@@ -528,13 +554,35 @@ def on_state(state: dict, bus, pool=None, now: Optional[float] = None) -> dict:
     return result
 
 
+PHONE_STOP_END_SLACK_MS = 1500  # #5836 a paused report this close to the clip's end is the then="pause" stop
+
+
+def _note_phone_paused(state: dict, cur: int, pool) -> None:  # #5836
+    """The phone stopped itself (then="pause"): paused at its clip's end, or on a later song. A resume after it is Todd's.
+
+    A pause early in the clip (a #5837 hold, or Todd's tap) keeps the late backstop armed."""  # #5836
+    changed = False  # #5836
+    pos = state.get("position_ms") or 0  # #5836
+    for c in _all_cues(pool.state):  # #5836
+        if c.get("pause_state") != "phone":  # #5836
+            continue  # #5836
+        dur = state.get("duration_ms") or int(float(c.get("clip_duration") or 0) * 1000)  # #5836
+        at_clip_end = cur < 0 and dur > 0 and pos >= dur - PHONE_STOP_END_SLACK_MS  # #5836
+        past_song = cur > 0 and cur != (c.get("trigger") or {}).get("track_id")  # #5836
+        if at_clip_end or past_song:  # #5836
+            c["pause_state"] = "paused_by_phone"  # #5836
+            changed = True  # #5836
+    if changed:  # #5836
+        pool._persist()  # #5836
+
+
 def _check_pause_watch(state: dict, bus, pool, now: float) -> None:
     """Pause after a cue's clip (the outro): timed from the clip's reported position."""
     track = state.get("track") or {}
     cur = track.get("id")
     for c in _all_cues(pool.state):
         ps = c.get("pause_state")
-        if ps not in ("armed", "pausing"):
+        if ps not in ("armed", "pausing", "phone"):  # #5836
             continue
         if cur < 0 and track.get("title") == c.get("clip_title"):
             c["clip_seen"] = True
