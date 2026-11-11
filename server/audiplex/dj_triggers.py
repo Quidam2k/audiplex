@@ -45,6 +45,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+try:  # #5457 machine-local roots; the server runs from server/, like render_say
+    import audiplex_paths
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    import audiplex_paths
+
 logger = logging.getLogger("audiplex.dj_triggers")
 
 TRIGGER_KINDS = ("track_end", "track_start", "clock", "geofence")
@@ -64,7 +70,10 @@ OUTRO_RECHECK_S = 2.0         # #5837 a held outro (persona line on air) re-chec
 OUTRO_RECHECK_CAP_S = 30.0    # #5837 ...and fires anyway after this long: the stop matters more than the overlap
 CHIME_STOP_PAD_S = 1.5        # bed_stop goes out sound_seconds + this after bed_play
 CLIP_PIN_GRACE_S = 3600.0     # a fired cue's clip stays pinned: the phone fetches it when it plays
-DEFAULT_SPEECH_STATE_FILE = "Q:/Pantheon/data/runtime/speech_state.json"
+def default_speech_state_file() -> str:  # #5457 resolved per call from the Pantheon root
+    return audiplex_paths.pantheon("data", "runtime", "speech_state.json")
+
+
 PAUSED_STATES = ("paused", "paused_late", "paused_fallback", "paused_no_outro")
 
 _SPEECH_WARNED = False
@@ -302,7 +311,7 @@ def _parse_ts(v: Any) -> Optional[float]:
 
 
 def speech_state_path() -> Path:
-    return Path(os.environ.get("DJ_SPEECH_STATE_FILE") or DEFAULT_SPEECH_STATE_FILE)
+    return Path(os.environ.get("DJ_SPEECH_STATE_FILE") or default_speech_state_file())  # #5457
 
 
 def read_speech_state() -> dict:

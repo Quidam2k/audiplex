@@ -10,6 +10,8 @@ from pathlib import Path
 
 import httpx
 
+import audiplex_paths  # #5457
+
 
 _NS: dict | None = None
 _VIDEO_LOCKS: dict[str, asyncio.Lock] = {}
@@ -103,7 +105,7 @@ def _load_allowlist() -> list[dict]:
             {
                 "id": playlist_id.strip(),
                 "name": name.strip(),
-                "dest": dest.strip(),
+                "dest": audiplex_paths.expand(dest.strip()),  # #5457 {music_root} etc.
             }
         )
     return validated

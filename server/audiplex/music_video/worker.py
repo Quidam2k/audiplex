@@ -34,11 +34,25 @@ import time
 import urllib.request
 from pathlib import Path
 
+try:  # #5457 machine-local roots; the server runs from server/, like dj_triggers.render_say
+    import audiplex_paths
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    import audiplex_paths
+
 logger = logging.getLogger("audiplex.music_video")
 
-COMFY_WORKFLOWS = Path(os.environ.get("AUDIPLEX_COMFY_WORKFLOWS", r"Q:\Development\comfy_workflows"))
-COMFY_OUTPUT = Path(os.environ.get("AUDIPLEX_COMFY_OUTPUT", r"Q:\ComfyUI_Desktop\output"))
-PANTHEON_SRC = Path(os.environ.get("AUDIPLEX_PANTHEON_SRC", r"Q:\Pantheon\src"))
+
+def comfy_workflows() -> Path:  # #5457 resolved per call: env, then the Development root
+    return Path(os.environ.get("AUDIPLEX_COMFY_WORKFLOWS") or audiplex_paths.dev("comfy_workflows"))
+
+
+def comfy_output() -> Path:  # #5457 AUDIPLEX_COMFY_OUTPUT is also audiplex_paths' own env var
+    return audiplex_paths.comfy_output()
+
+
+def pantheon_src() -> Path:  # #5457
+    return Path(os.environ.get("AUDIPLEX_PANTHEON_SRC") or audiplex_paths.pantheon("src"))
 COMFY_HOST = "127.0.0.1"
 COMFY_PORTS = (8188, 8000, 8189)
 WAIT_POLL = 30          # seconds between GPU-free checks
@@ -149,8 +163,9 @@ def probe_comfy_port(ports=COMFY_PORTS, host=COMFY_HOST) -> int | None:
 def solace_held_for_todd() -> bool:
     """gpu_modes is Pantheon's single source for "keep off Solace's 4090"."""
     try:
-        if str(PANTHEON_SRC) not in sys.path:
-            sys.path.append(str(PANTHEON_SRC))
+        src = str(pantheon_src())  # #5457
+        if src not in sys.path:
+            sys.path.append(src)
         import gpu_modes
 
         return gpu_modes.current("solace").get("mode") == "todd"
@@ -181,8 +196,9 @@ def gpu_wait_reason(port: int | None) -> str | None:
 
 
 def _agent_gen_run():
-    if str(COMFY_WORKFLOWS) not in sys.path:
-        sys.path.append(str(COMFY_WORKFLOWS))
+    workflows = str(comfy_workflows())  # #5457
+    if workflows not in sys.path:
+        sys.path.append(workflows)
     from agent_gen.run import run
 
     return run
@@ -192,7 +208,7 @@ def _video_output(outputs) -> Path:
     for o in outputs:
         name = o.get("filename") or ""
         if Path(name).suffix.lower() in VIDEO_EXT:
-            return COMFY_OUTPUT / (o.get("subfolder") or "") / name
+            return comfy_output() / (o.get("subfolder") or "") / name  # #5457
     raise RuntimeError(f"ComfyUI returned no video ({outputs!r:.300})")
 
 

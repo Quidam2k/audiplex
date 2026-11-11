@@ -44,7 +44,12 @@ ONSET_FULL_PER_S = 4.0
 ZCR_FULL = 0.15
 W_LOUD, W_ONSET, W_BRIGHT = 0.4, 0.4, 0.2
 
-DEFAULT_BIKE_STATE = "Q:/Pantheon/data/runtime/bike_dj_state.json"
+_REPO = str(Path(__file__).resolve().parents[2])  # #5457 audiplex_paths lives at the repo root
+if _REPO not in sys.path:
+    sys.path.append(_REPO)
+import audiplex_paths  # noqa: E402
+
+DEFAULT_BIKE_STATE = audiplex_paths.pantheon("data", "runtime", "bike_dj_state.json")  # #5457
 CANT_VERIFY = "can't verify the player is idle"
 
 

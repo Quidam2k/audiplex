@@ -32,8 +32,13 @@ DIP_DEPTH_DB = 8.0  # Minimum dip depth below the local median.
 DIP_MIN_S = 2.0  # Minimum dip duration in seconds.
 DEFAULT_DB = Path(__file__).resolve().parents[1] / "audiplex.db"  # Server DB.
 DEFAULT_LOG = Path(__file__).resolve().parents[1] / "data" / "measure_profile.log"  # Log.
-DEFAULT_SPEECH_STATE = "Q:/Pantheon/data/runtime/speech_state.json"  # Talk state.
-DEFAULT_BIKE_STATE = "Q:/Pantheon/data/runtime/bike_dj_state.json"  # Bike DJ state.
+_REPO = str(Path(__file__).resolve().parents[2])  # #5457 audiplex_paths lives at the repo root
+if _REPO not in sys.path:
+    sys.path.append(_REPO)
+import audiplex_paths  # noqa: E402
+
+DEFAULT_SPEECH_STATE = audiplex_paths.pantheon("data", "runtime", "speech_state.json")  # Talk state. #5457
+DEFAULT_BIKE_STATE = audiplex_paths.pantheon("data", "runtime", "bike_dj_state.json")  # Bike DJ state. #5457
 BELOW_NORMAL = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)  # Priority.
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

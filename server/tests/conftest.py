@@ -491,6 +491,27 @@ def isolated_todd_stop(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _tmp_path_roots(monkeypatch, tmp_path):
+    """#5457: every test resolves audiplex_paths roots under tmp_path, never the box's real
+    local_paths.json (or the live Pantheon files it points at). Tests that need the real
+    file opt out (test_5457_local_paths)."""
+    import json
+    import sys
+    repo = str(Path(__file__).resolve().parents[2])
+    if repo not in sys.path:
+        sys.path.append(repo)
+    import audiplex_paths
+
+    for env_var in audiplex_paths.ROOTS.values():
+        monkeypatch.delenv(env_var, raising=False)
+    roots = {key: str(tmp_path / "roots" / key) for key in audiplex_paths.ROOTS}
+    local = tmp_path / "local_paths.json"
+    local.write_text(json.dumps(roots), encoding="utf-8")
+    monkeypatch.setattr(audiplex_paths, "LOCAL_FILE", local)
+    return roots
+
+
+@pytest.fixture(autouse=True)
 def _no_live_pantheon_mute(monkeypatch, tmp_path):
     """#3493: the DJ MCP's mute gate must never read the live quiet window, or a
     real quiet hour reddens every DJ tool test. Pointing it at a missing Pantheon

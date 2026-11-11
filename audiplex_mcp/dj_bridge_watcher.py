@@ -19,6 +19,8 @@ from pathlib import Path
 
 import httpx
 
+import audiplex_paths  # #5457 repo root is on sys.path whenever audiplex_mcp imports
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 POLL_SECONDS = 2.0
 DEFAULT_SETTINGS = {"on": False, "every_min": 3, "every_max": 3}  # #5986: one bridge per 3 songs
@@ -45,10 +47,12 @@ def audiplex_token():
 
 
 def bridge_cmd_template():
-    return os.environ.get(
-        "DJ_BRIDGE_CMD",
-        "Q:/Pantheon/.venv-omnivoice/Scripts/python.exe "
-        "Q:/Pantheon/scripts/dj_bridge_push.py --payload-file {json_file}",
+    configured = os.environ.get("DJ_BRIDGE_CMD")
+    if configured is not None:
+        return configured
+    return (  # #5457 the Pantheon root comes from audiplex_paths
+        audiplex_paths.pantheon(".venv-omnivoice", "Scripts", "python.exe") + " "
+        + audiplex_paths.pantheon("scripts", "dj_bridge_push.py") + " --payload-file {json_file}"
     )
 
 

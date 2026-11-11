@@ -75,3 +75,6 @@ NOTE-*
 session-state.md
 CLAUDE.local.md
 specs/
+
+# #5457 machine-local roots for paths outside this repo (see local_paths.example.json)
+local_paths.json

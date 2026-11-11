@@ -217,7 +217,7 @@ def test_unset_env_defaults_to_the_pantheon_speech_file(engine, monkeypatch, tmp
     default = tmp_path / "pantheon_speech_state.json"
     default.write_text(json.dumps({"talk_active": True}), encoding="utf-8")
     monkeypatch.delenv("DJ_SPEECH_STATE_FILE", raising=False)
-    monkeypatch.setattr(dj_triggers, "DEFAULT_SPEECH_STATE_FILE", str(default))
+    monkeypatch.setattr(dj_triggers, "default_speech_state_file", lambda: str(default))  # #5457
     assert dj_triggers.speech_state_path() == default
     assert dj_triggers.read_speech_state()["talking"] is True  # read, not fail-open
     pool = _pool()
@@ -226,8 +226,9 @@ def test_unset_env_defaults_to_the_pantheon_speech_file(engine, monkeypatch, tmp
     assert pool.state["pending_cues"][0]["status"] == "held"
 
 
-def test_the_default_path_constant_is_pantheons():
-    assert dj_triggers.DEFAULT_SPEECH_STATE_FILE == "Q:/Pantheon/data/runtime/speech_state.json"
+def test_the_default_path_is_under_the_pantheon_root():  # #5457 exact Solace value: test_5457_local_paths
+    import audiplex_paths
+    assert dj_triggers.default_speech_state_file() == audiplex_paths.pantheon("data", "runtime", "speech_state.json")
 
 
 # ----- never over a stream or a DJ break -----

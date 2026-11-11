@@ -15,6 +15,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+import audiplex_paths  # #5457
 from types import ModuleType
 from typing import Any, Iterable, Iterator
 
@@ -90,14 +92,14 @@ def _audiplex_db_path() -> Path:
 def _rfl_notes_db_path() -> Path:
     return Path(
         os.environ.get("RFL_DJ_NOTES_DB")
-        or "Q:/Development/radio_free_luna/data/dj_notes.db"
+        or audiplex_paths.dev("radio_free_luna", "data", "dj_notes.db")  # #5457
     )
 
 
 def _rfl_store_path() -> Path:
     return Path(
         os.environ.get("RFL_STORE_PY")
-        or "Q:/Development/radio_free_luna/src/notes/store.py"
+        or audiplex_paths.dev("radio_free_luna", "src", "notes", "store.py")  # #5457
     )
 
 

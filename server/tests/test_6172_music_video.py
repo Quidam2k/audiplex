@@ -302,7 +302,7 @@ def pipeline(session, tmp_path, monkeypatch):
 
     comfy_out = tmp_path / "comfy_out"
     (comfy_out / "audiplex_mv").mkdir(parents=True)
-    monkeypatch.setattr(worker, "COMFY_OUTPUT", comfy_out)
+    monkeypatch.setenv("AUDIPLEX_COMFY_OUTPUT", str(comfy_out))  # #5457
     monkeypatch.setattr(analysis, "analyze", lambda p, c: {
         "duration": 12.0, "tempo": 120.0, "beats": _beats(12), "vocal_spans": []})
     monkeypatch.setattr(worker, "probe_comfy_port", lambda *a, **k: 8188)
@@ -472,7 +472,7 @@ def test_render_clip_soundtrack_param(tmp_path, monkeypatch):
     comfy_out = tmp_path / "out"
     (comfy_out / "x").mkdir(parents=True)
     (comfy_out / "x" / "v.mp4").write_bytes(b"v")
-    monkeypatch.setattr(worker, "COMFY_OUTPUT", comfy_out)
+    monkeypatch.setenv("AUDIPLEX_COMFY_OUTPUT", str(comfy_out))  # #5457
     seen = []
 
     def run(name, params, **kw):

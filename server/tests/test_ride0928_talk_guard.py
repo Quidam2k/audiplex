@@ -73,7 +73,7 @@ def test_verdicts(wire):
 
 def test_default_path_is_pantheon(monkeypatch):
     monkeypatch.delenv("DJ_SPEECH_STATE_FILE", raising=False)
-    assert mcp_server._speech_state_path() == Path("Q:/Pantheon/data/runtime/speech_state.json")
+    assert mcp_server._speech_state_path() == mcp_server.audiplex_paths.pantheon_root() / "data" / "runtime" / "speech_state.json"  # #5457
 
 
 @pytest.mark.parametrize("tool,args", [

@@ -191,4 +191,4 @@ def test_absent_pantheon_dir_sends(wire, tmp_path, monkeypatch, capsys):
 
 def test_default_src_is_pantheon(monkeypatch):
     monkeypatch.delenv("DJ_PANTHEON_SRC", raising=False)
-    assert mcp_server._pantheon_src() == Path("Q:/Pantheon/src")
+    assert mcp_server._pantheon_src() == mcp_server.audiplex_paths.pantheon_root() / "src"  # #5457

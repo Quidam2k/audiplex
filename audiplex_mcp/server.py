@@ -77,6 +77,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from audiplex_mcp import dj_bridge_watcher, dj_clip_bank, dj_persona, tts_backend  # #2858 dj_patter, #3917 bank
+import audiplex_paths  # #5457 machine-local roots (repo root is on sys.path for audiplex_mcp)
 from audiplex_mcp import song_context  # #3984 song memory: sourced notes, plays-well-after, theme search
 from audiplex_mcp.mix_balance import balance_order, describe_head  # #5463
 
@@ -386,7 +387,7 @@ ANNOUNCE_REFUSAL = (  # #3249
 
 
 def _pantheon_db_path() -> Path:  # #3249
-    return Path(os.environ.get("DJ_PANTHEON_DB") or "Q:/Pantheon/data/pantheon.db")
+    return Path(os.environ.get("DJ_PANTHEON_DB") or audiplex_paths.pantheon("data", "pantheon.db"))  # #5457
 
 
 ANNOUNCE_HELD_REFUSAL = (  # #5451 starts with the #3249 prefix so _held_kind still reads announce_first
@@ -762,11 +763,12 @@ TALK_UNREADABLE = (  # #ride0928
 
 MUTE_GUARDED = TALK_GUARDED | {"bed_play", "announce"}  # #3493: muted means nothing audible
 REFILL_CMDS = {"queue", "play_next"}  # #3493
-DEFAULT_PANTHEON_SRC = "Q:/Pantheon/src"  # #3493
+def _default_pantheon_src() -> str:  # #3493 #5457 resolved per call from the Pantheon root
+    return audiplex_paths.pantheon("src")
 
 
 def _pantheon_src() -> Path:  # #3493
-    return Path(os.environ.get("DJ_PANTHEON_SRC") or DEFAULT_PANTHEON_SRC)
+    return Path(os.environ.get("DJ_PANTHEON_SRC") or _default_pantheon_src())  # #5457
 
 
 def _global_mute() -> tuple[bool, str] | None:  # #3493
@@ -1923,11 +1925,12 @@ async def _put(path: str, body: dict):  # #ride0928
 
 
 SPEECH_GATE_WAIT_SECONDS = 20  # #2858
-DEFAULT_SPEECH_STATE_FILE = "Q:/Pantheon/data/runtime/speech_state.json"  # #ride0928
+def _default_speech_state_file() -> str:  # #ride0928 #5457
+    return audiplex_paths.pantheon("data", "runtime", "speech_state.json")
 
 
 def _speech_state_path() -> Path:  # #ride0928
-    return Path(os.environ.get("DJ_SPEECH_STATE_FILE") or DEFAULT_SPEECH_STATE_FILE)
+    return Path(os.environ.get("DJ_SPEECH_STATE_FILE") or _default_speech_state_file())  # #5457
 
 
 def _todd_talking(claim: bool = False) -> str:  # #ride0928: one guard for every audio start
