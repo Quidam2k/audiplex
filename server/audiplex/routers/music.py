@@ -948,6 +948,44 @@ def list_track_stats(
     return recording_stats_view(db, user.id, limit, min_starts)
 
 
+# ---- phone shuffle without back-to-back versions (#5867) ----
+from pydantic import BaseModel as _BaseModel  # #5867 (SearchResults below imports it again)
+
+
+class ShuffleOrderRequest(_BaseModel):  # #5867
+    track_ids: list[int]
+
+
+class ShuffleOrderResponse(_BaseModel):  # #5867
+    track_ids: list[int]
+
+
+@router.post("/shuffle-order", response_model=ShuffleOrderResponse)
+def shuffle_order(  # #5867
+    body: ShuffleOrderRequest,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """The same tracks in a random order where versions of one song (live, remaster, edit)
+    stay an hour or more apart. Unknown ids keep their place as one-off songs, so the set is
+    never changed, only its order."""
+    from audiplex.shuffle_spacing import ShuffleItem, spaced_shuffle
+
+    ids = list(dict.fromkeys(body.track_ids))
+    durations = dict(db.query(Track.id, Track.duration_seconds).filter(Track.id.in_(ids)).all())
+    identities = build_identity_map(db)
+    items = [
+        ShuffleItem(
+            tid,
+            identities[tid].work_id if tid in identities else f"unknown:{tid}",
+            float(durations.get(tid) or 0.0),
+        )
+        for tid in ids
+    ]
+    floor = get_settings().shuffle_work_gap_minutes * 60.0
+    return ShuffleOrderResponse(track_ids=spaced_shuffle(items, floor=floor))
+
+
 # ---- whole-library search (#3696) ----
 from pydantic import BaseModel as _BaseModel  # #3696
 

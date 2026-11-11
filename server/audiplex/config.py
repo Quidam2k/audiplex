@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     # listening data rather than guessing a different one now.
     dj_recording_cooldown_minutes: int = 20
     dj_work_cooldown_minutes: int = 20
+    # #5867: the phone's shuffle keeps versions of one song at least this far apart
+    # (more on a long list; see shuffle_spacing). 0 turns the spacing off.
+    shuffle_work_gap_minutes: int = 60
     # #7109: per-track gain normalization for music. If enabled, each track is
     # attenuated (never boosted) to reach the target loudness level.
     # Persona TTS measures ~-20 LUFS (#7136, 40 renders, -18.5..-20.6; #3504
