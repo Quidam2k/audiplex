@@ -81,12 +81,16 @@ def pantheon_script_cmd(script: str) -> str:  # #5648 Pantheon's venv python + o
 
 
 def ensure_server_tts_env() -> None:  # #5648
-    """The :8100 server is launched with only DJ_TTS_VOICE (launch-hidden.vbs / launch.bat),
-    so its ahead-of-time renders had no backend at all. When a DJ voice is set and neither
+    """The :8100 server is launched with no DJ TTS env (Pantheon's service supervisor passes
+    none), so its ahead-of-time renders had no backend at all. The voice comes from
+    DJ_TTS_VOICE, else local_paths.json dj_tts_voice (#5648). When a DJ voice is set and neither
     DJ_TTS_URL nor DJ_TTS_CMD is, render through Pantheon's tts_render_cli (Athena only; an
     unknown voice is refused there, never substituted). No voice set = left unconfigured."""
-    if not os.environ.get("DJ_TTS_VOICE"):  # #5648
-        return  # #5648
+    if not os.environ.get("DJ_TTS_VOICE"):  # #5648 Pantheon's supervisor launches :8100 with no env
+        try:  # #5648
+            os.environ["DJ_TTS_VOICE"] = audiplex_paths.root("dj_tts_voice")  # #5648 local_paths.json
+        except audiplex_paths.LocalPathsError:  # #5648
+            return  # #5648 no voice anywhere: left unconfigured
     if not os.environ.get("PANTHEON_TTS_REMOTE_URL"):  # #5648 the CLI renders on Athena only
         try:  # #5648
             os.environ["PANTHEON_TTS_REMOTE_URL"] = audiplex_paths.root("tts_remote_url")  # #5648

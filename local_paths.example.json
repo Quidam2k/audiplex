@@ -3,5 +3,6 @@
   "dev_root": "/path/to/Development",
   "comfy_output": "/path/to/ComfyUI/output",
   "music_root": "/path/to/music-library-root",
-  "tts_remote_url": "http://<athena-lan-address>:7779"
+  "tts_remote_url": "http://<athena-lan-address>:7779",
+  "dj_tts_voice": "<dj voice, e.g. a Pantheon reader id>"
 }

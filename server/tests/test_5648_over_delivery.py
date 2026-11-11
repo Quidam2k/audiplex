@@ -306,6 +306,14 @@ def test_server_tts_env_defaults_only_when_a_voice_is_set(monkeypatch):  # #5648
 
     for k in ("DJ_TTS_URL", "DJ_TTS_CMD", "DJ_TTS_VOICE"):  # #5648
         monkeypatch.delenv(k, raising=False)  # #5648
+
+    real_root = dj_triggers.audiplex_paths.root  # #5648
+
+    def no_root(key):  # #5648 no voice in local_paths.json either; other roots as configured
+        if key == "dj_tts_voice":  # #5648
+            raise dj_triggers.audiplex_paths.LocalPathsError(key)  # #5648
+        return real_root(key)  # #5648
+    monkeypatch.setattr(dj_triggers.audiplex_paths, "root", no_root)  # #5648
     dj_triggers.ensure_server_tts_env()  # #5648
     assert "DJ_TTS_CMD" not in os.environ  # #5648 no voice = stays unconfigured
     monkeypatch.setenv("DJ_TTS_VOICE", "chris")  # #5648
@@ -315,6 +323,17 @@ def test_server_tts_env_defaults_only_when_a_voice_is_set(monkeypatch):  # #5648
     monkeypatch.setenv("DJ_TTS_CMD", "mine {text} {out}")  # #5648
     dj_triggers.ensure_server_tts_env()  # #5648
     assert os.environ["DJ_TTS_CMD"] == "mine {text} {out}"  # #5648 an operator's command wins
+
+
+def test_server_tts_voice_comes_from_local_config_when_env_has_none(monkeypatch):  # #5648
+    for k in ("DJ_TTS_URL", "DJ_TTS_CMD", "DJ_TTS_VOICE", "PANTHEON_TTS_REMOTE_URL"):  # #5648
+        monkeypatch.delenv(k, raising=False)  # #5648 the supervisor's launch: no env at all
+    vals = {"dj_tts_voice": "chris", "tts_remote_url": "http://athena.test:7779"}  # #5648
+    real_root = dj_triggers.audiplex_paths.root  # #5648
+    monkeypatch.setattr(dj_triggers.audiplex_paths, "root",  # #5648
+                        lambda key: vals[key] if key in vals else real_root(key))  # #5648
+    dj_triggers.ensure_server_tts_env()  # #5648
+    assert os.environ["DJ_TTS_VOICE"] == "chris" and "tts_render_cli.py" in os.environ["DJ_TTS_CMD"]  # #5648
 
 
 def test_server_tts_env_takes_athena_url_from_local_config(monkeypatch):  # #5648

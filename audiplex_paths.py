@@ -28,6 +28,7 @@ ROOTS = {
     "comfy_output": "AUDIPLEX_COMFY_OUTPUT",
     "music_root": "AUDIPLEX_MUSIC_ROOT",
     "tts_remote_url": "PANTHEON_TTS_REMOTE_URL",  # #5648 Athena's render URL (a LAN address, so never in the repo)
+    "dj_tts_voice": "DJ_TTS_VOICE",  # #5648 the server's DJ voice; the supervisor launches it with no env
 }
 
 
