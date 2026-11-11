@@ -29,6 +29,12 @@ the pre-#5648 behaviour) | silent. Every try, fire, drop, fallback and pause is 
 line in prepare_log_path() (JSONL) and in the server log, so Todd can audit what
 failed and on which try; the try_start/try_end lines also let the persona-latency
 check pair lines queued during a render against lines that were not.
+
+delivery "over" (#5648, Todd 59058): the break is not queued; it is handed to the external
+DJ_OVER_MUSIC_CMD hook at T-30 s. Tries stop at T-40 s. A ready clip goes with --wav; no clip,
+or a changed next track, goes with --fallback-say (same text and ids). Exactly one hand-off per
+entry, claimed under the lock. A render landing after the hand-off is discarded and logged. An
+"over" break never pauses.
 """
 
 from __future__ import annotations
@@ -37,7 +43,9 @@ import asyncio
 import json
 import logging
 import os
+import shlex  # #5648
 import sqlite3
+import subprocess  # #5648
 import sys
 import threading
 import time
@@ -65,6 +73,10 @@ KEEP_ENTRIES = 20
 OPEN = ("preparing", "ready", "held")
 NATURAL_END_SLACK_S = 10.0   # a track change this close to the estimated end is the song ending, not a skip
 PAUSE_EXPIRE_S = 120.0       # a pause fallback not sent by end + this is dropped (playback stopped meanwhile)
+DELIVERIES = ("insert", "over")  # #5648: "insert" = a gap clip into the queue; "over" = handed to the over-music hook
+OVER_LAST_TRY_LEAD_S = 40.0  # #5648 over: no render try starts later than this before the song's end
+OVER_HANDOFF_LEAD_S = 30.0   # #5648 over: the hand-off (clip or fallback say) goes out at T-30
+OVER_HOOK_TIMEOUT_S = 120.0  # #5648 over: the external hook is a child process; its rc is logged, not awaited
 
 _LOCK = threading.RLock()
 _TASKS: dict[str, Any] = {}  # entry id -> the in-flight try (an asyncio.Task in the server)
@@ -144,13 +156,18 @@ def song_end_epoch(state: Optional[dict], now: float) -> Optional[float]:
     return at + (dur - pos) / 1000.0
 
 
-def try_due_times(t0: float, end: Optional[float]) -> list[float]:
+def last_try_lead(delivery: str) -> float:
+    """#5648: how far before the song's end the last render try may start."""
+    return OVER_LAST_TRY_LEAD_S if delivery == "over" else LAST_TRY_LEAD_S
+
+
+def try_due_times(t0: float, end: Optional[float], delivery: str = "insert") -> list[float]:  # #5648
     """Absolute due time of each try. A song too short for +120 s before
-    T-LAST_TRY_LEAD_S gets the offsets scaled to fit (Karen's ask 1)."""
+    T-last_try_lead gets the offsets scaled to fit (Karen's ask 1)."""  # #5648
     span = TRY_OFFSETS_S[-1]
     scale = 1.0
     if end is not None:
-        avail = end - LAST_TRY_LEAD_S - TICK_MARGIN_S - t0
+        avail = end - last_try_lead(delivery) - TICK_MARGIN_S - t0  # #5648
         scale = max(0.0, min(1.0, avail / span)) if span else 1.0
     return [t0 + off * scale for off in TRY_OFFSETS_S]
 
@@ -208,11 +225,15 @@ def speech_busy(now: Optional[float] = None) -> Optional[str]:
 def prepare(bus, say: str, title: str = "DJ break", for_track: Optional[int] = None,
             expect_next: Optional[int] = None, agent: Optional[str] = None,
             fallback_kind: Optional[str] = None, artist: Optional[str] = None,
-            pool=None, now: Optional[float] = None) -> dict:
+            pool=None, now: Optional[float] = None, delivery: str = "insert") -> dict:  # #5648
     """File a break for the end of the CURRENT song. The first try starts on the
-    next tick (immediately when the ticker loop is running)."""
+    next tick (immediately when the ticker loop is running). delivery (#5648):
+    "insert" = a gap clip into the queue (pauses if every try fails); "over" = the
+    external over-music hook at T-OVER_HANDOFF_LEAD_S, with a say fallback, never a pause."""
     pool = dj_triggers._get_pool(pool)
     now = time.time() if now is None else now
+    if delivery not in DELIVERIES:
+        raise ValueError(f"delivery must be one of {', '.join(DELIVERIES)}")  # #5648
     st = bus.get_state()
     cur = _current(st)
     if not st or not st.get("playing") or cur is None:
@@ -236,7 +257,8 @@ def prepare(bus, say: str, title: str = "DJ break", for_track: Optional[int] = N
         "artist": artist,
         "created_at": now,
         "end_at": end,
-        "due": try_due_times(now, end),
+        "delivery": delivery,  # #5648
+        "due": try_due_times(now, end, delivery),  # #5648
         "tries": [],
         "rendering": False,
         "status": "preparing",
@@ -252,8 +274,10 @@ def prepare(bus, say: str, title: str = "DJ break", for_track: Optional[int] = N
         entries.append(entry)
         del entries[:-KEEP_ENTRIES]
         pool._persist()
-    _log("prepared", entry, end_in_s=None if end is None else round(end - now, 1), replaced=replaced)
+    _log("prepared", entry, delivery=delivery, end_in_s=None if end is None else round(end - now, 1),  # #5648
+         replaced=replaced)
     return {"prepared": True, "id": entry["id"], "for_track": cur, "expect_next": entry["expect_next"],
+            "delivery": delivery,  # #5648
             "song_ends_in_s": None if end is None else round(end - now, 1),
             "tries_due_in_s": [round(d - now, 1) for d in entry["due"]], "replaced": replaced}
 
@@ -315,15 +339,31 @@ async def run_try(entry: dict, pool, n: int) -> None:
         err = str(e) or type(e).__name__
     finally:
         ended = time.time()
+        late = False  # #5648
         with _LOCK:
             entry["rendering"] = False
             entry["tries"].append({"n": n, "started_at": started, "ended_at": ended, "ok": ok, "error": err})
             if ok and entry.get("status") in ("preparing",):
                 entry.update(status="ready", clip_id=clip["clip_id"],
-                             clip_duration=clip.get("duration_seconds"), rendered_at=clip.get("rendered_at"))
+                             clip_duration=clip.get("duration_seconds"), rendered_at=clip.get("rendered_at"),  # #5648
+                             wav_path=clip.get("wav_path"))
+            elif ok:  # #5648 a render that lands after the break was resolved (fallback sent, or cancelled)
+                late = True  # #5648
             _TASKS.pop(entry["id"], None)
             pool._persist()
+        if ok and (late or entry.get("delivery") != "over"):  # #5648
+            _discard_wav((clip or {}).get("wav_path"))  # the insert path plays the stored clip, not the wav
         _log("try_end", entry, n=n, ok=ok, error=err, secs=round(ended - started, 2))
+        if late:  # #5648
+            _log("late_render_discarded", entry, n=n, status=entry.get("status"))
+
+
+def _discard_wav(path: Optional[str]) -> None:  # #5648
+    if path:
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            logger.exception("dj_prepare could not remove render wav %s", path)
 
 
 # ----- the reuse cap (dj_clip_uses) -----
@@ -448,6 +488,92 @@ def _resolve_fallback(entry: dict, bus, pool, now: float, why: str) -> None:
     _log("fallback", entry, used="silent", failed=failed, setting=fb)
 
 
+def _no_clip_reason(e: dict) -> str:  # #5648
+    if e.get("status") == "ready":
+        return "the rendered clip has no wav file"
+    if e.get("rendering"):
+        return f"render still in flight at T-{OVER_HANDOFF_LEAD_S:g}"
+    return _failure_summary(e)
+
+
+# ----- delivery "over" (#5648): hand-off to the external over-music hook -----
+
+
+def over_cmd() -> str:  # #5648
+    """The over-music hook command (DJ_OVER_MUSIC_CMD), '' when unset. Argument contract
+    appended to it, in this order (values are separate argv items, never shell-joined):
+      --wav <path> | --fallback-say   (the clip, or no clip: say the text live)
+      --text <say> --end-epoch <float> --track-id <int> --next-track-id <int|''> --persona <agent|''>
+    """
+    return (os.environ.get("DJ_OVER_MUSIC_CMD") or "").strip()
+
+
+def over_argv(cmd: str, e: dict, end_epoch: float, wav: Optional[str]) -> list[str]:  # #5648
+    parts = shlex.split(cmd, posix=False)  # Windows-friendly, as the bridge hook is parsed
+    argv = [p[1:-1] if len(p) >= 2 and p[0] == p[-1] == '"' else p for p in parts]
+    argv += ["--wav", wav] if wav else ["--fallback-say"]
+    nxt = e.get("expect_next")
+    argv += [
+        "--text", e["say"],
+        "--end-epoch", repr(float(end_epoch)),
+        "--track-id", str(e["for_track"]),
+        "--next-track-id", "" if nxt is None else str(nxt),
+        "--persona", e.get("agent") or "",
+    ]
+    return argv
+
+
+def _spawn_over_hook(argv: list[str], entry_id: str) -> None:  # #5648
+    """Run the hook as a child of the server. The ticker never waits on it; its rc and
+    output are logged when it ends."""
+    def _run() -> None:
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=OVER_HOOK_TIMEOUT_S)
+            _log("over_hook_done", entry_id=entry_id, rc=r.returncode,
+                 stdout=r.stdout[-300:], stderr=r.stderr[-300:])
+        except Exception as exc:  # a hook failure never reaches the ticker
+            _log("over_hook_failed", entry_id=entry_id, error=repr(exc))
+
+    threading.Thread(target=_run, name=f"dj-over-{entry_id}", daemon=True).start()
+
+
+def _over_handoff(e: dict, st: dict, now: float, out: dict) -> None:  # #5648
+    """delivery "over" at T-OVER_HANDOFF_LEAD_S: exactly one hand-off per entry. The claim
+    is one state transition under _LOCK, so a late render or a second tick cannot send
+    another. A ready clip goes with --wav; no clip, or the next track changed, goes with
+    --fallback-say. Never pauses."""
+    nxt = _next_track(st)
+    with _LOCK:
+        if e.get("done") or e.get("status") not in OPEN:
+            return
+        cmd = over_cmd()
+        if not cmd:
+            e.update(status="no_hook", done=True)
+            _log("handoff_skipped", e, reason="DJ_OVER_MUSIC_CMD unset")
+            out["fallback"].append(e["id"])
+            return
+        changed_next = e.get("expect_next") is not None and nxt != e["expect_next"]
+        wav = e.get("wav_path")
+        if e.get("status") == "ready" and wav and not changed_next:
+            e.update(status="handed_off", done=True, handed_at=now, handoff="clip")
+            clip = True
+        else:
+            why = (f"next track changed ({e.get('expect_next')} -> {nxt})" if changed_next
+                   else f"no clip by T-{OVER_HANDOFF_LEAD_S:g}: {_no_clip_reason(e)}")
+            e.update(status="fallback_sent", done=True, handed_at=now, handoff="fallback", failed=why)
+            clip = False
+            _discard_wav(wav)  # a clip that landed too late for this hand-off is not played
+        end = song_end_epoch(st, now) or e.get("end_at") or now
+        argv = over_argv(cmd, e, end, wav if clip else None)
+        if clip:
+            _log("handoff", e, how="clip", wav=wav, argv=argv)
+            out["fired"].append(e["id"])
+        else:
+            _log("fallback", e, used="over_say", failed=e.get("failed"), argv=argv)
+            out["fallback"].append(e["id"])
+    _spawn_over_hook(argv, e["id"])
+
+
 def _outro_owns(pool, track_id: int) -> bool:
     outro = pool.state.get("outro")
     return isinstance(outro, dict) and (outro.get("trigger") or {}).get("track_id") == track_id
@@ -485,7 +611,7 @@ def tick(bus, pool=None, now: Optional[float] = None,
 
             if e["status"] == "preparing" and not e["rendering"]:
                 n = len(e["tries"])
-                last_ok = left is None or left >= LAST_TRY_LEAD_S
+                last_ok = left is None or left >= last_try_lead(e.get("delivery"))  # #5648
                 if n < len(TRY_OFFSETS_S) and last_ok and now >= e["due"][n]:
                     busy = speech_busy(now)
                     if busy:
@@ -502,12 +628,17 @@ def tick(bus, pool=None, now: Optional[float] = None,
                         out["started"].append((e["id"], n))
                         changed = True
 
-            if left is None or left > PREPARE_FIRE_LEAD_S:
+            over = e.get("delivery") == "over"  # #5648
+            if left is None or left > (OVER_HANDOFF_LEAD_S if over else PREPARE_FIRE_LEAD_S):  # #5648
                 continue
-            # Fire time: within PREPARE_FIRE_LEAD_S of the end.
+            # Fire time: within PREPARE_FIRE_LEAD_S of the end (OVER_HANDOFF_LEAD_S for "over"). #5648
             if _outro_owns(pool, e["for_track"]):
                 _cancel(e, "outro_owns_end")
                 out["dropped"].append(e["id"])
+                changed = True
+                continue
+            if over:  # #5648
+                _over_handoff(e, st, now, out)
                 changed = True
                 continue
             nxt = _next_track(st)
@@ -597,7 +728,7 @@ def on_boundary(cur: int, bus, pool, now: Optional[float] = None) -> None:
 def status(pool=None) -> dict:
     pool = dj_triggers._get_pool(pool)
     keep = ("id", "for_track", "expect_next", "status", "say", "agent", "tries", "drop_reason",
-            "failed", "fired_how", "fired_clip_id", "created_at", "end_at")
+            "failed", "fired_how", "fired_clip_id", "created_at", "end_at", "delivery", "handoff")  # #5648
     return {"settings": settings(pool),
             "entries": [{k: e.get(k) for k in keep} for e in _entries(pool)]}
 

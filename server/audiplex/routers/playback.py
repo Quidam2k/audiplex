@@ -1240,10 +1240,13 @@ def prepare_break(body: dict, user: User = Depends(get_current_user)):
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail=f"{k} must be an integer")
 
+    delivery = body.get("delivery") or "insert"  # #5648 insert = gap clip (default); over = over-music hook
+    if delivery not in dj_prepare.DELIVERIES:  # #5648
+        raise HTTPException(status_code=400, detail=f"delivery must be one of {', '.join(dj_prepare.DELIVERIES)}")  # #5648
     result = dj_prepare.prepare(
         bus, say, title=body.get("title") or "DJ break", for_track=_opt_int("for_track"),
         expect_next=_opt_int("expect_next"), agent=body.get("agent"),
-        fallback_kind=body.get("fallback_kind"), artist=body.get("artist"),
+        fallback_kind=body.get("fallback_kind"), artist=body.get("artist"), delivery=delivery,  # #5648
     )
     if not result.get("prepared"):
         return JSONResponse(result, status_code=409)
@@ -1256,9 +1259,10 @@ def prepared_breaks(track_id: int | None = None, user: User = Depends(get_curren
     song's break or {"entry": null} (the watcher's T-20 backstop asks this)."""
     from audiplex import dj_prepare
 
-    if track_id is not None:
+    if track_id is not None:  # #5648 the watcher's T-20 backstop reads exists
         e = dj_prepare.open_for(track_id)
-        return {"entry": None if e is None else {k: e.get(k) for k in ("id", "status", "for_track")}}
+        return {"exists": e is not None,  # #5648
+                "entry": None if e is None else {k: e.get(k) for k in ("id", "status", "for_track", "delivery")}}  # #5648
     return dj_prepare.status()
 
 

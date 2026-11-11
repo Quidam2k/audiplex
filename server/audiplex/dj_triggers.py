@@ -38,6 +38,7 @@ import json
 import logging
 import math
 import os
+import shutil  # #5648 the over-music hook's wav copy
 import sys
 import threading
 import time
@@ -1040,11 +1041,24 @@ async def render_say(text: str, title: str) -> dict:
         path = await tts_backend.synthesize(text)
     except (tts_backend.TtsNotConfigured, tts_backend.TtsFailed) as e:
         raise RuntimeError(str(e)) from e
+    wav_path = None  # #5648
     try:
         from audiplex.routers.dj_voice import store_clip_bytes
 
         clip_id, duration = store_clip_bytes(path.read_bytes(), path.suffix.lower())
+        # #5648 delivery "over" hands this file to the over-music hook; insert discards it
+        wav_path = _keep_render(path, clip_id)  # #5648
     finally:
         path.unlink(missing_ok=True)
     return {"clip_id": clip_id, "duration_seconds": duration, "voice": tts_backend.voice(),
-            "rendered_at": time.time(), "title": title}
+            "rendered_at": time.time(), "title": title, "wav_path": wav_path}
+
+
+def _keep_render(path: Path, clip_id: int) -> str:  # #5648
+    """A copy of a render kept on disk for the over-music hook (#5648). The directory is
+    AUDIPLEX_DJ_WAV_DIR, default server/data/dj_wavs."""
+    keep_dir = Path(os.environ.get("AUDIPLEX_DJ_WAV_DIR") or (_server_dir() / "data" / "dj_wavs"))
+    keep_dir.mkdir(parents=True, exist_ok=True)
+    dest = keep_dir / f"{clip_id}-{time.time_ns()}{path.suffix.lower()}"
+    shutil.copyfile(path, dest)
+    return str(dest)

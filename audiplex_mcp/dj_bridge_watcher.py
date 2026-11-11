@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 POLL_SECONDS = 2.0
 DEFAULT_SETTINGS = {"on": False, "every_min": 3, "every_max": 3}  # #5986: one bridge per 3 songs
 OUTRO_LEAD_S = 20.0  # #5986: fire this long before the armed song ends, so the talk spans the fade
+PREPARE_LEAD_S = 15.0  # #5648: the 'prepare' hook fires this far into the armed song; the server renders ahead
 FACTS_TIMEOUT_S = 3.0  # #5986
 
 
@@ -266,6 +267,13 @@ class BridgeCounter:
                     payload = self._payload("outro", track, self.armed["prev"], state, now)
                     self._reset_after_fire(settings)
                     return payload
+                # #5648: 15 s into the armed song, the 'prepare' hook asks the persona for the break;
+                # the server renders it ahead. The T-20 'outro' hook is then only a backstop.
+                if (duration_s > 0 and not self.armed.get("prepared")
+                        and self._position_s(state, now) >= PREPARE_LEAD_S and remaining > OUTRO_LEAD_S):
+                    self.armed["prepared"] = True
+                    self.last_skip_reason = "prepare"
+                    return self._payload("prepare", track, self.armed["prev"], state, now)
             self.last_skip_reason = "same_track"
             return None
 
@@ -318,6 +326,32 @@ def fetch_state(client, base_url, token):
     resp = client.get(f"{base_url}/api/playback/state", headers=headers, timeout=10.0)
     resp.raise_for_status()
     return resp.json()
+
+
+def prepared_exists(client, base_url, token, track_id):  # #5648
+    """True when the server already holds a prepared break for this song, so the T-20
+    'outro' hook is only a backstop and must not speak a second time. A failed lookup
+    returns False: the backstop fires, so a break is never lost."""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        resp = client.get(f"{base_url}/api/playback/pool/prepared", params={"track_id": track_id},
+                          headers=headers, timeout=5.0)
+        resp.raise_for_status()
+        return resp.json().get("entry") is not None
+    except (httpx.HTTPError, ValueError) as exc:
+        log_line(f"prepared lookup failed ({exc!r}); the outro backstop fires")
+        return False
+
+
+def outro_backstop(payload, client, base_url, token):  # #5648
+    """The T-20 'outro' hook is a backstop: it fires only when no prepared break exists
+    for this song. Other payloads pass through unchanged."""
+    if payload is None or payload.get("mode") != "outro":
+        return payload
+    if prepared_exists(client, base_url, token, payload["now"]["id"]):
+        log_line(f"outro backstop skipped: a prepared break exists for {payload['now']['title']!r}")
+        return None
+    return payload
 
 
 def fetch_facts(client, base_url, token, track_id):  # #5986
@@ -471,6 +505,7 @@ def run_loop():
                 verdict = f"FIRE {payload['mode']}" if payload is not None else reason  # #5986
                 log_line(f"track -> {title!r}: {verdict} ({counter.counter}/{counter.target})")
                 counter._armed_logged = reason == "armed"  # #5986 one 'armed' line per song
+            payload = outro_backstop(payload, client, base_url, token)  # #5648
             if payload is not None:
                 fire_hook(enrich_payload(payload, client, base_url, token))  # #5986
 

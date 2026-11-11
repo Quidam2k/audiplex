@@ -2024,6 +2024,7 @@ async def dj_announce(
     for_track: int | None = None,  # #5648 at_end only
     expect_next: int | None = None,  # #5648
     agent: str | None = None,  # #5648
+    delivery: str = "insert",  # #5648 at_end only: 'insert' (gap clip) or 'over' (over-music hook)
 ) -> str:
     """Speak a DJ voice break on the device: synthesizes YOUR copy to audio,
     uploads it, and drops it into the queue.
@@ -2048,6 +2049,9 @@ async def dj_announce(
            break follows (default: the one playing; refused if it is not);
            expect_next is the song it leads into (default: the queued next
            one) and a change by the end drops the break.
+    delivery: at_end only (#5648). 'insert' (default) drops the clip into the queue
+           at the song's end; 'over' hands it to the over-music hook at T-30 s
+           (with a live say fallback, never a pause).
     """
     if mode not in ("next", "now", "at_end"):  # #5648
         return f"Unknown mode '{mode}'. Use 'next', 'now' or 'at_end'."
@@ -2058,7 +2062,9 @@ async def dj_announce(
     if muted:
         return muted
     if mode == "at_end":  # #5648: the server gates each try on speech, so no talk wait here
-        return await _prepare_at_end(text, title, fallback_kind, artist, for_track, expect_next, agent)
+        if delivery not in ("insert", "over"):  # #5648
+            return f"Unknown delivery '{delivery}'. Use 'insert' or 'over'."
+        return await _prepare_at_end(text, title, fallback_kind, artist, for_track, expect_next, agent, delivery)
 
     # #2858: never start a break while Todd is talking. Checked at queue
     # time only; a 'next' break still plays whenever the current song ends.
@@ -2098,10 +2104,11 @@ async def dj_announce(
     )
 
 
-async def _prepare_at_end(text, title, fallback_kind, artist, for_track, expect_next, agent) -> str:
+async def _prepare_at_end(text, title, fallback_kind, artist, for_track, expect_next, agent,
+                          delivery="insert") -> str:  # #5648
     """#5648: hand the line to the server's ahead-of-time render (dj_prepare)."""
-    body = {"say": text, "title": title, "fallback_kind": fallback_kind, "artist": artist,
-            "for_track": for_track, "expect_next": expect_next, "agent": agent}
+    body = {"say": text, "title": title, "fallback_kind": fallback_kind, "artist": artist,  # #5648
+            "for_track": for_track, "expect_next": expect_next, "agent": agent, "delivery": delivery}  # #5648
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.post(f"{AUDIPLEX_URL}/api/playback/pool/prepared", headers=_headers(),

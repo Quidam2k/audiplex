@@ -49,7 +49,8 @@ def test_counts_transitions_and_fires_at_target(monkeypatch):
     r2 = c.observe(make_state(3, "C", "CC"), SETTINGS_ON, 1002.0)  # transition 2 -> arm (#5986)
     assert r2 is None
     assert c.last_skip_reason == "armed"
-    # mid-song: nothing
+    # mid-song: nothing (#5648: the 'prepare' hook already went out at 15 s, so none here either)
+    c.armed["prepared"] = True
     assert c.observe(make_state(3, "C", "CC", position_ms=100000), SETTINGS_ON, 1100.0) is None
     # 18 s before the end: outro fires (#5986)
     r3 = c.observe(make_state(3, "C", "CC", position_ms=182000), SETTINGS_ON, 1200.0)
