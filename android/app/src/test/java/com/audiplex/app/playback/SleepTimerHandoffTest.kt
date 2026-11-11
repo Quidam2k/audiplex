@@ -17,6 +17,7 @@ class SleepTimerHandoffTest {
         var setMainCalls = 0
         var setBedCalls = 0
         var pauseCalls = 0
+        var bookRemainingMs: Long? = null  // #5876
 
         suspend fun run(
             minutes: Float = 1f,
@@ -32,6 +33,7 @@ class SleepTimerHandoffTest {
             setMain = { main = it; setMainCalls++ },
             setBed = { bed = it; setBedCalls++ },
             pause = { paused = true; pauseCalls++ },
+            bookRemainingMs = { bookRemainingMs },  // #5876
         )
     }
 
@@ -96,14 +98,40 @@ class SleepTimerHandoffTest {
             fake.run(minutes = 30f, fadeSeconds = SleepFade.DEFAULT_FADE_SECONDS)
             completedAt = currentTime
         }
-        advanceTimeBy(30 * 60_000L + 119_000L)
+        advanceTimeBy(30 * 60_000L + 4_000L)  // #5876: the default fade is 5 s now, not 120
         runCurrent()
         assertFalse(job.isCompleted)
         advanceTimeBy(2_000L)
         runCurrent()
         assertTrue(job.isCompleted)
-        assertEquals(30 * 60_000L + 120_000L + 250L, completedAt)
-        assertEquals(481, fake.setMainCalls)
+        assertEquals(30 * 60_000L + 5_000L + 250L, completedAt)
+        assertEquals(21, fake.setMainCalls)
+    }
+
+    @Test
+    fun aBookAboutToEndFinishesBeforeTheFadeStarts() = runTest {  // #5876
+        val fake = Fake()
+        fake.bookRemainingMs = 20_000L
+        val job = launch { fake.run(minutes = 1f, fadeSeconds = 5) }
+        advanceTimeBy(60_000L + 19_000L)  // timer fired, the book still has a second of words
+        runCurrent()
+        assertEquals(1f, fake.main, 1e-6f)
+        assertEquals(0, fake.setMainCalls)
+        assertFalse(fake.paused)
+        advanceTimeBy(1_000L + 6_000L)
+        runCurrent()
+        assertTrue(job.isCompleted)
+        assertTrue(fake.paused)
+    }
+
+    @Test
+    fun aBookWithPlentyLeftFadesAtOnce() = runTest {  // #5876
+        val fake = Fake()
+        fake.bookRemainingMs = 3_600_000L
+        launch { fake.run(minutes = 1f, fadeSeconds = 5) }
+        advanceTimeBy(60_000L + 1_000L)
+        runCurrent()
+        assertTrue(fake.main < 1f)
     }
 
     @Test

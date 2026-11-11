@@ -8,12 +8,35 @@ import kotlinx.coroutines.delay
  */
 object SleepFade {
 
-    /** #3714: the sleep button's fade length and bed level, matching dj_sleep_start's defaults. */
-    const val DEFAULT_FADE_SECONDS = 120
+    /**
+     * #5876: how long the book takes to fade into the sleep bed. It was 120 s on the presets (15 s on
+     * the Test chip) and Todd found that far too long; one short, eased fade for every entry point.
+     */
+    const val HANDOFF_FADE_SECONDS = 5
+    const val DEFAULT_FADE_SECONDS = HANDOFF_FADE_SECONDS  // #3714: the sleep button and the voice command
     const val BED_VOLUME = 0.5f
 
-    /** #3953: the dialog's "Test: 1 min" chip uses a short fade so the whole handoff is heard in ~75 s. */
-    const val TEST_FADE_SECONDS = 15
+    /** #3953: the dialog's "Test: 1 min" chip; #5876 now fades like the real thing, so the test is honest. */
+    const val TEST_FADE_SECONDS = HANDOFF_FADE_SECONDS
+
+    /** #5876: the book ending inside this window of the timer firing plays out before the fade starts. */
+    const val BOOK_END_WINDOW_MS = 60_000L
+
+    /** #5876: when the book pauses after the fade, it goes back by the fade plus this, so nothing he could not hear is lost. */
+    private const val REWIND_EXTRA_MS = 5_000L
+
+    /** #5876: smoothstep, so a fade eases in and out instead of dropping off a cliff. */
+    fun ease(t: Float): Float {
+        val x = t.coerceIn(0f, 1f)
+        return x * x * (3f - 2f * x)
+    }
+
+    /** #5876: ms to let the book play on before fading, so a book about to end finishes first; 0 = fade now. */
+    fun deferMs(bookRemainingMs: Long?): Long =
+        if (bookRemainingMs != null && bookRemainingMs in 1..BOOK_END_WINDOW_MS) bookRemainingMs else 0L
+
+    /** #5876: how far back to put the book's position when it pauses at the end of a [fadeSeconds] fade. */
+    fun rewindMs(fadeSeconds: Int): Long = fadeSeconds.coerceAtLeast(0) * 1000L + REWIND_EXTRA_MS
 
     /** Whole minutes until [endsAtMs], rounded up so "1 min" shows until it starts; never negative. */
     fun minutesLeft(endsAtMs: Long, nowMs: Long): Int =
@@ -26,7 +49,7 @@ object SleepFade {
      * left alone.
      */
     fun levels(i: Int, steps: Int, mainStart: Float, bedStart: Float, bedTarget: Float?): Pair<Float, Float?> {
-        val t = (i.toFloat() / steps.coerceAtLeast(1)).coerceIn(0f, 1f)
+        val t = ease(i.toFloat() / steps.coerceAtLeast(1))  // #5876
         val main = mainStart * (1f - t)
         val bed = bedTarget?.let { target ->
             (bedStart + (target.coerceIn(0f, MixLevels.MAX_LEVEL) - bedStart) * t).coerceIn(0f, MixLevels.MAX_LEVEL)
@@ -51,8 +74,10 @@ object SleepFade {
         setBed: (Float) -> Unit,
         pause: () -> Unit,
         onFadeStart: () -> Unit = {},  // #5282
+        bookRemainingMs: () -> Long? = { null },  // #5876
     ): Boolean {
         delay((minutes * 60_000).toLong().coerceAtLeast(0))
+        delay(deferMs(bookRemainingMs()))  // #5876: let a book that is about to end finish
         val startVolume = mainVolume() ?: return false
         onFadeStart()
         val bedStart = bedVolume()

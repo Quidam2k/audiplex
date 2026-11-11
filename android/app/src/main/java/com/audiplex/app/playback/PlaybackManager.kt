@@ -580,6 +580,10 @@ class PlaybackManager @Inject constructor(
     // reads Stopped (with Restart) instead of "playing" forever.
     private val _bedState = MutableStateFlow(BedState.Off)
     val bedState: StateFlow<BedState> = _bedState
+
+    /** #5876: the book has faded into the bed (or the bed came back after a kill): the app shows the full-screen sleep view. */
+    private val _sleepMode = MutableStateFlow(false)
+    val sleepMode: StateFlow<Boolean> = _sleepMode
     private var bedWanted = false
     private var bedUrl: String? = null          // the bed asked for
     private var bedFallbackUrl: String? = null  // the brown-noise bed, played from its local copy
@@ -1839,6 +1843,7 @@ class PlaybackManager @Inject constructor(
                 if (why == "wish_expired" || why == "clock_went_back") settingsStore.setBedWish(null)
             } else {
                 bedPlay(wish.url, settingsStore.sleepBedVolume.first(), wish.startedAtMs)
+                _sleepMode.value = true  // #5876: the view returns with the sound
             }
             // sendWhenReady, not report(): after a headless restart the API client does not exist yet.
             launch {
@@ -2077,6 +2082,7 @@ class PlaybackManager @Inject constructor(
         bedCurrentVolume = 0f
         bedTargetLevel = 0f  // #5131
         scope.launch { settingsStore.setBedWish(null) }  // #5428: stopped on purpose, nothing to bring back
+        _sleepMode.value = false  // #5876
         refreshBedState()
         finishSleepHold()  // #5282
     }
@@ -2113,7 +2119,9 @@ class PlaybackManager @Inject constructor(
                 pause = {
                     PlayerHooks.notePause("sleep_timer")  // #3552
                     controller?.pause()
+                    rewindBookAfterFade(fadeSeconds)  // #5876
                 },
+                bookRemainingMs = { bookRemainingMs() },  // #5876
                 onFadeStart = {
                     mainRampJob?.cancel()
                     sleepFading = true  // #5282
@@ -2125,8 +2133,44 @@ class PlaybackManager @Inject constructor(
             _sleepEndsAtMs.value = null  // #5282: also when no player was there, or the dialog stays armed for good
             finishSleepHold()
             if (done && bedFadeTo != null) {
+                if (bedWanted) _sleepMode.value = true  // #5876
                 clientLog.report("info", "bed_handoff", "book faded into the sleep bed", volumeDetail())  // #5047
             }
+        }
+    }
+
+    /** #5876: ms of the audiobook left, or null for music / nothing loaded (a song never defers the fade). */
+    private fun bookRemainingMs(): Long? =
+        if (_playerKind.value == PlayerKind.Audiobook && _durationMs.value > 0) _durationMs.value - currentGlobalPositionMs() else null
+
+    /**
+     * #5876: the book paused at the end of the fade; put it back by the fade plus a few seconds so
+     * the words he could not hear over the ramp play again when he resumes. Not when the book ended.
+     */
+    private fun rewindBookAfterFade(fadeSeconds: Int) {
+        if (_playerKind.value != PlayerKind.Audiobook) return
+        val remaining = bookRemainingMs() ?: return
+        if (remaining < 2_000) return  // it finished; keep the end
+        seekTo((currentGlobalPositionMs() - SleepFade.rewindMs(fadeSeconds)).coerceAtLeast(0))
+        scope.launch { syncProgress() }
+    }
+
+    /**
+     * #5876: one tap on the full-screen sleep view. The bed fades out over ~1 s, then everything
+     * sleep-related is cleared and the app is back to normal.
+     */
+    fun wakeFromSleep() {
+        _sleepMode.value = false  // the view goes at once; the sound finishes fading
+        scope.launch {
+            val ramp = SleepBedRules.rampVolumes(bedCurrentVolume, 0f, WAKE_FADE_STEPS)
+            if (bedWanted) {
+                for (v in ramp) {
+                    bedVolume(v)
+                    delay(WAKE_FADE_MS / WAKE_FADE_STEPS)
+                }
+            }
+            bedStop()
+            cancelSleepTimer()
         }
     }
 
@@ -2457,6 +2501,9 @@ class PlaybackManager @Inject constructor(
         controller = null
     }
 }
+
+private const val WAKE_FADE_MS = 1_000L  // #5876: tap on the sleep view -> sound gone in about a second
+private const val WAKE_FADE_STEPS = 10
 
 // #5047: AudioManager's hidden volume broadcast and its extras (stable strings since API 1).
 private const val VOLUME_CHANGED_ACTION = "android.media.VOLUME_CHANGED_ACTION"

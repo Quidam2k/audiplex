@@ -27,7 +27,7 @@ class SleepFadeTest {
             assertNotNull(bed)
             assertTrue("bed must rise monotonically", bed!! >= lastBed)
             lastBed = bed
-            assertEquals(1f - i / steps.toFloat(), main, 1e-6f)
+            assertEquals(1f - SleepFade.ease(i / steps.toFloat()), main, 1e-6f)  // #5876
         }
         assertEquals(0.5f, lastBed, 1e-6f)
     }
@@ -58,5 +58,44 @@ class SleepFadeTest {
         assertEquals(1, SleepFade.minutesLeft(1_000, 0))
         assertEquals(0, SleepFade.minutesLeft(0, 0))
         assertEquals(0, SleepFade.minutesLeft(0, 5_000))
+    }
+
+    @Test
+    fun easeIsSmoothAndMonotonic() {  // #5876
+        assertEquals(0f, SleepFade.ease(0f), 1e-6f)
+        assertEquals(0.5f, SleepFade.ease(0.5f), 1e-6f)
+        assertEquals(1f, SleepFade.ease(1f), 1e-6f)
+        assertEquals(0f, SleepFade.ease(-3f), 1e-6f)
+        assertEquals(1f, SleepFade.ease(9f), 1e-6f)
+        var last = -1f
+        for (i in 0..20) {
+            val v = SleepFade.ease(i / 20f)
+            assertTrue(v >= last)
+            last = v
+        }
+        assertTrue("eases in: slower than linear at the start", SleepFade.ease(0.1f) < 0.1f)
+        assertTrue("eases out: slower than linear at the end", SleepFade.ease(0.9f) > 0.9f)
+    }
+
+    @Test
+    fun fadeIsFiveSecondsEverywhere() {  // #5876: was 120 s on the presets and 15 s on Test
+        assertEquals(5, SleepFade.DEFAULT_FADE_SECONDS)
+        assertEquals(5, SleepFade.TEST_FADE_SECONDS)
+    }
+
+    @Test
+    fun aBookAboutToEndPlaysOutBeforeTheFade() {  // #5876
+        assertEquals(0L, SleepFade.deferMs(null))        // music, or no player
+        assertEquals(0L, SleepFade.deferMs(0))           // already over
+        assertEquals(0L, SleepFade.deferMs(60_001))      // plenty left: fade now
+        assertEquals(60_000L, SleepFade.deferMs(60_000)) // right at the edge: let it finish
+        assertEquals(12_345L, SleepFade.deferMs(12_345))
+    }
+
+    @Test
+    fun theBookGoesBackByTheFadePlusFiveSeconds() {  // #5876
+        assertEquals(10_000L, SleepFade.rewindMs(5))
+        assertEquals(5_000L, SleepFade.rewindMs(0))
+        assertEquals(5_000L, SleepFade.rewindMs(-1))
     }
 }

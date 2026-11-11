@@ -8,12 +8,18 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.audiplex.app.data.SettingsStore
 import com.audiplex.app.navigation.RootScaffold
 import com.audiplex.app.playback.DjLinkService
 import com.audiplex.app.playback.PlaybackManager
+import com.audiplex.app.ui.player.SleepModeScreen
 import com.audiplex.app.ui.theme.AudiplexTheme
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.flow.first
@@ -36,7 +42,12 @@ class MainActivity : ComponentActivity() {
         startDjLinkIfEnabled()
         setContent {
             AudiplexTheme {
-                RootScaffold()
+                Box(Modifier.fillMaxSize()) {
+                    RootScaffold()
+                    val sleepMode by playbackManager.sleepMode.collectAsState()  // #5876
+                    val bedState by playbackManager.bedState.collectAsState()
+                    if (sleepMode) SleepModeScreen(bedState, onWake = { playbackManager.wakeFromSleep() })
+                }
             }
         }
     }

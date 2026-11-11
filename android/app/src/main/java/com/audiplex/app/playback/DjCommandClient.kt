@@ -556,7 +556,7 @@ class DjCommandClient @Inject constructor(
             }
             "sleep_timer" -> {
                 val minutes = cmd.payload?.minutes ?: return badPayload("minutes")
-                val fadeSeconds = cmd.payload.fadeSeconds ?: 120
+                val fadeSeconds = cmd.payload.fadeSeconds ?: SleepFade.DEFAULT_FADE_SECONDS  // #5876
                 val bedFadeTo = cmd.payload.bedFadeTo?.let { SleepBedRules.fromDjLevel(it) }  // #5131
                 withContext(Dispatchers.Main) { playbackManager.startSleepTimer(minutes, fadeSeconds, bedFadeTo) }
             }
