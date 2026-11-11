@@ -505,7 +505,10 @@ def over_cmd() -> str:  # #5648
       --wav <path> | --fallback-say   (the clip, or no clip: say the text live)
       --text <say> --end-epoch <float> --track-id <int> --next-track-id <int|''> --persona <agent|''>
     """
-    return (os.environ.get("DJ_OVER_MUSIC_CMD") or "").strip()
+    configured = os.environ.get("DJ_OVER_MUSIC_CMD")  # #5648
+    if configured is not None:  # #5648 set (even to '') = the operator's choice; '' turns the hook off
+        return configured.strip()  # #5648
+    return dj_triggers.pantheon_script_cmd("dj_over_music.py")  # #5648 default, like DJ_BRIDGE_CMD (#5457)
 
 
 def over_argv(cmd: str, e: dict, end_epoch: float, wav: Optional[str]) -> list[str]:  # #5648

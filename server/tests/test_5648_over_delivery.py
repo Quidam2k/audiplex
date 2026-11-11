@@ -7,6 +7,7 @@ is a recorder here; nothing is spawned and nothing reaches a phone.
 
 import asyncio
 import json
+import os  # #5648
 import sys
 from pathlib import Path
 
@@ -295,8 +296,39 @@ def test_over_skipped_song_is_cancelled_without_pause_or_hook(env, monkeypatch):
     assert env["hooks"] == [] and not _pauses()
 
 
+def test_over_hook_defaults_to_pantheon_script_when_unset(monkeypatch):  # #5648
+    monkeypatch.delenv("DJ_OVER_MUSIC_CMD", raising=False)  # #5648
+    cmd = dj_prepare.over_cmd()  # #5648
+    assert cmd.endswith("dj_over_music.py") and "python.exe" in cmd  # #5648
+
+
+def test_server_tts_env_defaults_only_when_a_voice_is_set(monkeypatch):  # #5648
+
+    for k in ("DJ_TTS_URL", "DJ_TTS_CMD", "DJ_TTS_VOICE"):  # #5648
+        monkeypatch.delenv(k, raising=False)  # #5648
+    dj_triggers.ensure_server_tts_env()  # #5648
+    assert "DJ_TTS_CMD" not in os.environ  # #5648 no voice = stays unconfigured
+    monkeypatch.setenv("DJ_TTS_VOICE", "chris")  # #5648
+    dj_triggers.ensure_server_tts_env()  # #5648
+    cmd = os.environ["DJ_TTS_CMD"]  # #5648
+    assert "tts_render_cli.py" in cmd and "--agent {voice}" in cmd and "{out}" in cmd  # #5648
+    monkeypatch.setenv("DJ_TTS_CMD", "mine {text} {out}")  # #5648
+    dj_triggers.ensure_server_tts_env()  # #5648
+    assert os.environ["DJ_TTS_CMD"] == "mine {text} {out}"  # #5648 an operator's command wins
+
+
+def test_server_tts_env_takes_athena_url_from_local_config(monkeypatch):  # #5648
+    for k in ("DJ_TTS_URL", "DJ_TTS_CMD", "PANTHEON_TTS_REMOTE_URL"):  # #5648
+        monkeypatch.delenv(k, raising=False)  # #5648
+    monkeypatch.setenv("DJ_TTS_VOICE", "chris")  # #5648
+    monkeypatch.setattr(dj_triggers.audiplex_paths, "root",  # #5648
+                        lambda key: "http://athena.test:7779" if key == "tts_remote_url" else "")  # #5648
+    dj_triggers.ensure_server_tts_env()  # #5648
+    assert os.environ["PANTHEON_TTS_REMOTE_URL"] == "http://athena.test:7779"  # #5648
+
+
 def test_over_without_hook_command_logs_and_does_nothing(env, monkeypatch):
-    monkeypatch.delenv("DJ_OVER_MUSIC_CMD")
+    monkeypatch.setenv("DJ_OVER_MUSIC_CMD", "")  # #5648 '' = hook turned off
     _render_ok(monkeypatch)
     t = _play()
     dj_prepare.prepare(bus, "line", pool=env["pool"], now=t, delivery="over")

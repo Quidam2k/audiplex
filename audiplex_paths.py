@@ -27,6 +27,7 @@ ROOTS = {
     "dev_root": "AUDIPLEX_DEV_ROOT",
     "comfy_output": "AUDIPLEX_COMFY_OUTPUT",
     "music_root": "AUDIPLEX_MUSIC_ROOT",
+    "tts_remote_url": "PANTHEON_TTS_REMOTE_URL",  # #5648 Athena's render URL (a LAN address, so never in the repo)
 }
 
 

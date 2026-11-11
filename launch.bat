@@ -9,6 +9,8 @@ for /f "tokens=5" %%p in ('netstat -aon ^| findstr "LISTENING" ^| findstr ":8100
 )
 timeout /t 2 /nobreak >nul
 
+REM #5648 the DJ voice for ahead-of-time breaks (Todd picked Chris)
+set DJ_TTS_VOICE=chris
 echo Starting Audiplex server on http://0.0.0.0:8100 ...
 echo (reachable on the LAN at this machine's address, port 8100)
 echo.

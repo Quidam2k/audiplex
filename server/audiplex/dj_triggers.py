@@ -75,6 +75,29 @@ def default_speech_state_file() -> str:  # #5457 resolved per call from the Pant
     return audiplex_paths.pantheon("data", "runtime", "speech_state.json")
 
 
+def pantheon_script_cmd(script: str) -> str:  # #5648 Pantheon's venv python + one of its scripts
+    return (audiplex_paths.pantheon(".venv-omnivoice", "Scripts", "python.exe") + " "  # #5648
+            + audiplex_paths.pantheon("scripts", script))  # #5648
+
+
+def ensure_server_tts_env() -> None:  # #5648
+    """The :8100 server is launched with only DJ_TTS_VOICE (launch-hidden.vbs / launch.bat),
+    so its ahead-of-time renders had no backend at all. When a DJ voice is set and neither
+    DJ_TTS_URL nor DJ_TTS_CMD is, render through Pantheon's tts_render_cli (Athena only; an
+    unknown voice is refused there, never substituted). No voice set = left unconfigured."""
+    if not os.environ.get("DJ_TTS_VOICE"):  # #5648
+        return  # #5648
+    if not os.environ.get("PANTHEON_TTS_REMOTE_URL"):  # #5648 the CLI renders on Athena only
+        try:  # #5648
+            os.environ["PANTHEON_TTS_REMOTE_URL"] = audiplex_paths.root("tts_remote_url")  # #5648
+        except audiplex_paths.LocalPathsError:  # #5648 unset: the CLI says so and the try fails, logged
+            pass  # #5648
+    if os.environ.get("DJ_TTS_URL") or os.environ.get("DJ_TTS_CMD"):  # #5648
+        return  # #5648
+    os.environ["DJ_TTS_CMD"] = (pantheon_script_cmd("tts_render_cli.py")  # #5648
+                                + " --agent {voice} --text {text} --out {out}")  # #5648
+
+
 PAUSED_STATES = ("paused", "paused_late", "paused_fallback", "paused_no_outro")
 
 _SPEECH_WARNED = False
@@ -1037,6 +1060,7 @@ async def render_say(text: str, title: str) -> dict:
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
         from audiplex_mcp import tts_backend
 
+    ensure_server_tts_env()  # #5648
     try:
         path = await tts_backend.synthesize(text)
     except (tts_backend.TtsNotConfigured, tts_backend.TtsFailed) as e:
