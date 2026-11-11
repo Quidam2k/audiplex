@@ -164,6 +164,8 @@ class Track(Base):
     # #8707: id of the canonical copy of this recording (dedup.py). Set = hidden from
     # the flat library lists; still in its own folder/album, playlists and the DJ.
     duplicate_of: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    # #5682: stream a copy cut here (trailing silence / hidden bit); the file itself is never edited.
+    end_trim_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     added_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 

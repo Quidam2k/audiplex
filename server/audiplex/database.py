@@ -308,6 +308,17 @@ def _migrate_track_loudness(engine):  # #3255
         conn.execute(text("ALTER TABLE tracks ADD COLUMN loudness_lufs FLOAT"))
 
 
+def _migrate_track_end_trim(engine):  # #5682
+    inspector = inspect(engine)
+    if "tracks" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("tracks")}
+    if "end_trim_seconds" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE tracks ADD COLUMN end_trim_seconds FLOAT"))
+
+
 def _migrate_book_loudness(engine):  # #4222
     inspector = inspect(engine)
     if "books" not in inspector.get_table_names():
@@ -446,6 +457,7 @@ def init_db(database_url: str | None = None):
     _migrate_create_dj_mix_specs(_engine)
     _migrate_track_content_kind(_engine)  # #ride0928 (dj_pair_notes comes from create_all)
     _migrate_track_loudness(_engine)  # #3255
+    _migrate_track_end_trim(_engine)  # #5682
     _migrate_book_loudness(_engine)  # #4222
     _migrate_track_energy(_engine)  # #2806 (dj_track_tags comes from create_all)
     _migrate_track_tempo_key(_engine)  # #1002

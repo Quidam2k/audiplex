@@ -63,6 +63,7 @@ FAVORITE_TYPES = {"track", "album", "artist", "genre", "book", "to_read"}
 # and existing callers import it from this module.
 EARLY_SKIP_THRESHOLD_SECONDS = taste.EARLY_SKIP_THRESHOLD_SECONDS
 from audiplex.utils.cover_art import get_album_cover_path
+from audiplex.trimmed import trimmed_path  # #5682
 from audiplex.utils.streaming import EXT_MIME, serve_file
 
 router = APIRouter(prefix="/api/music", tags=["music"])
@@ -424,7 +425,8 @@ def stream_track(track_id: int, request: Request, db: Session = Depends(get_db),
     if not track or not os.path.exists(track.file_path):
         raise HTTPException(status_code=404, detail="Track not found")
     ext = os.path.splitext(track.file_path)[1].lower()
-    return serve_file(track.file_path, EXT_MIME.get(ext, "application/octet-stream"), request)
+    path = trimmed_path(track.id, track.file_path, track.end_trim_seconds)  # #5682
+    return serve_file(path, EXT_MIME.get(ext, "application/octet-stream"), request)
 
 
 @router.get("/covers/album/{album_id}")
