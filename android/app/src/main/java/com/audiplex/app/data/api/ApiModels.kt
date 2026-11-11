@@ -251,6 +251,10 @@ data class PlaylistDetail(
     val tracks: List<TrackSchema> = emptyList()
 )
 
+/** #5867: the same tracks, ordered so versions of one song stay apart. Request and response share the shape. */
+@JsonClass(generateAdapter = true)
+data class ShuffleOrder(@Json(name = "track_ids") val trackIds: List<Int>)
+
 @JsonClass(generateAdapter = true)
 data class PlayStatEvent(
     @Json(name = "track_id") val trackId: Int,

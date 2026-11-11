@@ -138,6 +138,9 @@ interface AudiplexApi {
         @Body body: PlaylistAppend
     ): PlaylistDetail
 
+    @POST("api/music/shuffle-order")  // #5867 same tracks, versions of one song kept apart
+    suspend fun shuffleOrder(@Body body: ShuffleOrder): ShuffleOrder
+
     @POST("api/music/stats")
     suspend fun postPlayStat(@Body event: PlayStatEvent): PlayStatSchema
 

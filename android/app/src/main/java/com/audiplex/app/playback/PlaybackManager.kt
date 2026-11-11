@@ -37,6 +37,7 @@ import com.audiplex.app.data.api.MusicLevelsResponse
 import com.audiplex.app.data.api.PlayStatEvent
 import com.audiplex.app.data.api.PlaylistDetail
 import com.audiplex.app.data.api.ProgressUpdate
+import com.audiplex.app.data.api.ShuffleOrder  // #5867
 import com.audiplex.app.data.api.TrackSchema
 import com.audiplex.app.data.db.PlaybackPositionDao
 import com.audiplex.app.data.db.PlaybackPositionEntity
@@ -1675,6 +1676,34 @@ class PlaybackManager @Inject constructor(
         startPositionMs: Long = 0L,
         origin: String = ORIGIN_MANUAL,  // #3601
         play: Boolean = true  // #3601: false = load paused (restore after a kill)
+    ) {
+        // #5867: his own shuffle asks the server for an order that keeps versions of one song apart.
+        // Any failure plays the plain ExoPlayer shuffle, as before. A DJ set has its own pool.
+        if (shuffle && play && startIndex == 0 && origin == ORIGIN_MANUAL && items.size > 2) {
+            scope.launch {
+                val byId = items.associateBy { it.track.id }
+                val ordered = runCatching { apiHolder.api?.shuffleOrder(ShuffleOrder(items.map { it.track.id })) }
+                    .getOrNull()?.trackIds?.mapNotNull { byId[it] }
+                    ?.takeIf { it.size == items.size }  // a queue with a repeated track keeps ExoPlayer's shuffle
+                if (ordered != null) startTrackList(ordered, baseUrl, albumId, playlistId, title, 0, false, startPositionMs, origin, play)
+                else startTrackList(items, baseUrl, albumId, playlistId, title, startIndex, shuffle, startPositionMs, origin, play)
+            }
+            return
+        }
+        startTrackList(items, baseUrl, albumId, playlistId, title, startIndex, shuffle, startPositionMs, origin, play)
+    }
+
+    private fun startTrackList(  // #5867 (was playTrackList)
+        items: List<MusicQueueItem>,
+        baseUrl: String,
+        albumId: Int?,
+        playlistId: Int?,
+        title: String,
+        startIndex: Int,
+        shuffle: Boolean,
+        startPositionMs: Long,
+        origin: String,
+        play: Boolean
     ) {
         if (items.isEmpty()) return
         PlayerHooks.cancelStopAfterCurrent()  // #3505: a new queue is a fresh start
