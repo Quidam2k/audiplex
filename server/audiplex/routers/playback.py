@@ -289,7 +289,7 @@ def arm_scheduled_stop(body: dict, user: User = Depends(get_current_user)):
     elif mode == "fade":
         try:
             minutes = float(body.get("minutes"))
-            fade = float(body.get("fade_seconds", 120))
+            fade = float(body.get("fade_seconds", 5))  # #5876: matches the app's sleep fade
         except (TypeError, ValueError):
             raise HTTPException(status_code=422, detail="fade needs numeric minutes (and fade_seconds)")
         result = stop_controller.arm_fade(bus, now, minutes, fade)

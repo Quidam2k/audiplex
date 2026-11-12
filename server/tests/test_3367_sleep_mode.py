@@ -64,7 +64,7 @@ def test_no_arg_crossfades_current_book_into_default_bed(wire):
     assert [c for c, _ in sent] == ["bed_play", "sleep_timer"]
     bed, timer = sent[0][1], sent[1][1]
     assert bed["url"] == "/api/stream/41" and bed["volume"] == 0
-    assert timer == {"minutes": 30, "fade_seconds": 120, "bed_fade_to": 0.5}
+    assert timer == {"minutes": 30, "fade_seconds": 5, "bed_fade_to": 0.5}  # #5876
 
 
 def test_no_arg_never_restarts_or_requeues_the_book(wire):

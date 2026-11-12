@@ -1216,8 +1216,14 @@ async def dj_bed_volume(level: int) -> str:
     return await _acked(data, f"sleep-bed volume {level}%")  # #3505
 
 
+# #5876: Todd's order is one short eased fade for every sleep entry point. Mirrors
+# SleepFade.DEFAULT_FADE_SECONDS in the Android app; the MCP always sends fade_seconds,
+# so a 120 here overrode the app's 5 s on every voice-started sleep.
+SLEEP_FADE_SECONDS = 5
+
+
 @mcp.tool()
-async def dj_sleep_timer(minutes: float, fade_seconds: int = 120, bed_fade_to: int | None = None) -> str:
+async def dj_sleep_timer(minutes: float, fade_seconds: int = SLEEP_FADE_SECONDS, bed_fade_to: int | None = None) -> str:
     """Fade out and pause the MAIN player (music, audiobook or stream: whatever
     dj_play_now/dj_play_book/dj_play_stream started) after `minutes`, ramping
     its volume to 0 over the last `fade_seconds`. The sleep-bed loop
@@ -1439,13 +1445,13 @@ async def dj_sleep_start(
     fade_track_ids: list[int] | None = None,
     fade_stream_url: str | None = None,
     fade_after_minutes: float = 30,
-    fade_seconds: int = 120,
+    fade_seconds: int = SLEEP_FADE_SECONDS,  # #5876
     bed_volume: int = 50,
     bed_title: str | None = None,
     bed_mode: str = "crossfade",
 ) -> str:
     """Sleep mode, in one call. With NO arguments while a book is playing:
-    the book keeps playing untouched for 30 min, then fades out over 2 min
+    the book keeps playing untouched for 30 min, then fades out over 5 s
     while Todd's brown-noise bed fades in on the same device (phone or PC), and the bed loops
     on all night. That is what "Jarvis, sleep mode" means.
 
