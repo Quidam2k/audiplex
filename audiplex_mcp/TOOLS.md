@@ -21,14 +21,13 @@ while the user is talking or typing (the host app's `speech_state.json`). They l
 - `dj_folder` — one folder: shuffle it (via dj_mix), queue it, or save it as a playlist.
 - `dj_play_stream` — play an external HTTP stream (e.g. Radio Free Luna).
 - `dj_skip` / `dj_previous` — next / previous item in the queue. Pass `dj_skip(todd_asked=True)` only when the user asked for the skip: those count against the song when the DJ learns from the ride (#4057).
-- `dj_pause` / `dj_resume` — pause / resume (resume is talk-guarded).
+- `dj_pause` / `dj_resume` — pause / resume MUSIC (resume is talk-guarded). `dj_resume` checks the phone first: paused music → unpaused; an audiobook loaded → REFUSED, nothing changes, unless the user asked for his book (`book_ok=True`); nothing loaded → his last music queue back at the song and spot he left it, PAUSED (`play=True` restores and starts; phones <1.0.49 can't restore paused). To START music use `dj_pool_set(<lane>, start_now=True)`, never `dj_resume`. (#5892, #3601)
 - `dj_seek` — jump to a position in the current track.
 - `dj_volume` — app player volume 0-100, only when the user asks (todd_quote required, #3504).
 - `dj_reorder` — move a queued item by index (indices from dj_now_playing).
 - `dj_upcoming` — the upcoming queue in order, with each track's `#index` and mix source.
 - `dj_remove` / `dj_insert` / `dj_swap` — edit what's still to come by `#index` (from dj_upcoming) or track id; one replace_upcoming, the current song is never touched.
 - `dj_ban` / `dj_unban` / `dj_bans` — never pick a track again (every copy of the recording) in mixes and the pool; reversible; lists who banned what and why.
-- `dj_resume` — put the user's last music queue back on the phone at the song and spot he left it, PAUSED (he presses play). For "put my music back" after the app was closed. Old phones (<1.0.49) say they can't; `play=True` restores and starts. (#3601)
 - `dj_star` — when the user says a rating out loud ("five stars", "four and a half"), set it: his own star field in the app, with his words + who heard it. Halves are kept (app 1.0.51+ shows them; older builds show the star below). (#6117) Replaces the old `five-star-verbal` tags; `{"kind": "rated", "query": "4"}` is a mix/pool source of his 4+ star tracks. (#3576)
 - `dj_love` — **whenever the user says he loves a song** (chat, voice, ride, dead drop): "I love this", "one of my favorites", "this goes on anything about hope". With a number he SAID, it's `dj_star`; with none it tags `loved` + keeps his words, and sets NO stars (never invent a 5). Always pass his words; `private=True` when the reason is personal (stars count, words never go on air). `{"kind": "tag", "query": "loved"}` is a pool source. (#7230)
 - `dj_loves` — every song he's said he loves, one list: his stars with his words, then loved songs with no number. Read before building a set. `dj_break_brief` shows these for Prev/Now/Next as colour, never a quote. (#7230)

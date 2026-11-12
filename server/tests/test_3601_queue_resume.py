@@ -95,6 +95,8 @@ def _wire(monkeypatch, ack_status="ok"):
     sent = []
 
     async def fake_get(path):
+        if path == "/api/playback/state":  # #5892: dj_resume looks first; nothing loaded here
+            return {"playing": False, "track": None, "book": None}
         assert path == "/api/playback/resume"
         return SNAP
 

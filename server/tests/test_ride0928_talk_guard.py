@@ -15,6 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from audiplex_mcp import server as mcp_server  # noqa: E402
+from audiplex_mcp import dj_toolkit  # noqa: E402  #5892
 
 
 @pytest.fixture
@@ -85,14 +86,17 @@ def test_default_path_is_pantheon(monkeypatch):
     ("dj_queue_by", ("x", "favorites")),
 ])
 def test_start_tools_hold_while_talking(wire, tool, args, monkeypatch):
-    sent, _, speech = wire
+    sent, st, speech = wire
     _talk(speech, talk_active=True)
+    if tool == "dj_resume":  # #5892: it now looks first, and only paused music reaches the guard
+        st["state"] = {**st["state"], "playing": False}
 
     async def fake_resolve(kind, query, recursive=True):
         return "favorites", [{"id": 1}]
 
     monkeypatch.setattr(mcp_server, "_resolve_source", fake_resolve)
-    out = asyncio.run(getattr(mcp_server, tool)(*args))
+    fn = getattr(mcp_server, tool, None) or getattr(dj_toolkit, tool)  # #5892: dj_resume lives in the toolkit
+    out = asyncio.run(fn(*args))
     assert out.startswith("RESULT sent=0 held=todd_talking"), out
     assert sent == []
 
@@ -150,9 +154,10 @@ def test_result_names_skipped_titles_and_phone_ack(wire):
 
 
 def test_talk_cleared_then_start_goes_through(wire):
-    sent, _, speech = wire
+    sent, st, speech = wire
+    st["state"] = {**st["state"], "playing": False}  # #5892: paused music, so dj_resume reaches the guard
     _talk(speech, stt_active=True)
-    assert "held=todd_talking" in asyncio.run(mcp_server.dj_resume())
+    assert "held=todd_talking" in asyncio.run(dj_toolkit.dj_resume())
     _talk(speech)
-    assert asyncio.run(mcp_server.dj_resume()).startswith("RESULT sent=0 held=no")
+    assert asyncio.run(dj_toolkit.dj_resume()).startswith("RESULT sent=0 held=no")
     assert sent == [("resume", {})]

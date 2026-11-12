@@ -15,6 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from audiplex_mcp import server as mcp_server  # noqa: E402
+from audiplex_mcp import dj_toolkit  # noqa: E402  #5892
 
 CONTRACT = ("Nothing was sent: Todd is in quiet time/DND ({why}). If he asked for "
             "this, offer to end quiet time, then retry. Do not tell him it is playing.")
@@ -105,14 +106,17 @@ def test_gated_set_covers_announce_and_bed():
     ("dj_transfer", ("phone",)),
 ])
 def test_tools_refuse_and_send_nothing(wire, tmp_path, monkeypatch, tool, args):
-    sent, _ = wire
+    sent, st = wire
+    if tool == "dj_resume":  # #5892: it now looks first, and only paused music reaches the gate
+        st["state"] = {**st["state"], "playing": False}
     _mute(tmp_path, monkeypatch, why="device abc muted via phone DND")
 
     async def no_render(text, title):
         raise AssertionError("no TTS render under mute")
 
     monkeypatch.setattr(mcp_server, "_render_clip", no_render)
-    out = asyncio.run(getattr(mcp_server, tool)(*args))
+    fn = getattr(mcp_server, tool, None) or getattr(dj_toolkit, tool)  # #5892: dj_resume lives in the toolkit
+    out = asyncio.run(fn(*args))
     assert "REFUSED (muted): Nothing was sent" in out, out
     assert "Do not tell him it is playing." in out
     assert sent == []

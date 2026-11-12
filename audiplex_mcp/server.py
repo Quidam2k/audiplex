@@ -991,18 +991,17 @@ async def dj_reorder(from_index: int, to_index: int) -> str:
 
 @mcp.tool()
 async def dj_pause() -> str:
-    """Pause playback on the Audiplex device."""
+    """Pause playback on the Audiplex device.
+
+    #5892: the way back is dj_resume (music only; a book needs book_ok=True).
+    To START music, use dj_pool_set(<lane>, start_now=True): it pauses and bookmarks a book first."""
     data = await _enqueue("pause", {})
     return await _acked(data, "pause")  # #3505
 
 
-@mcp.tool()
-async def dj_resume() -> str:
-    """Resume playback on the Audiplex device."""
-    data = await _enqueue("resume", {})
-    if isinstance(data, str):
-        return _held_result(data)  # #ride0928
-    return await _result(data, 0) + f"Queued resume (command #{data.get('id')}, {data.get('pending')} pending)."
+# #5892: dj_resume lives in dj_toolkit. A second one here shadowed it: FastMCP keeps the FIRST
+# tool registered under a name, so the #3601 restore was never reachable and this raw
+# "resume" unpaused Todd's audiobook when a DJ meant to start music (failure 1133).
 
 
 @mcp.tool()
@@ -3259,6 +3258,13 @@ async def dj_now_playing() -> str:
     device = device_resp.json() if device_resp.status_code == 200 else {}
     device_line = _describe_device(device) if device else ""
     track = s.get("track")
+    book_now = dj_toolkit.book_line(s)  # #5892
+    if book_now:  # #5892: a book wins, same as dj_resume (the phone only names one while it is loaded)
+        state = "Playing" if s.get("playing") else "Paused"
+        return (f"{state} BOOK (not music): {book_now}.\n"
+                "dj_resume refuses a book unless Todd asked for it (book_ok=True). "
+                "To start music, use dj_pool_set(<lane>, start_now=True): it pauses and bookmarks the book.\n"
+                f"{device_line}").rstrip()
     if not track:
         why = (
             "The player is connected and idle — nothing is loaded."

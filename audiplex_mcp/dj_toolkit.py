@@ -488,16 +488,60 @@ async def todd_lines(tracks) -> list[str]:
     return ([""] + out) if out else []
 
 
-async def dj_resume(play: bool = False) -> str:
-    """Put Todd's last music queue back on the phone, at the song and spot he
-    left it (#3601). The queue lives only in the phone's memory, so after a
-    pause plus the app being closed it is gone from the app; the server keeps
-    a copy. Use when he says "put my music back" / "where was I".
+def book_line(state: dict) -> str:
+    """#5892: the audiobook loaded on the phone, named with its spot, or '' when there is none."""
+    book = state.get("book") or {}
+    if not book or (book.get("id") is None and not book.get("title")):
+        return ""
+    pos = int((state.get("position_ms") or 0) // 1000)
+    ch = book.get("chapter_index")
+    spot = (f"ch {ch + 1}, " if type(ch) is int else "") + f"{pos // 3600}:{pos // 60 % 60:02d}:{pos % 60:02d}"
+    return f"{book.get('title') or 'book ' + str(book.get('id'))} at {spot}"
 
-    play=False (default): restore PAUSED. Nothing starts; he sees it in the
-        app and hits play. Phones older than 1.0.49 can't do a silent restore
-        and will say so; then offer play=True.
-    play=True: restore and start playing now (talk-guarded like any start)."""
+
+async def dj_resume(play: bool = False, book_ok: bool = False) -> str:
+    """Resume what is paused on the phone, MUSIC ONLY unless Todd asked for his book (#5892).
+
+    To START music (a ride, "play something"), do NOT use this: use
+    dj_pool_set(<lane>, start_now=True), which pauses and bookmarks a book first.
+
+    Looks at the phone first and says what it acted on:
+    - paused music or radio loaded: unpauses it (talk-guarded like any start).
+    - an audiobook loaded: REFUSES and changes nothing, naming the book. If Todd
+      asked for his book ("resume my book"), call again with book_ok=True.
+    - nothing loaded: puts his last music queue back at the song and spot he left
+      it (#3601). play=False (default) restores PAUSED, so he presses play; phones
+      older than 1.0.49 can't and say so, then offer play=True, which restores
+      and starts now."""
+    try:
+        state = await _h("_get")("/api/playback/state")
+    except PermissionError as e:
+        return str(e)
+    except Exception as e:
+        return await _say_http_error(e)
+    book = book_line(state)
+    if book and not book_ok:
+        return ("NOT resumed: the phone has his audiobook loaded, not music: "
+                f"{book}. Nothing changed. For music use dj_pool_set(<lane>, start_now=True), "
+                "which pauses and bookmarks the book. If Todd asked for his book, "
+                "dj_resume(book_ok=True) resumes it.")
+    if book or state.get("track"):
+        what = book or " - ".join(x for x in ((state.get("track") or {}).get("artist"),
+                                              (state.get("track") or {}).get("title")) if x)
+        if state.get("playing"):
+            return f"Already playing: {what}. Nothing changed."
+        data = await _h("_enqueue")("resume", {})
+        if isinstance(data, str):
+            return _h("_held_result")(data)  # #ride0928
+        return await _h("_result")(data, 0) + f"Resumed {'the BOOK ' if book else ''}{what}."
+    if state.get("playing"):  # #5892 (Codex): something plays that the phone doesn't name; never replace it
+        return ("NOT restored: the phone is playing something it doesn't name (could be his book on an "
+                "older build). Nothing changed. Check dj_now_playing first.")
+    return await _restore_queue(play)
+
+
+async def _restore_queue(play: bool) -> str:
+    """#3601: the saved music queue back on the phone (see dj_resume)."""
     try:
         snap = await _h("_get")("/api/playback/resume")
     except PermissionError as e:
