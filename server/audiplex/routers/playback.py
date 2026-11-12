@@ -243,6 +243,21 @@ def get_resume(
     return {**snap, "age_seconds": round(time.time() - float(snap.get("at") or 0), 1)}
 
 
+def _with_spoken_titles(state: dict) -> dict:
+    """#5649: track and queue items carry spoken_title, the song name a DJ line should say."""
+    from audiplex.tag_repair import spoken_title
+
+    def tag(item):
+        if not isinstance(item, dict) or not item.get("title"):
+            return item
+        return {**item, "spoken_title": spoken_title(item["title"], item.get("artist"))}
+
+    out = {**state, "track": tag(state.get("track"))}
+    if isinstance(state.get("queue"), list):
+        out["queue"] = [tag(q) for q in state["queue"]]
+    return out
+
+
 @router.get("/state")
 def get_state(
     device_id: str | None = Query(None),
@@ -255,7 +270,7 @@ def get_state(
     stop = stop_controller.public(time.time(), bus)
     state = bus.get_state(device_id)
     if state is not None:
-        return {**state, "stop": stop}
+        return {**_with_spoken_titles(state), "stop": stop}  # #5649
     return {
         "playing": False,
         "track": None,

@@ -460,3 +460,36 @@ def propose(
         confidence=UNRESOLVED,
         evidence="no artist-dash-title in the title and no channel tag at all",
     )
+
+
+# ----- #5649: a song name fit to say out loud -----
+
+# A bracket that names the video, not the song: "(Official Concept Video)".
+# Says "official", or ENDS in video/visualizer/lyrics: "(Video Killed the Radio Star)" is a song and stays.
+_VIDEO_BRACKET = re.compile(
+    r"\s*[\(\[](?:[^)\]]*\bofficial\b[^)\]]*|[^)\]]*\b(?:video|visualizer|lyrics?)\s*)[\)\]]", re.IGNORECASE)
+# The same thing unbracketed at the end: "- ... Official Concept Video", "Official Audio".
+_VIDEO_TAIL = re.compile(r"[\s\-–—:.…]*\bofficial\b[^|()\[\]]*\b(?:video|audio|visualizer|lyrics?)\s*$", re.IGNORECASE)
+_QUOTED = re.compile(r"^[\"“](.+)[\"”]$")
+
+
+def spoken_title(title: str | None, artist: str | None = None) -> str:
+    """The song name a DJ line should say (#5649). Clean titles pass through.
+
+    "Playground | Arcane League of Legends and K/DA - ... Official Concept Video"
+    -> "Playground". Version markers survive (strip_junk keeps them). Never
+    returns "" for a non-empty title: if cleaning leaves nothing, the raw title."""
+    raw = (title or "").strip()
+    if not raw:
+        return ""
+    out = _VIDEO_BRACKET.sub("", strip_junk(raw)).strip()
+    if " | " in out:  # the leading segment is the title, unless a later one is the quoted song
+        parts = [p.strip() for p in out.split(" | ")]
+        quoted = [m.group(1) for m in (_QUOTED.match(p) for p in parts[1:]) if m]
+        out = quoted[0] if quoted else parts[0]
+    out = _VIDEO_TAIL.sub("", out).strip()
+    split = split_artist_title(out)
+    if split and artist and _comparable(split[0]) == _comparable(artist):
+        out = split[1]
+    out = out.strip(" -–—|:").strip()
+    return out or raw

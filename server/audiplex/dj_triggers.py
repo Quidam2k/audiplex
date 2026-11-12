@@ -534,6 +534,11 @@ def on_state(state: dict, bus, pool=None, now: Optional[float] = None) -> dict:
     now = time.time() if now is None else now
     ps = pool.state
     if ps.get("trigger_last_track") == cur:
+        armed = [c for c in _all_cues(ps) if c.get("pause_state") == "armed"]  # #5649
+        if cur < 0 and armed:  # #5649 a later report on the clip may carry its length
+            _check_pause_watch(state, bus, pool, now)  # #5649
+            if any(c.get("pause_state") != "armed" for c in armed):  # #5649 write only on a change
+                pool._persist()  # #5649
         return result
     ps["trigger_last_track"] = cur
     result["boundary"] = True
@@ -633,8 +638,10 @@ def _check_pause_watch(state: dict, bus, pool, now: float) -> None:
                 pos_ms = state.get("position_ms") or 0
                 if dur_ms > 0:
                     remaining = (dur_ms - pos_ms) / 1000.0
-                else:
-                    remaining = float(c.get("clip_duration") or 0) - pos_ms / 1000.0
+                elif c.get("clip_duration"):
+                    remaining = float(c["clip_duration"]) - pos_ms / 1000.0
+                else:  # #5649 no length known yet: wait for a report that has one (late backstop still holds)
+                    continue
                 c["pause_state"] = "pausing"
                 _schedule(max(0.0, remaining - PAUSE_LEAD_S), lambda c=c: _send_pause(c, bus, pool))
         elif cur > 0 and cur != (c.get("trigger") or {}).get("track_id"):
