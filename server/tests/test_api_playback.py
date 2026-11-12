@@ -162,6 +162,20 @@ class TestPersistedExits:
         assert entries[0]["message"] == "SIGNALED"
         assert entries[0]["detail"]["trace"] == "at Foo.bar()"
 
+    def test_state_at_death_keys_round_trip(self, client):
+        """#5969: the phone's state-at-death fields reach the persisted record verbatim."""
+        detail = {
+            "reason": "SIGNALED", "status": "9", "signal": "SIGKILL", "importance": "125",
+            "importance_name": "FOREGROUND_SERVICE", "process": "com.audiplex.app",
+            "pss_kb": "204800", "rss_kb": "300000",
+            "state_at_death": "t=1794470000 p=bed b=playing bat=54 chg=0 idle=1 ps=0 bkt=10 thm=0",
+            "state_age_s": "72", "now_ignoring_battery_opt": "false", "now_standby_bucket": "10",
+            "hint": "inference: the OS force-killed a foreground service while playing bed",
+        }
+        client.post("/api/playback/client-log",
+                    json={"event": "process_exit", "message": "SIGNALED", "detail": detail})
+        assert client.get("/api/playback/client-exits").json()[0]["detail"] == detail
+
     def test_persisted_exits_survive_a_bus_reset(self, client):
         client.post(
             "/api/playback/client-log",

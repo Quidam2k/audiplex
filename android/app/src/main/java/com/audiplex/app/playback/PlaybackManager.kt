@@ -51,6 +51,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException  // #3601
 import kotlinx.coroutines.flow.first  // #3601
+import kotlinx.coroutines.flow.combine  // #5969
+import kotlinx.coroutines.flow.distinctUntilChanged  // #5969
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -687,6 +689,17 @@ class PlaybackManager @Inject constructor(
 
     private val _positionMs = MutableStateFlow(0L)
     val positionMs: StateFlow<Long> = _positionMs
+
+    init {
+        // #5969: keep "what we were doing" in the process state summary, so an overnight kill
+        // reads back as e.g. "paused_book, bed playing" on the next start. Declared after the
+        // flows it reads: Kotlin runs init blocks in declaration order.
+        scope.launch {
+            combine(_isPlaying, _playerKind, _bedState) { playing, kind, bed -> playLabel(playing, kind, bed) to bed.name }
+                .distinctUntilChanged()
+                .collect { (play, bed) -> clientLog.notePlayback(play, bed) }
+        }
+    }
 
     private val _durationMs = MutableStateFlow(0L)
     val durationMs: StateFlow<Long> = _durationMs

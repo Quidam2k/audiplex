@@ -3,7 +3,10 @@ package com.audiplex.app.playback
 import android.app.ActivityManager
 import android.app.ApplicationExitInfo
 import android.content.Context
+import android.app.usage.UsageStatsManager
+import android.os.BatteryManager
 import android.os.Build
+import android.os.PowerManager
 import android.util.Log
 import com.audiplex.app.data.ApiServiceHolder
 import com.audiplex.app.data.SettingsStore
@@ -15,6 +18,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -40,6 +44,11 @@ internal data class ExitRecord(
      * was built.
      */
     val traceStatus: String = TRACE_NONE,
+    /**
+     * #5969: what the phone was doing (state_at_death, pss_kb, the battery settings at report
+     * time, and the inference hint). Never overrides a core key above.
+     */
+    val extra: Map<String, String> = emptyMap(),
 ) {
     fun detail(): Map<String, String> = buildMap {
         put("reason", reason)
@@ -53,6 +62,7 @@ internal data class ExitRecord(
         // of identical "SIGNALED" lines until this was decoded (#3021).
         signalName(status)?.let { put("signal", it) }
         if (trace.isNotBlank()) put("trace", trace)
+        for ((k, v) in extra) if (k !in this) put(k, v)
     }
 }
 
@@ -216,20 +226,22 @@ class ClientLogReporter @Inject constructor(
             runCatching {
                 val since = settingsStore.lastExitReportedAt.first()
                 val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                val now = phoneSettingsNow(am)  // #5969: was Android allowed to kill us?
                 val exits = am.getHistoricalProcessExitReasons(context.packageName, 0, MAX_EXITS)
                     .map { info ->
                         val (trace, traceStatus) = readTrace(info)
+                        val reason = reasonName(info.reason)
+                        val description = resolveDescription(info.description, reason)
                         ExitRecord(
                             timestamp = info.timestamp,
-                            reason = reasonName(info.reason),
-                            description = resolveDescription(
-                                info.description, reasonName(info.reason)
-                            ),
+                            reason = reason,
+                            description = description,
                             status = info.status,
                             importance = info.importance,
                             unexpected = isUnexpected(info.reason),
                             trace = trace,
                             traceStatus = traceStatus,
+                            extra = deathExtra(info, reason, description) + now,
                         )
                     }
                 if (exits.none { it.timestamp > since }) return@runCatching
@@ -247,6 +259,102 @@ class ClientLogReporter @Inject constructor(
             }
         }
     }
+
+    // ---- #5969: state at death -------------------------------------------------------------
+
+    @Volatile private var playState = "idle"
+    @Volatile private var bedState = "off"
+    private var lastWritten: PhoneSnapshot? = null
+    private val summaryLoopStarted = AtomicBoolean(false)
+
+    /** #5969: PlaybackManager calls this on every play/bed change; the write happens off the main thread. */
+    fun notePlayback(play: String, bed: String) {
+        playState = play
+        bedState = bed.lowercase()
+        if (Build.VERSION.SDK_INT >= STATE_SUMMARY_MIN_SDK) scope.launch { recordState() }
+    }
+
+    /**
+     * #5969: refresh the snapshot once a minute for the life of the process. Cheap on battery:
+     * delay() holds no wakelock, so a sleeping phone simply ticks less, and the binder write
+     * only happens when the state changed or the 5-min heartbeat (which keeps state_age honest) is due.
+     */
+    fun startStateSummary() {
+        if (Build.VERSION.SDK_INT < STATE_SUMMARY_MIN_SDK || !summaryLoopStarted.compareAndSet(false, true)) return
+        scope.launch {
+            while (true) {
+                recordState()
+                delay(SNAPSHOT_TICK_MS)
+            }
+        }
+    }
+
+    @Synchronized
+    private fun recordState() {
+        val snap = runCatching { samplePhone(System.currentTimeMillis() / 1000) }.getOrNull() ?: return
+        val last = lastWritten
+        if (last != null && snap.sameStateAs(last) && snap.atEpochS - last.atEpochS < SNAPSHOT_HEARTBEAT_S) return
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return
+        if (writeStateSummary(Build.VERSION.SDK_INT, snap.encode()) { am.setProcessStateSummary(it) }) lastWritten = snap
+    }
+
+    private fun samplePhone(nowS: Long): PhoneSnapshot {
+        val bm = context.getSystemService(BatteryManager::class.java)
+        val pm = context.getSystemService(PowerManager::class.java)
+        val pct = runCatching { bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) }.getOrNull()
+        return PhoneSnapshot(
+            atEpochS = nowS,
+            play = playState,
+            bed = bedState,
+            batteryPct = pct?.takeIf { it in 0..100 } ?: -1,  // Int.MIN_VALUE when unsupported
+            charging = runCatching { bm?.isCharging }.getOrNull(),
+            deviceIdle = runCatching { pm?.isDeviceIdleMode }.getOrNull(),
+            powerSave = runCatching { pm?.isPowerSaveMode }.getOrNull(),
+            standbyBucket = standbyBucket(),
+            thermal = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                runCatching { pm?.currentThermalStatus }.getOrNull() ?: -1
+            } else -1,
+        )
+    }
+
+    private fun standbyBucket(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            runCatching { context.getSystemService(UsageStatsManager::class.java)?.appStandbyBucket }.getOrNull() ?: -1
+        } else -1
+
+    /** #5969: from the exit record itself, plus the saved state and the labelled guess. */
+    private fun deathExtra(info: ApplicationExitInfo, reason: String, description: String): Map<String, String> =
+        runCatching {
+            val state = decodeSnapshot(runCatching { info.processStateSummary }.getOrNull())
+            val pssKb = info.pss.takeIf { it > 0 }
+            buildMap {
+                put("importance_name", importanceName(info.importance))
+                info.processName?.let { put("process", it) }
+                pssKb?.let { put("pss_kb", it.toString()) }
+                info.rss.takeIf { it > 0 }?.let { put("rss_kb", it.toString()) }
+                if (state != null) {
+                    put("state_at_death", state.entries.filter { it.key != "v" }.joinToString(" ") { "${it.key}=${it.value}" })
+                    state["t"]?.toLongOrNull()?.let { put("state_age_s", (info.timestamp / 1000 - it).toString()) }
+                } else {
+                    put("state_at_death", "none")
+                }
+                put("hint", killHint(reason, info.status, info.importance, description, state, pssKb))
+            }
+        }.getOrDefault(emptyMap())
+
+    /** #5969: the settings that decide whether Android may kill us, read at report time ("now_"). */
+    private fun phoneSettingsNow(am: ActivityManager): Map<String, String> = runCatching {
+        val pm = context.getSystemService(PowerManager::class.java)
+        buildMap {
+            runCatching { pm?.isIgnoringBatteryOptimizations(context.packageName) }.getOrNull()
+                ?.let { put("now_ignoring_battery_opt", it.toString()) }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                runCatching { am.isBackgroundRestricted }.getOrNull()?.let { put("now_background_restricted", it.toString()) }
+            }
+            standbyBucket().takeIf { it >= 0 }?.let { put("now_standby_bucket", it.toString()) }
+            runCatching { pm?.isPowerSaveMode }.getOrNull()?.let { put("now_power_save", it.toString()) }
+        }
+    }.getOrDefault(emptyMap())
 
     /**
      * The stack that was executing when the process died.
@@ -305,5 +413,6 @@ class ClientLogReporter @Inject constructor(
         // so a never-configured install doesn't hold a coroutine forever.
         private const val API_WAIT_ATTEMPTS = 60
         private const val API_WAIT_INTERVAL_MS = 2000L
+        private const val SNAPSHOT_TICK_MS = 60_000L  // #5969
     }
 }

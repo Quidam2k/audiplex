@@ -49,6 +49,8 @@ class AudiplexApp : Application(), Configuration.Provider, SingletonImageLoader.
         // might itself die. This is the only account of a silent death that
         // reaches the server (#2961) — nothing else survives the process.
         clientLogReporter.reportProcessExits()
+        // #5969: keep a ≤128-byte "what we were doing" note that Android hands back if it kills us.
+        clientLogReporter.startStateSummary()
     }
 
     override val workManagerConfiguration: Configuration
