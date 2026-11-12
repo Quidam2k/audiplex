@@ -7,6 +7,7 @@ trimmed, and a tail with sound above the floor is reported, not cut.
     python scripts/set_end_trim.py --like "Belleville Rendez" [--apply]
     python scripts/set_end_trim.py --ids 344,1943 --apply
     python scripts/set_end_trim.py --ids 344 --clear --apply
+    python scripts/set_end_trim.py --ids 1716 --seconds 159.9 --apply   # #5893: a chosen cut point
 """
 from __future__ import annotations
 
@@ -46,10 +47,13 @@ def main() -> int:
     ap.add_argument("--ids", help="comma-separated track ids")
     ap.add_argument("--like", help="title substring")
     ap.add_argument("--clear", action="store_true", help="remove the trim instead")
+    ap.add_argument("--seconds", type=float, help="#5893: cut here instead of at detected silence (e.g. a movie scene after the song)")
     ap.add_argument("--apply", action="store_true")
     a = ap.parse_args()
     if not a.ids and not a.like:
         ap.error("give --ids or --like")
+    if a.seconds is not None and a.clear:
+        ap.error("--seconds and --clear do not mix")
 
     con = sqlite3.connect(a.db)
     cols = {r[1] for r in con.execute("pragma table_info(tracks)")}
@@ -72,11 +76,18 @@ def main() -> int:
             except (OSError, subprocess.SubprocessError) as e:
                 print(f"{tid} {title!r}: skipped ({e})")
                 continue
-            if start is None:
+            if a.seconds is not None:
+                if not 0 < a.seconds < total:
+                    print(f"{tid} {title!r}: --seconds {a.seconds} is outside the file (0-{total:.2f}s), left alone")
+                    continue
+                new = round(a.seconds, 3)
+                note = f"file {total:.2f}s, cut at {new}s by hand (drops {total - new:.2f}s)"
+            elif start is None:
                 print(f"{tid} {title!r}: no silence at the end ({total:.1f}s), left alone")
                 continue
-            new = round(min(start + PAD, total), 3)
-            note = f"file {total:.2f}s, silence from {start:.2f}s, cut at {new}s (drops {total - new:.2f}s)"
+            else:
+                new = round(min(start + PAD, total), 3)
+                note = f"file {total:.2f}s, silence from {start:.2f}s, cut at {new}s (drops {total - new:.2f}s)"
         print(f"{tid} {title!r}: {note}" + (" [applied]" if a.apply else " [dry run]"))
         if a.apply and new != current:
             con.execute("update tracks set end_trim_seconds=? where id=?", (new, tid))
