@@ -23,6 +23,7 @@ import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.ShuffleOrder.DefaultShuffleOrder  // #5881
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.audiplex.app.data.ApiServiceHolder
@@ -962,6 +963,10 @@ class PlaybackManager @Inject constructor(
             updateControllerMetadata(mediaMetadata)
         }
 
+        override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+            if (shuffleModeEnabled) applySpacedShuffle()  // #5881 any controller, not only our list shuffle
+        }
+
         /**
          * Also update metadata when a new media item transitions.
          */
@@ -1717,6 +1722,29 @@ class PlaybackManager @Inject constructor(
             return
         }
         startTrackList(items, baseUrl, albumId, playlistId, title, startIndex, shuffle, startPositionMs, origin, play)
+    }
+
+    /**
+     * #5881: shuffle switched on mid-play gets the server's spaced order, the current song
+     * first. A DJ set, a queue holding a clip or a stream, a failed request, a mismatched
+     * reply, or a queue that changed while we asked: all leave ExoPlayer's random order.
+     */
+    private var spacedShuffleJob: kotlinx.coroutines.Job? = null  // #5881
+
+    private fun applySpacedShuffle() {
+        if (_currentMusic.value?.origin != ORIGIN_MANUAL) return
+        val exo = PlayerHooks.exoPlayer ?: return
+        val mediaIds = (0 until exo.mediaItemCount).map { exo.getMediaItemAt(it).mediaId }
+        val ids = ShuffleRules.trackIds(mediaIds) ?: return
+        spacedShuffleJob?.cancel()  // #5881 a second toggle replaces the first request
+        spacedShuffleJob = scope.launch {
+            val reply = runCatching { apiHolder.api?.shuffleOrder(ShuffleOrder(ids)) }.getOrNull() ?: return@launch
+            val now = PlayerHooks.exoPlayer ?: return@launch
+            if (!now.shuffleModeEnabled || now.mediaItemCount != mediaIds.size ||
+                (0 until now.mediaItemCount).any { now.getMediaItemAt(it).mediaId != mediaIds[it] }) return@launch
+            val order = ShuffleRules.orderFromCurrent(ids, now.currentMediaItemIndex, reply.trackIds) ?: return@launch
+            runCatching { now.setShuffleOrder(DefaultShuffleOrder(order, System.nanoTime())) }  // #5881 never a crash
+        }
     }
 
     private fun startTrackList(  // #5867 (was playTrackList)
