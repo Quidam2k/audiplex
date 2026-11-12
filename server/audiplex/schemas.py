@@ -93,6 +93,7 @@ class TrackSchema(BaseModel):
     loudness_lufs: float | None = None  # #7109: EBU R128 integrated loudness for per-track gain
     true_peak_dbtp: float | None = None  # #5683
     end_trim_seconds: float | None = None  # #5682: the music ends here; the stream is already cut
+    file_size: int | None = None  # #12060: the phone's stream-cache key, so a swapped file is never served stale
     model_config = {"from_attributes": True}
 
     @computed_field  # #3504 #4222 #4118: the server's gain, same math as the phone
