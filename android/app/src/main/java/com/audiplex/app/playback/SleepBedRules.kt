@@ -128,7 +128,17 @@ object SleepBedRules {
      * every few days overnight (importance 125), and the bed's player dies with it, so the wish
      * outlives the process in SettingsStore. The level is not kept: the slider already is.
      */
-    data class BedWish(val url: String, val startedAtMs: Long)
+    data class BedWish(val url: String, val startedAtMs: Long, val bookId: Int? = null)  // #5975: the book that faded into it
+
+    /**
+     * #5975: the book to load PAUSED when he taps the sleep view, or null. Only when a kill emptied
+     * the player: a book still loaded just stays where it is, and anything he has started since wins.
+     */
+    fun bookToRestoreOnWake(wish: BedWish?, nothingLoaded: Boolean, playingOther: Boolean): Int? = when {
+        wish?.bookId == null -> null
+        !nothingLoaded || playingOther -> null
+        else -> wish.bookId
+    }
 
     /** #5428: a wish older than this is last night's, not tonight's. */
     const val BED_WISH_MAX_MS = 12 * 60 * 60_000L

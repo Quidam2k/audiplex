@@ -30,6 +30,7 @@ import com.audiplex.app.data.SettingsStore
 import com.audiplex.app.data.api.AlbumDetail
 import com.audiplex.app.data.api.AudiplexApi
 import com.audiplex.app.data.download.DownloadRepository
+import com.audiplex.app.data.download.PlaybackPositionRepository  // #5975
 import com.audiplex.app.data.download.MeditationStore
 import com.audiplex.app.data.api.BookDetail
 import com.audiplex.app.data.api.GainResponse
@@ -60,6 +61,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive  // #4222
 import kotlinx.coroutines.withContext  // #7109
+import kotlinx.coroutines.withTimeoutOrNull  // #5975
 import kotlin.math.pow  // #4222
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -145,7 +147,8 @@ class PlaybackManager @Inject constructor(
     private val recentlyPlayedDao: RecentlyPlayedDao,
     private val clientLog: ClientLogReporter,
     private val settingsStore: SettingsStore,
-    private val okHttpClient: OkHttpClient
+    private val okHttpClient: OkHttpClient,
+    private val positionRepository: PlaybackPositionRepository,  // #5975
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -1218,6 +1221,8 @@ class PlaybackManager @Inject constructor(
         scope.launch {
             try {
                 val api = apiHolder.api ?: return@launch
+                // #5975: the book he fell asleep to comes back on the wake tap; a queue must not take its place.
+                if (settingsStore.bedWish()?.bookId != null) return@launch
                 val snap = api.getResume()
                 val allowManual = settingsStore.restoreManualQueues.first()
                 val ids = idsToRestore(snap, allowManual)
@@ -1349,7 +1354,8 @@ class PlaybackManager @Inject constructor(
 
     private var localFilePath: String? = null
 
-    fun play(book: BookDetail, baseUrl: String, startSeconds: Double = 0.0) {
+    /** [play] false (#5975) loads the book PAUSED at [startSeconds]: no play(), so no audio focus and no playing state. */
+    fun play(book: BookDetail, baseUrl: String, startSeconds: Double = 0.0, play: Boolean = true) {
         if (_currentBook.value?.id != book.id) resetBookGain()  // #4222
         _currentMusic.value = null
         _currentStreamTitle.value = null
@@ -1363,6 +1369,7 @@ class PlaybackManager @Inject constructor(
             localFilePath = downloadRepository.getLocalPath(book.id)
             ensureController { ctrl ->
                 applyAudioAttributesFor(ctrl, PlayerKind.Audiobook) // #3099/#991: narrator pauses, not ducks
+                if (!play) ctrl.playWhenReady = false  // #5975: before prepare, so a reused controller cannot start
                 val startMs = (startSeconds * 1000).toLong().coerceAtLeast(0)
                 if (misc) {
                     val items = book.trackUrls.mapIndexed { idx, relUrl ->
@@ -1384,8 +1391,8 @@ class PlaybackManager @Inject constructor(
                 }
                 ctrl.prepare()
                 fetchBookGain(book.id)  // #4222
-                ctrl.play()
-                startProgressSync()
+                if (play) ctrl.play()
+                startProgressSync()  // also when paused: resume() does not start it
             }
         }
     }
@@ -1827,7 +1834,12 @@ class PlaybackManager @Inject constructor(
      * then falls back to the local brown-noise bed. While it plays,
      * PlaybackService keeps the process foreground (PlayerHooks.bedState).
      */
-    fun bedPlay(url: String, volume: Float, wishAtMs: Long = System.currentTimeMillis()) {  // #5428
+    fun bedPlay(
+        url: String,
+        volume: Float,
+        wishAtMs: Long = System.currentTimeMillis(),  // #5428
+        wishBookId: Int? = if (_playerKind.value == PlayerKind.Audiobook) _currentBook.value?.id else null,  // #5975
+    ) {
         bedRetryJob?.cancel()
         bedWanted = true
         bedUrl = url
@@ -1838,7 +1850,7 @@ class PlaybackManager @Inject constructor(
         // #5428: Android kills the process overnight; keep the wish so the service restart can bring the bed back.
         // A chime or the Hear-the-mix preview is not a bed he wants kept.
         if (!MixLevels.isChimeUrl(url) && !_mixPreview.value) {
-            scope.launch { settingsStore.setBedWish(SleepBedRules.BedWish(url, wishAtMs)) }
+            scope.launch { settingsStore.setBedWish(SleepBedRules.BedWish(url, wishAtMs, wishBookId)) }
         }
     }
 
@@ -1857,7 +1869,7 @@ class PlaybackManager @Inject constructor(
             if (why != null) {
                 if (why == "wish_expired" || why == "clock_went_back") settingsStore.setBedWish(null)
             } else {
-                bedPlay(wish.url, settingsStore.sleepBedVolume.first(), wish.startedAtMs)
+                bedPlay(wish.url, settingsStore.sleepBedVolume.first(), wish.startedAtMs, wish.bookId)  // #5975: keep the book
                 _sleepMode.value = true  // #5876: the view returns with the sound
             }
             // sendWhenReady, not report(): after a headless restart the API client does not exist yet.
@@ -2177,6 +2189,7 @@ class PlaybackManager @Inject constructor(
     fun wakeFromSleep() {
         _sleepMode.value = false  // the view goes at once; the sound finishes fading
         scope.launch {
+            val wish = settingsStore.bedWish()  // #5975: read before bedStop clears it
             val ramp = SleepBedRules.rampVolumes(bedCurrentVolume, 0f, WAKE_FADE_STEPS)
             if (bedWanted) {
                 for (v in ramp) {
@@ -2186,7 +2199,37 @@ class PlaybackManager @Inject constructor(
             }
             bedStop()
             cancelSleepTimer()
+            val bookId = SleepBedRules.bookToRestoreOnWake(wish, nothingLoaded = nothingLoaded(), playingOther = isPlaying.value)
+            if (bookId != null) restoreBookPaused(bookId)
         }
+    }
+
+    private fun nothingLoaded() = _playerKind.value == null && _currentBook.value == null &&
+        _currentMusic.value == null && (controller?.mediaItemCount ?: 0) == 0  // streams set only the kind
+
+    /**
+     * #5975: a kill overnight emptied the player; put his book back loaded and PAUSED at its saved
+     * spot, so one tap on the sleep view leaves him where he was. Fails quiet: the bed is already
+     * stopped and nothing plays.
+     */
+    private suspend fun restoreBookPaused(bookId: Int) {
+        val detail = mapOf("book_id" to bookId.toString())
+        // After a headless restart the API client can lag the activity by a moment.
+        val api = withTimeoutOrNull(10_000) { while (apiHolder.api == null) delay(250); apiHolder.api }
+        val book = api?.let { runCatching { it.getBook(bookId) }.getOrNull() }
+        if (book == null) {
+            clientLog.sendWhenReady("error", "book_restore_failed", "could not load the book after the kill", detail)
+            return
+        }
+        val start = runCatching { positionRepository.resolveStartPosition(bookId) }.getOrNull()
+        if (start == null || start.isFinished) {
+            clientLog.sendWhenReady("info", "book_restore_skipped", if (start == null) "no position" else "book finished", detail)
+            return
+        }
+        if (!nothingLoaded() || isPlaying.value) return  // he started something while it loaded: it wins
+        play(book, apiHolder.baseUrl, start.positionSeconds, play = false)
+        clientLog.sendWhenReady("info", "book_restored_paused", "book back, paused, after the kill",
+            detail + ("position_s" to start.positionSeconds.toInt().toString()))
     }
 
     /** Cancel a pending fade-out and restore the current kind's configured dial. */

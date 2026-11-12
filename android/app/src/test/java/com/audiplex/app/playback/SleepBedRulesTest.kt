@@ -122,6 +122,26 @@ class SleepBedRulesTest {
         assertEquals("no_wish", SleepBedRules.resumeSkipReason(null, wish.startedAtMs, false, false))
     }
 
+    // #5975: one tap on the sleep view after a kill brings the book back, paused
+    private val bookWish = wish.copy(bookId = 42)
+
+    @Test
+    fun `after a kill emptied the player the tap restores the book that faded into the bed`() {
+        assertEquals(42, SleepBedRules.bookToRestoreOnWake(bookWish, nothingLoaded = true, playingOther = false))
+    }
+
+    @Test
+    fun `a book still loaded stays put and nothing is restored over his choice`() {
+        assertNull(SleepBedRules.bookToRestoreOnWake(bookWish, nothingLoaded = false, playingOther = false))
+        assertNull(SleepBedRules.bookToRestoreOnWake(bookWish, nothingLoaded = true, playingOther = true))
+    }
+
+    @Test
+    fun `a bed with no book behind it, or no wish, restores nothing`() {
+        assertNull(SleepBedRules.bookToRestoreOnWake(wish, nothingLoaded = true, playingOther = false))
+        assertNull(SleepBedRules.bookToRestoreOnWake(null, nothingLoaded = true, playingOther = false))
+    }
+
     @Test
     fun `a clock that went backwards does not resume`() {
         assertEquals("clock_went_back", SleepBedRules.resumeSkipReason(wish, wish.startedAtMs - 1, false, false))
