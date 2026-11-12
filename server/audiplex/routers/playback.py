@@ -57,6 +57,7 @@ from audiplex import taste
 from audiplex.identity import build_identity_map
 from audiplex.dj_bans import banned_ids  # #2806
 from audiplex.dj_learn import LOVE_MIN_STARS, restore as dj_learn_restore  # #4057
+from audiplex import rating_floor  # #5908
 from audiplex.mix import plan_mix, plan_summary
 from audiplex.scheduled_stop import controller as stop_controller  # #3505
 from audiplex.auth import get_current_user
@@ -102,6 +103,7 @@ from audiplex.schemas import (
     TrackRatingSchema,
     TrackSchema,
     VerbalRatingRequest,  # #3576
+    RatingFloorRequest,  # #5908
 )
 
 router = APIRouter(prefix="/api/playback", tags=["playback"])
@@ -623,6 +625,60 @@ def set_owner_ratings(
         "rated": rated,
         "unknown": [i for i in ids if i not in known],
     }
+
+
+@router.put("/ratings/floor")
+def floor_owner_ratings(
+    body: RatingFloorRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """#5908: at least min_stars for the owner, once per source; never lowers a rating,
+    and a rating he lowered by hand after an earlier floor wins (outcome "vetoed")."""
+    if body.min_stars * 2 != int(body.min_stars * 2):
+        raise HTTPException(status_code=422, detail="Stars go in halves: 1, 1.5 ... 5.")
+    owner = _resolve_owner(db)
+    return rating_floor.apply_floor(
+        db, owner.id, body.track_ids, body.min_stars, body.source_id, body.reason, body.persona
+    )
+
+
+@router.get("/ratings/floors")
+def list_rating_floors(
+    limit: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """#5908: the auto-floor log, newest first, so Todd can veto a wrong one."""
+    from audiplex.models import RatingFloor, Track
+
+    rows = (
+        db.query(RatingFloor, Track.title)
+        .outerjoin(Track, Track.id == RatingFloor.track_id)
+        .order_by(RatingFloor.created_at.desc(), RatingFloor.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {"track_id": f.track_id, "title": title, "source_id": f.source_id, "outcome": f.outcome,
+         "old": f.old_rating, "new": f.new_rating, "reason": f.reason, "at": f.created_at.isoformat()}
+        for f, title in rows
+    ]
+
+
+@router.get("/playing-at")
+def get_playing_at(
+    at: str = Query(..., description="ISO-8601; naive means UTC"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """#5908: the owner's track whose play window covers `at`, or null."""
+    try:
+        when = datetime.fromisoformat(at.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="at must be ISO-8601")
+    owner = _resolve_owner(db)
+    return {"track": rating_floor.playing_at(db, owner.id, when)}
 
 
 @router.delete("/ratings")

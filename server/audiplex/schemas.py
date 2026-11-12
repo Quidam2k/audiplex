@@ -272,6 +272,16 @@ class VerbalRatingRequest(BaseModel):
     persona: str = ""
 
 
+class RatingFloorRequest(BaseModel):
+    """#5908: raise the owner's stars to at least min_stars, once per source (a dead drop)."""
+
+    track_ids: list[int] = Field(min_length=1)
+    min_stars: float = Field(default=4.0, ge=0.5, le=5)
+    source_id: str = Field(min_length=1, max_length=64)  # e.g. "upload:6339"
+    reason: str = Field(default="sang along in a dead drop", max_length=200)
+    persona: str = ""
+
+
 class PlaylistAppend(BaseModel):
     track_ids: list[int]
 

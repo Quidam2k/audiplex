@@ -362,6 +362,22 @@ class DjPairNote(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
+class RatingFloor(Base):
+    """#5908: one auto-floor decision per (track, source) - the log Todd vetoes from."""
+
+    __tablename__ = "rating_floors"
+    __table_args__ = (UniqueConstraint("track_id", "source_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    track_id: Mapped[int] = mapped_column(Integer, index=True)
+    source_id: Mapped[str] = mapped_column(String(64))  # e.g. "upload:6339"
+    outcome: Mapped[str] = mapped_column(String(20))  # raised | kept | vetoed
+    old_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+    new_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reason: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
 class DjBan(Base):
     """A track the DJ must never pick again (#2806). Reversible: delete the row.
 
