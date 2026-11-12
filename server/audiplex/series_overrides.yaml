@@ -6,3 +6,22 @@ overrides:
     author: "Ramez Naam"
     series: "Nexus"
     sequence: "3"
+  # #5478: Audible tags only Quicksilver as Book One; the rest of the Baroque
+  # Cycle carries no parseable series, so a Series view showed one book.
+  # Sequence follows Audible's split (Confusion = Books 4&5, System = 6-8).
+  - title: "King of the Vagabonds"
+    author: "Neal Stephenson"
+    series: "Baroque Cycle"
+    sequence: "2"
+  - title: "Odalisque"
+    author: "Neal Stephenson"
+    series: "Baroque Cycle"
+    sequence: "3"
+  - title: "The Confusion"
+    author: "Neal Stephenson"
+    series: "Baroque Cycle"
+    sequence: "4"
+  - title: "The System of the World"
+    author: "Neal Stephenson"
+    series: "Baroque Cycle"
+    sequence: "6"
