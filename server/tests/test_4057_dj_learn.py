@@ -56,7 +56,7 @@ def test_todd_fast_skip_halves_and_dj_skip_is_ignored(db_session):
     uid = _owner(db_session)
     out = _ride(db_session, uid, "r1", T0,
                 [(a, "skip", 2.0, 60), (b, "skip", 1.0, 300)], advances=[295])
-    assert _w(db_session, a) == 0.5
+    assert _w(db_session, a) == 0.75  # #6199 first ladder step
     assert _w(db_session, b) is None
     assert (out["todd_skips"], out["agent_skips_ignored"]) == (1, 1)
     assert len(out["note"].splitlines()) == 3
@@ -65,8 +65,9 @@ def test_todd_fast_skip_halves_and_dj_skip_is_ignored(db_session):
 def test_two_rides_drop_and_note_names_it_then_rating_restores(db_session):
     (a,) = _tracks(db_session, 1)
     uid = _owner(db_session)
-    _ride(db_session, uid, "r1", T0, [(a, "skip", 1.0, 10)])
-    out = _ride(db_session, uid, "r2", T0 + timedelta(days=1), [(a, "skip", 1.0, 10)])
+    for n in range(3):  # #6199 the ladder drops on the 4th counted ride
+        _ride(db_session, uid, f"r{n}", T0 + timedelta(days=n), [(a, "skip", 1.0, 10)])
+    out = _ride(db_session, uid, "r3", T0 + timedelta(days=3), [(a, "skip", 1.0, 10)])
     assert _w(db_session, a) == 0.0
     assert "Song 0 - Kate Bush" in out["note"].splitlines()[2]
     assert dj_learn.restore(db_session, a) is True
@@ -91,7 +92,7 @@ def test_replaying_a_ride_is_a_no_op(db_session):
     first = _ride(db_session, uid, "r1", T0, [(a, "skip", 1.0, 10)])
     again = dj_learn.learn(db_session, uid, T0, T0 + timedelta(hours=1), "r1", advance_times=[])
     assert again["already_learned"] is True and again["note"] == first["note"]
-    assert _w(db_session, a) == 0.5
+    assert _w(db_session, a) == 0.75  # #6199
 
 
 def test_diag_log_attribution_honours_by_todd(tmp_path, monkeypatch):
@@ -139,7 +140,7 @@ def test_learn_endpoint(client, db_engine, monkeypatch):
     assert r.status_code == 200, r.text
     assert r.json()["todd_skips"] == 1
     assert client.get("/api/dj/weights").json()[0] == {
-        "track_id": a, "weight": 0.5, "reason": "fast-skipped by you (<5 s)", "ride_id": "api1", "skip_rides": 1}
+        "track_id": a, "weight": 0.75, "reason": "skipped by you on 1 ride(s)", "ride_id": "api1", "skip_rides": 1}  # #6199
 
 
 def test_replayed_ride_through_endpoint_moves_weights(client, db_engine, monkeypatch):
@@ -166,7 +167,7 @@ def test_replayed_ride_through_endpoint_moves_weights(client, db_engine, monkeyp
     assert r.status_code == 200, r.text
     assert len(r.json()["note"].splitlines()) == 3
     weights = {w["track_id"]: w["weight"] for w in client.get("/api/dj/weights").json()}
-    assert weights == {fast: 0.5, again: 0.0, through: 1.1, loved: 1.3}
+    assert weights == {fast: 0.75, again: 0.5, through: 1.1, loved: 1.3}  # #6199 ladder steps 1 and 2
 
     assert client.post("/api/dj/learn", json=body).json()["already_learned"] is True
     assert {w["track_id"]: w["weight"] for w in client.get("/api/dj/weights").json()} == weights
