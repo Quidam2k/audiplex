@@ -68,6 +68,7 @@ from typing import Any, Deque, Optional
 
 from audiplex import queue_guard  # #7335
 from audiplex import loudness_live  # #3504
+from audiplex import app_installs  # #4456
 
 # How long after the last poll we still consider a device connected. The client
 # re-issues its long-poll immediately after each 25s timeout, so anything past
@@ -782,6 +783,9 @@ class PlaybackBus:
 
 
         self._maybe_save_queue(state, device_key)  # #3601
+        rec = self._devices.get(device_key)  # #4456
+        app_installs.record(device_key, getattr(rec, "name", None),  # #4456 fail-soft, throttled
+                            state.get("app_version_name"), state.get("app_version_code"))  # #4456
 
         # Hook: top_up the DJ pool if it's running (#5495, item 1)
         self._maybe_top_up_pool(state, device_key)

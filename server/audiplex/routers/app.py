@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
+from audiplex import app_installs  # #4456
 from audiplex.auth import get_current_user
 from audiplex.config import get_settings
 from audiplex.models import User
@@ -53,6 +54,23 @@ def get_version(user: User = Depends(get_current_user)):
         **info,
         "sizeBytes": stat.st_size,
         "mtime": int(stat.st_mtime),
+    }
+
+
+@router.get("/installed")  # #4456
+def get_installed(user: User = Depends(get_current_user)):
+    """#4456: which build each phone last reported, next to the served APK's build."""
+    try:
+        latest = _read_metadata(_resolve_apk_dir())
+    except HTTPException:
+        latest = None  # no APK metadata: still report what the phones run
+    rows = app_installs.installed()
+    latest_code = latest["versionCode"] if latest and isinstance(latest.get("versionCode"), int) else None
+    for r in rows:
+        r["up_to_date"] = None if latest_code is None else r["version_code"] >= latest_code
+    return {
+        "latest": {"versionName": latest["versionName"], "versionCode": latest["versionCode"]} if latest else None,
+        "installed": rows,
     }
 
 

@@ -424,6 +424,9 @@ def isolated_client_logs(tmp_path, monkeypatch):
     monkeypatch.setattr(
         playback_bus, "LAST_QUEUE_PATH", tmp_path / "last_queue.json"
     )
+    from audiplex import app_installs  # #4456 nor the phones' recorded builds
+    monkeypatch.setattr(app_installs, "INSTALLS_PATH", tmp_path / "app_installs.json")  # #4456
+    app_installs._reset_for_tests()  # #4456
 
 
 @pytest.fixture(autouse=True)
