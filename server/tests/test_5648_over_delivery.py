@@ -426,3 +426,130 @@ def test_route_accepts_delivery_and_reports_the_entry(client, env, monkeypatch):
     assert client.get("/api/playback/pool/prepared", params={"track_id": 999}).json()["exists"] is False
     bad = client.post("/api/playback/pool/prepared", json={"say": "hi", "delivery": "whisper"})
     assert bad.status_code == 400
+
+
+# ----- #5695: the phone plays the break itself (overlay_clip), one path per break -----
+
+
+def _play_v(code, **kw) -> float:  # #5695 a playing song reported by app build `code`
+    t = _play(**kw)
+    st = dict(bus.get_state())
+    st["app_version_code"] = code
+    bus.set_state(st)
+    return bus.get_state()["updated_at"]
+
+
+def _overlays():  # #5695
+    return [r for r in bus._commands.values() if r.type == "overlay_clip"]
+
+
+def _prepare_over(env, t):  # #5695
+    assert dj_prepare.prepare(bus, "That was X, here's Y", pool=env["pool"], now=t,
+                              expect_next=NXT, agent="sam", delivery="over")["prepared"]
+
+
+def test_overlay_phone_gets_one_overlay_clip_and_no_hook(env, monkeypatch):  # #5695
+    _render_ok(monkeypatch)
+    t = _play_v(84)
+    _prepare_over(env, t)
+    _tick(env, t)
+    _tick(env, t + 155)  # T-30
+    _tick(env, t + 160)  # a second pass must not send again
+    assert env["hooks"] == []
+    cmds = _overlays()
+    assert len(cmds) == 1
+    p = cmds[0].payload
+    assert p["clip_id"] == 777 and p["clip_url"] == "/api/dj/clips/777"
+    assert p["for_track_id"] == CUR and p["duck_to"] == pytest.approx(0.35)
+    # 4 s clip in the default (8, 4) window: centred on the end, 0.2 s early -> 2.2 s before it
+    assert p["start_at_ms"] == 200_000 - 2_200
+    assert cmds[0].expires_at == pytest.approx(t + 185 + 30)
+    assert _entry(env)["status"] == "handed_off" and _entry(env)["handoff"] == "overlay"
+    assert not _pauses()
+
+
+def test_older_phone_still_gets_the_pantheon_hook(env, monkeypatch):  # #5695
+    _render_ok(monkeypatch)
+    t = _play_v(83)
+    _prepare_over(env, t)
+    _tick(env, t)
+    _tick(env, t + 155)
+    assert len(env["hooks"]) == 1 and "--wav" in env["hooks"][0]
+    assert _overlays() == []
+
+
+def test_dj_overlay_off_uses_the_hook(env, monkeypatch):  # #5695
+    monkeypatch.setenv("DJ_OVERLAY", "off")
+    _render_ok(monkeypatch)
+    t = _play_v(84)
+    _prepare_over(env, t)
+    _tick(env, t)
+    _tick(env, t + 155)
+    assert len(env["hooks"]) == 1 and _overlays() == []
+
+
+def test_overlay_phone_with_no_clip_gets_only_the_fallback_say(env, monkeypatch):  # #5695
+    _render_fail(monkeypatch)
+    t = _play_v(84)
+    _prepare_over(env, t)
+    _walk(env, t, t + 160)
+    assert len(env["hooks"]) == 1 and "--fallback-say" in env["hooks"][0]
+    assert _overlays() == []
+
+
+def test_overlay_phone_next_track_changed_gets_only_the_fallback_say(env, monkeypatch):  # #5695
+    _render_ok(monkeypatch)
+    t = _play_v(84)
+    _prepare_over(env, t)
+    _tick(env, t)
+    t2 = _play_v(84, nxt=99, pos_s=170.0)  # same song, 30 s left, the next track changed
+    _tick(env, t2)
+    assert _overlays() == []
+    assert len(env["hooks"]) == 1 and "--fallback-say" in env["hooks"][0]
+
+
+def test_clip_too_long_for_the_window_goes_to_the_hook(env, monkeypatch):  # #5695
+    async def long(text, title):
+        return {"clip_id": 778, "duration_seconds": 20.0, "rendered_at": 0.0, "wav_path": "C:/dj/x.wav"}
+    monkeypatch.setattr(dj_prepare, "_render", long)
+    t = _play_v(84)
+    _prepare_over(env, t)
+    _tick(env, t)
+    _tick(env, t + 155)
+    assert _overlays() == [] and len(env["hooks"]) == 1
+
+
+def test_overlay_does_not_need_the_hook_command(env, monkeypatch):  # #5695
+    monkeypatch.setenv("DJ_OVER_MUSIC_CMD", "")
+    _render_ok(monkeypatch)
+    t = _play_v(84)
+    _prepare_over(env, t)
+    _tick(env, t)
+    _tick(env, t + 155)
+    assert len(_overlays()) == 1 and env["hooks"] == []
+
+
+def test_overlay_wav_is_removed_after_hand_off(env, monkeypatch, tmp_path):  # #5695
+    wav = tmp_path / "clip.wav"
+    wav.write_bytes(b"RIFF")
+    _render_ok(monkeypatch, wav=str(wav))
+    t = _play_v(84)
+    _prepare_over(env, t)
+    _tick(env, t)
+    assert wav.exists()
+    _tick(env, t + 155)
+    assert not wav.exists() and len(_overlays()) == 1
+
+
+def test_overlay_lead_math():  # #5695 dj_callout_overlay.place, relative to the end
+    from audiplex import dj_overlay
+    assert dj_overlay.lead_before_end(4.0, 8.0, 4.0) == pytest.approx(2.2)
+    assert dj_overlay.lead_before_end(10.0, 8.0, 4.0) == pytest.approx(6.2)  # latest = end + 4 - 10
+    assert dj_overlay.lead_before_end(4.0, 1.0, 4.0) == pytest.approx(1.2)   # earliest = end - 1
+    assert dj_overlay.lead_before_end(13.0, 8.0, 4.0) is None
+    assert dj_overlay.lead_before_end(0.0, 8.0, 4.0) is None
+
+
+def test_overlay_clip_is_a_start_command_for_the_stop_latch():  # #5695
+    from audiplex import todd_stop
+    assert "overlay_clip" in todd_stop.START_CMDS

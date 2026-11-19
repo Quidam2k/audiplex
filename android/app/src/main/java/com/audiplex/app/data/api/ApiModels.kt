@@ -362,6 +362,11 @@ data class DjCommandPayload(
     // fade used only if the next song has already started.
     val then: String? = null,
     @Json(name = "fade_ms") val fadeMs: Long? = null,
+    // #5695 'overlay_clip': the clip plays OVER [for_track_id] from start_at_ms into it (the
+    // phone's own position), the music ducked to duck_to of its level. Uses clip_id/clip_url/duration_seconds too.
+    @Json(name = "for_track_id") val forTrackId: Int? = null,
+    @Json(name = "start_at_ms") val startAtMs: Long? = null,
+    @Json(name = "duck_to") val duckTo: Float? = null,
     // 'sleep_timer' (#1728): fade the main player out after `minutes`, ramping
     // over the last `fade_seconds` of that.
     val minutes: Float? = null,

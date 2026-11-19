@@ -44,6 +44,9 @@ object PlayerHooks {
         exoPlayer?.pauseAtEndOfMediaItems = false
     }
 
+    /** #5695: a real focus change (a persona line, a call) took over our overlay duck: stop the clip. Main thread. */
+    var onOverlayPreempted: ((String) -> Unit)? = null
+
     /** #7528: the service's focus manager, so a level change can reach a duck. */
     @Volatile
     var focusManager: AudioFocusManager? = null

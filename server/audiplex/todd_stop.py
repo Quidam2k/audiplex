@@ -23,6 +23,7 @@ START_CMDS = {
     "activate",
     "announce",
     "bed_play",
+    "overlay_clip",  # #5695 a DJ break played over the music is a start too
 }
 
 

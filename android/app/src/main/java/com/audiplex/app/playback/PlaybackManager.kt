@@ -200,8 +200,10 @@ class PlaybackManager @Inject constructor(
     val mixPreview: StateFlow<Boolean> = _mixPreview
 
     init {
+        PlayerHooks.onOverlayPreempted = { why -> overlaySession?.onPreempted(why) }  // #5695 a persona line won focus
         // #4118: the service is releasing its player; drop the effect bound to its session.
         PlayerHooks.onPlayerReleasing = {
+            overlaySession?.cancel("player_released")  // #5695 the music it ducked is going away
             releaseBookEnhancer()
             try { bookGainPlayer?.removeListener(bookAudioSessionListener) } catch (_: Exception) { }
             bookGainPlayer = null
@@ -1911,6 +1913,89 @@ class PlaybackManager @Inject constructor(
     /** #5282 slice 2: bed_play from the server. A chime rides the bed player but has its own level. */
     fun djBedPlay(url: String, volume: Float) = bedPlay(url, MixLevels.bedCommandLevel(url, volume, chimeLevel))
 
+    // #5695: the DJ overlay: a second ExoPlayer (like the bed) and the one session it serves.
+    private var overlaySession: OverlaySession? = null
+
+    /**
+     * #5695: bus overlay_clip. Arms one DJ clip to play over the end of [forTrackId], from
+     * [startAtMs] into that track by the MAIN player's own clock, with the music ducked to
+     * [duckTo] of its level. A newer overlay replaces this one. Dropped, never retried, if
+     * the track goes first. Main thread.
+     */
+    @OptIn(UnstableApi::class)
+    fun overlayClip(
+        clipUrl: String, clipId: Long, forTrackId: Int, startAtMs: Long,
+        durationSeconds: Double?, duckTo: Float?, commandId: Long,
+    ) {
+        overlaySession?.cancel("replaced")
+        val player = ExoPlayer.Builder(context)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(
+                DefaultDataSource.Factory(context, OkHttpDataSource.Factory(okHttpClient))))  // the auth'd client
+            .setWakeMode(C.WAKE_MODE_NETWORK)
+            .build()
+        player.setAudioAttributes(
+            AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_SPEECH).build(),
+            /* handleAudioFocus = */ false,  // the music already holds focus; the clip rides inside it
+        )
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())  // this session's own: its cancelAll clears only its cap
+        val base = mapOf("clip_id" to clipId.toString(), "for_track_id" to forTrackId.toString(),
+            "start_at_ms" to startAtMs.toString(), "command_id" to commandId.toString())
+        lateinit var session: OverlaySession
+        session = OverlaySession(
+            port = object : OverlaySession.Port {
+                override fun view(): OverlayRules.View {
+                    val c = controller
+                    return OverlayRules.View(
+                        mediaId = c?.currentMediaItem?.mediaId?.removePrefix("track:"),
+                        positionMs = c?.currentPosition ?: 0L,
+                        playing = c?.isPlaying == true,
+                        ducked = PlayerHooks.focusManager?.isDucked == true,
+                    )
+                }
+                override fun duckMusic(fraction: Float): Boolean = PlayerHooks.focusManager?.overlayDuck(fraction) == true
+                override fun restoreMusic() { PlayerHooks.focusManager?.overlayRestore() }
+                override fun playClip() = player.play()
+                override fun stopClip() = player.stop()
+                override fun log(event: String, detail: Map<String, String>) {
+                    val what = detail["outcome"]?.let { "$it (${detail["reason"]})" } ?: "started"
+                    clientLog.report("info", event, "DJ overlay clip $clipId: $what", base + detail)
+                }
+                override fun onFinished() {
+                    if (overlaySession === session) overlaySession = null
+                    player.release()
+                }
+            },
+            scheduler = object : OverlaySession.Scheduler {
+                override fun postDelayed(delayMs: Long, block: () -> Unit) { handler.postDelayed(block, delayMs) }
+                override fun cancelAll() = handler.removeCallbacksAndMessages(null)
+            },
+            clipId = clipId,
+            forTrackId = forTrackId,
+            startAtMs = startAtMs,
+            duckTo = OverlayRules.duckTo(duckTo),
+            capMs = OverlayRules.restoreCapMs(durationSeconds),
+            armedAtMs = android.os.SystemClock.elapsedRealtime(),
+        )
+        player.addListener(object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED) session.onClipEnded()
+            }
+            override fun onPlayerError(error: PlaybackException) {
+                session.onClipError("${error.errorCodeName}: ${error.message}")
+            }
+        })
+        overlaySession = session
+        player.setMediaItem(MediaItem.fromUri(clipUrl))
+        player.prepare()  // buffered ahead, so the start lands on its position
+        clientLog.report("info", "overlay_armed", "DJ overlay clip $clipId armed", base)
+        scope.launch {
+            while (isActive && session.state == OverlaySession.State.Armed) {
+                session.tick(android.os.SystemClock.elapsedRealtime())
+                delay(OverlaySession.POLL_MS)
+            }
+        }
+    }
+
     @OptIn(UnstableApi::class)
     private fun startBedPlayer(url: String, volume: Float) {
         disposeBedPlayer()
@@ -2401,10 +2486,14 @@ class PlaybackManager @Inject constructor(
     private fun skipToNextTrack() {
         val ctrl = controller ?: return
         refreshPublicDj()
+        // #5695 Todd skipped: the DJ stops talking. Its restore ramp brings the next song in,
+        // so no skip fade on top of it (two ramps on one volume would wobble).
+        val overlayWasOn = overlaySession?.state == OverlaySession.State.Playing
+        overlaySession?.cancel("skipped")
         skipFadeJob?.cancel()
         val expected = mainSplit(PlayerKind.Music).volume
         val ducked = _playerVolume.value < expected * DUCKED_FRACTION
-        if (sleepFading || !SkipFade.shouldFade(publicDj, ctrl.isPlaying, ctrl.currentPosition, ctrl.duration, ducked)) {
+        if (overlayWasOn || sleepFading || !SkipFade.shouldFade(publicDj, ctrl.isPlaying, ctrl.currentPosition, ctrl.duration, ducked)) {
             ctrl.seekToNextMediaItem()
             if (publicDj) applyVolumeForCurrentKind()  // a fade cut short must not leave the dial low
             return
@@ -2625,6 +2714,7 @@ class PlaybackManager @Inject constructor(
         positionUpdateJob?.cancel()
         sleepTimerJob?.cancel()
         releaseBedPlayer()
+        overlaySession?.cancel("release")  // #5695 the duck is undone before the controller goes
         controller?.removeListener(playerListener)
         controllerFuture?.let { MediaController.releaseFuture(it) }
         controller = null

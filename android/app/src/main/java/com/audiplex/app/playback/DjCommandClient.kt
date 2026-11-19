@@ -584,6 +584,17 @@ class DjCommandClient @Inject constructor(
                     )
                 }
             }
+            "overlay_clip" -> {  // #5695 a DJ break over the end of a song, on our own second player
+                val p = cmd.payload ?: return badPayload("clip_url")
+                val clipUrl = p.clipUrl ?: return badPayload("clip_url")
+                val clipId = p.clipId ?: return badPayload("clip_id")
+                val forTrackId = p.forTrackId ?: return badPayload("for_track_id")
+                val startAtMs = p.startAtMs ?: return badPayload("start_at_ms")
+                val absolute = if (clipUrl.startsWith("http")) clipUrl else baseUrl.trimEnd('/') + clipUrl
+                withContext(Dispatchers.Main) {
+                    playbackManager.overlayClip(absolute, clipId, forTrackId, startAtMs, p.durationSeconds, p.duckTo, cmd.id)
+                }
+            }
             // An unknown type is a real mismatch between server and app
             // versions, and saying so beats the silence it used to get.
             else -> return DispatchResult("unknown_type", cmd.type)

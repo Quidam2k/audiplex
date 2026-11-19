@@ -44,8 +44,11 @@ class AudioFocusManager(
     /** #5614: a focus loss is holding playback that the next GAIN will start. */
     val awaitingFocusResume: Boolean get() = pausedByFocus && wasPlaying
 
-    /** #5837 F: ducked under another app's audio (a persona line). */
-    val isDucked: Boolean get() = fader.preDuckVolume != null
+    /** #5837 F: ducked under another app's audio (a persona line). Our own overlay duck (#5695) is not that. */
+    val isDucked: Boolean get() = fader.preDuckVolume != null && !overlayDuckOwned
+
+    /** #5695: the music is ducked under our own overlay clip, not under another app. */
+    @Volatile private var overlayDuckOwned = false
 
     /** #5837 F: a DJ clip waiting paused for that app's GAIN (rules in [ClipHold]). */
     private val holdHandler = Handler(Looper.getMainLooper())
@@ -176,6 +179,7 @@ class AudioFocusManager(
         }
         hasFocus = false
         clipHold.reset()  // #5837
+        releaseOverlayDuck("abandon")  // #5695 before reset() forgets the level to come back to
         fader.reset()  // #3597
         pausedByFocus = false
         wasPlaying = false
@@ -207,7 +211,44 @@ class AudioFocusManager(
      */
     fun retargetRestore(volume: Float): Boolean = fader.retarget(volume)
 
+    /**
+     * #5695: duck the music under our own overlay clip, to [fraction] of the dial level, on
+     * the same fader a persona's duck uses (so a level change mid-clip retargets the restore
+     * instead of un-ducking). False, and nothing changes, when the music is not playing or
+     * is already ducked or fading for another app: the overlay then does not start. Main thread.
+     */
+    fun overlayDuck(fraction: Float): Boolean {
+        if (overlayDuckOwned || fader.preDuckVolume != null || fader.isFading || !player.isPlaying) return false
+        val dial = fader.restoreTarget ?: player.volume
+        overlayDuckOwned = true
+        fader.duck((dial * fraction).coerceIn(0f, 1f))
+        return true
+    }
+
+    /**
+     * #5695: undo [overlayDuck]. A no-op when a focus change took the duck over (that
+     * change's own restore brings the music back) or when we never ducked. Main thread.
+     */
+    fun overlayRestore() {
+        if (!overlayDuckOwned) return
+        overlayDuckOwned = false
+        val to = fader.preDuckVolume ?: return
+        fader.restore(to, resume = false)
+    }
+
+    /** #5695: focus is abandoned while our overlay duck holds: land on the dial level, no ramp. */
+    private fun releaseOverlayDuck(why: String) {
+        if (!overlayDuckOwned) return
+        overlayDuckOwned = false
+        fader.preDuckVolume?.let { player.volume = it }
+        PlayerHooks.onOverlayPreempted?.invoke(why)
+    }
+
     private fun applyAction(action: FocusPolicy.FocusAction) {
+        if (overlayDuckOwned && action != FocusPolicy.FocusAction.NoOp) {  // #5695 real focus wins
+            overlayDuckOwned = false  // the fader keeps the dial level; this action's restore uses it
+            PlayerHooks.onOverlayPreempted?.invoke("focus_${action::class.simpleName}")
+        }
         when (action) {
             is FocusPolicy.FocusAction.Duck -> fader.duck(action.volume)
             FocusPolicy.FocusAction.Pause -> {

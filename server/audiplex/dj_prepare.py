@@ -53,6 +53,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from audiplex import dj_overlay  # #5695
 from audiplex import dj_triggers
 
 logger = logging.getLogger("audiplex.dj_prepare")
@@ -540,14 +541,40 @@ def _spawn_over_hook(argv: list[str], entry_id: str) -> None:  # #5648
     threading.Thread(target=_run, name=f"dj-over-{entry_id}", daemon=True).start()
 
 
-def _over_handoff(e: dict, st: dict, now: float, out: dict) -> None:  # #5648
+def _overlay_for(e: dict, st: dict, nxt: Optional[int]) -> Optional[dict]:  # #5695
+    """The overlay_clip payload when the phone can play this break itself, else None."""
+    if not dj_overlay.enabled() or not dj_overlay.phone_has_overlay(st):
+        return None
+    try:
+        return dj_overlay.payload(e, st, nxt)
+    except Exception:  # #5695 any doubt = the Pantheon hook, as before
+        logger.exception("dj_prepare overlay payload failed")
+        return None
+
+
+def _over_handoff(e: dict, st: dict, now: float, out: dict, bus=None) -> None:  # #5648 #5695
     """delivery "over" at T-OVER_HANDOFF_LEAD_S: exactly one hand-off per entry. The claim
     is one state transition under _LOCK, so a late render or a second tick cannot send
-    another. A ready clip goes with --wav; no clip, or the next track changed, goes with
-    --fallback-say. Never pauses."""
+    another. A ready clip goes to a phone build with the overlay player as one overlay_clip
+    command (#5695), else with --wav to the hook; no clip, or the next track changed, goes
+    with --fallback-say. Never pauses."""
     nxt = _next_track(st)
     with _LOCK:
         if e.get("done") or e.get("status") not in OPEN:
+            return
+        changed_next = e.get("expect_next") is not None and nxt != e["expect_next"]
+        wav = e.get("wav_path")
+        end = song_end_epoch(st, now) or e.get("end_at") or now
+        ready = e.get("status") == "ready" and not changed_next
+        overlay = _overlay_for(e, st, nxt) if ready and bus is not None else None  # #5695 the phone plays it itself
+        if overlay is not None:  # #5695 one path per break: the hook is NOT also spawned
+            rec = bus._enqueue("overlay_clip", overlay, source="dj_prepare:overlay",
+                               expires_at=end + dj_overlay.EXPIRE_AFTER_END_S)
+            e.update(status="handed_off", done=True, handed_at=now, handoff="overlay", command_ids=[rec.id])
+            _discard_wav(wav)  # the phone streams the stored clip; the wav was only for the hook
+            _log("handoff", e, how="overlay", clip_id=overlay["clip_id"], command_id=rec.id,
+                 start_at_ms=overlay["start_at_ms"], duration_ms=st.get("duration_ms"))
+            out["fired"].append(e["id"])
             return
         cmd = over_cmd()
         if not cmd:
@@ -555,9 +582,7 @@ def _over_handoff(e: dict, st: dict, now: float, out: dict) -> None:  # #5648
             _log("handoff_skipped", e, reason="DJ_OVER_MUSIC_CMD unset")
             out["fallback"].append(e["id"])
             return
-        changed_next = e.get("expect_next") is not None and nxt != e["expect_next"]
-        wav = e.get("wav_path")
-        if e.get("status") == "ready" and wav and not changed_next:
+        if ready and wav:
             e.update(status="handed_off", done=True, handed_at=now, handoff="clip")
             clip = True
         else:
@@ -566,7 +591,6 @@ def _over_handoff(e: dict, st: dict, now: float, out: dict) -> None:  # #5648
             e.update(status="fallback_sent", done=True, handed_at=now, handoff="fallback", failed=why)
             clip = False
             _discard_wav(wav)  # a clip that landed too late for this hand-off is not played
-        end = song_end_epoch(st, now) or e.get("end_at") or now
         argv = over_argv(cmd, e, end, wav if clip else None)
         if clip:
             _log("handoff", e, how="clip", wav=wav, argv=argv)
@@ -641,7 +665,7 @@ def tick(bus, pool=None, now: Optional[float] = None,
                 changed = True
                 continue
             if over:  # #5648
-                _over_handoff(e, st, now, out)
+                _over_handoff(e, st, now, out, bus)  # #5695
                 changed = True
                 continue
             nxt = _next_track(st)
