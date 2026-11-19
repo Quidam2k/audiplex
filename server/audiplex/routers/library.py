@@ -10,6 +10,7 @@ from audiplex.auth import get_admin_user, get_current_user
 from audiplex.config import get_settings
 from audiplex.database import get_db
 from audiplex.models import Book, User
+from audiplex.mp4_index import MP4_SUFFIXES, find_moov
 from audiplex.scanner import scan_library
 from audiplex.sleep_beds import find_beds
 from audiplex.schemas import (
@@ -61,11 +62,25 @@ def list_sleep_beds(db: Session = Depends(get_db), user: User = Depends(get_curr
             for b in find_beds(db)]
 
 
+def _fill_moov(book: Book, db: Session) -> None:
+    """#4217: find a single-file book's moov range once and keep it. A failed walk
+    leaves it null, which the phone treats as unknown (no prefetch)."""
+    if book.moov_offset is not None or book.category == "audiobook_misc":
+        return
+    if not (book.file_path or "").lower().endswith(MP4_SUFFIXES):
+        return
+    found = find_moov(book.file_path)
+    if found:
+        book.moov_offset, book.moov_size = found
+        db.commit()
+
+
 @router.get("/books/{book_id}", response_model=BookDetail)
 def get_book(book_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     book = db.query(Book).filter(Book.id == book_id).first()
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
+    _fill_moov(book, db)  # #4217
     detail = BookDetail.model_validate(book)
     if book.category == "audiobook_misc":
         detail.track_urls = [

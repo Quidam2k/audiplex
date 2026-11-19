@@ -341,6 +341,17 @@ def _migrate_true_peak(engine):  # #5683
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN true_peak_dbtp FLOAT"))
 
 
+def _migrate_book_moov(engine):  # #4217
+    inspector = inspect(engine)
+    if "books" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("books")}
+    with engine.begin() as conn:
+        for col in ("moov_offset", "moov_size"):
+            if col not in columns:
+                conn.execute(text(f"ALTER TABLE books ADD COLUMN {col} INTEGER"))
+
+
 def _migrate_track_energy(engine):  # #2806
     inspector = inspect(engine)
     if "tracks" not in inspector.get_table_names():
@@ -466,6 +477,7 @@ def init_db(database_url: str | None = None):
     _migrate_track_audio_profile(_engine)  # #7335 / #3981
     _migrate_track_duplicate_of(_engine)  # #8707
     _migrate_true_peak(_engine)  # #5683
+    _migrate_book_moov(_engine)  # #4217
     Base.metadata.create_all(bind=_engine)
     return _engine
 

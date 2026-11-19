@@ -46,6 +46,9 @@ class Book(Base):
     # #4222: sampled EBU R128 loudness (LUFS), filled by scripts/measure_book_loudness.py.
     loudness_lufs: Mapped[float | None] = mapped_column(Float, nullable=True)
     true_peak_dbtp: Mapped[float | None] = mapped_column(Float, nullable=True)  # #5683 caps the raise
+    # #4217: byte range of the moov index atom, filled lazily by GET /api/books/{id}.
+    moov_offset: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    moov_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     chapters: Mapped[list["Chapter"]] = relationship(
         back_populates="book", cascade="all, delete-orphan", order_by="Chapter.index"

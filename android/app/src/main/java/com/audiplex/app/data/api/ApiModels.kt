@@ -85,7 +85,10 @@ data class BookDetail(
     @Json(name = "file_size") val fileSize: Long,
     val chapters: List<ChapterSchema> = emptyList(),
     val category: String? = null,
-    @Json(name = "track_urls") val trackUrls: List<String> = emptyList()
+    @Json(name = "track_urls") val trackUrls: List<String> = emptyList(),
+    // #4217: the moov index byte range, for the resume prefetch; null = unknown.
+    @Json(name = "moov_offset") val moovOffset: Long? = null,
+    @Json(name = "moov_size") val moovSize: Long? = null
 )
 
 @JsonClass(generateAdapter = true)

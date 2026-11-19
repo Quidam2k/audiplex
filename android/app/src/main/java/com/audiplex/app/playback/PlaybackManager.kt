@@ -900,6 +900,7 @@ class PlaybackManager @Inject constructor(
 
         override fun onPlaybackStateChanged(playbackState: Int) {
             if (playbackState == Player.STATE_READY) {
+                logBookReady()  // #4217
                 if (isMusic()) {
                     controller?.let { ctrl ->
                         _durationMs.value = ctrl.duration.coerceAtLeast(0)
@@ -1273,6 +1274,25 @@ class PlaybackManager @Inject constructor(
         }
     }
 
+    /** #4217: note when a streamed book was asked for and whether its index was already on disk. */
+    private fun markReadyStart(book: BookDetail, uri: String, startMs: Long) {
+        readyT0Ms = android.os.SystemClock.elapsedRealtime()
+        readyDetail = mapOf(
+            "book_id" to book.id.toString(),
+            "start_s" to (startMs / 1000).toString(),
+            "index_cached" to runCatching { bookIndexCached(context, book, uri) }.getOrDefault(false).toString(),
+            "moov_known" to (book.moovOffset != null).toString(),
+        )
+    }
+
+    private fun logBookReady() {
+        if (readyT0Ms == 0L) return
+        val ms = android.os.SystemClock.elapsedRealtime() - readyT0Ms
+        readyT0Ms = 0L
+        if (isMusic()) return
+        clientLog.report("info", "book_ready", "streamed book ready in $ms ms", readyDetail + ("ready_ms" to ms.toString()))
+    }
+
     private fun buildMediaItem(uri: String, book: BookDetail, displayTitle: String): MediaItem {
         val coverUrl = if (book.hasCover) AudiplexApi.coverUrl(currentBaseUrl, book.id) else null
         return MediaItem.Builder()
@@ -1360,6 +1380,9 @@ class PlaybackManager @Inject constructor(
     }
 
     private var localFilePath: String? = null
+    // #4217: a streamed book resume's start, for the time-to-ready client log.
+    private var readyT0Ms = 0L
+    private var readyDetail: Map<String, String> = emptyMap()
 
     /** [play] false (#5975) loads the book PAUSED at [startSeconds]: no play(), so no audio focus and no playing state. */
     fun play(book: BookDetail, baseUrl: String, startSeconds: Double = 0.0, play: Boolean = true) {
@@ -1394,6 +1417,7 @@ class PlaybackManager @Inject constructor(
                         if (MeditationStore.isContentUri(path)) path
                         else android.net.Uri.fromFile(File(path)).toString()
                     } ?: AudiplexApi.streamUrl(baseUrl, book.id)
+                    if (localFilePath == null) markReadyStart(book, uri, startMs)  // #4217
                     ctrl.setMediaItem(buildMediaItem(uri, book, book.title), startMs)
                 }
                 ctrl.prepare()

@@ -197,6 +197,8 @@ def _scan_libation(
                 existing.series_sequence = metadata.series_sequence
                 existing.series_raw = metadata.series_raw
                 existing.duration_seconds = metadata.duration_seconds
+                if existing.file_size != metadata.file_size:  # #4217 a replaced file moves its index
+                    existing.moov_offset = existing.moov_size = None
                 existing.file_size = metadata.file_size
                 existing.file_hash = file_hash
                 existing.has_cover = metadata.has_cover

@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import com.audiplex.app.playback.BookIndexPrefetcher
 
 enum class LibraryFilterMode { All, Favorites, ToRead, Recent, Authors, Series } // #10071
 
@@ -46,7 +47,8 @@ class LibraryViewModel @Inject constructor(
     private val apiHolder: ApiServiceHolder,
     private val settingsStore: SettingsStore,
     private val playbackPositionRepository: PlaybackPositionRepository,
-    val favoritesStore: FavoritesStore
+    val favoritesStore: FavoritesStore,
+    private val indexPrefetcher: BookIndexPrefetcher,  // #4217
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow<LibraryUiState>(LibraryUiState.Loading)
@@ -152,6 +154,7 @@ class LibraryViewModel @Inject constructor(
                 .sortedByDescending { it.progress.updatedAt }
 
             if (!reloadGate.isCurrent(token)) return // a newer load owns the screen
+            indexPrefetcher.warm(inProgress.map { it.book.id })  // #4217 resume reads the index from disk
             // A quiet reload keeps the filter mode picked since it started.
             val mode = if (quiet) (_uiState.value as? LibraryUiState.Success)?.filterMode ?: filterMode
                 else filterMode

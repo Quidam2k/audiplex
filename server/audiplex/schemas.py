@@ -31,6 +31,9 @@ class BookDetail(BookSummary):
     file_size: int
     chapters: list[ChapterSchema] = []
     track_urls: list[str] = []
+    # #4217: moov index byte range for the phone's prefetch; null = unknown (old behavior).
+    moov_offset: int | None = None
+    moov_size: int | None = None
 
 
 class ProgressSchema(BaseModel):
