@@ -1119,6 +1119,37 @@ def _spec_cues(db: Session, spec_id) -> list[dict]:
     ]
 
 
+def _wants_priority_lane(db: Session, body: dict, spec_id) -> bool:
+    """#1006 (Jarvis ruling): the lane joins ONLY a pool that opts in, by body flag
+    or by its spec's priority_lane column. Rides, PT, sleep and hand-built sets never
+    get songs from outside what they name, so everything else defaults to no lane."""
+    if "priority_lane" in body:
+        return bool(body.get("priority_lane"))
+    if not spec_id:
+        return False
+    from sqlalchemy import text
+
+    try:
+        row = db.execute(text("SELECT priority_lane FROM dj_mix_specs WHERE id = :id"),
+                         {"id": spec_id}).first()
+    except Exception:  # a DB from before the column: no lane
+        return False
+    return bool(row and row[0])
+
+
+def _priority_lane_ids(db: Session) -> list[int]:
+    """Every member of the configured priority groups, in id order (#1006)."""
+    from audiplex import dj_priority
+    from audiplex.config import get_settings
+
+    try:
+        groups = dj_priority.groups_from_config(get_settings().dj_priority_groups)
+        return sorted(set().union(*dj_priority.group_members(db, groups).values()))
+    except Exception as e:  # a bad group config never stops a pool from starting
+        print(f"[dj_pool] WARNING priority lane unavailable, starting without it: {e}", flush=True)
+        return []
+
+
 @router.get("/pool", tags=["dj_pool"])
 def get_pool_status(user: User = Depends(get_current_user)):
     """Current DJ pool status: per-lane details, pending cues."""
@@ -1144,7 +1175,7 @@ def set_pool(
     top-up immediately and returns its picks as initial_picks, so the caller
     can replace the upcoming queue once; after that the bus hook appends.
     """
-    from audiplex.dj_pool import get_pool, lanes_from_ids
+    from audiplex.dj_pool import PRIORITY_LANE, get_pool, lanes_from_ids  # #1006 PRIORITY_LANE
 
     # #6913: a pool would refill a queue Todd asked to end.
     if stop_controller.latch_active(time.time()):
@@ -1174,6 +1205,13 @@ def set_pool(
         }
         skip = speech | long_ids | banned
         lanes = {label: [t for t in ids if t not in skip] for label, ids in lanes.items()}
+        if PRIORITY_LANE not in lanes and _wants_priority_lane(db, body, spec_id):  # #1006
+            # filtered on its own, so it can never knock a named lane's track out
+            prio_ids = _priority_lane_ids(db)
+            prio_drop = non_music(db, prio_ids) | too_long_for_mix(db, prio_ids) | banned
+            prio_lane = [t for t in prio_ids if t not in prio_drop]
+            if prio_lane:
+                lanes[PRIORITY_LANE] = prio_lane
         track_ids = [t for ids in lanes.values() for t in ids]
         source_labels = {t: label for label, ids in lanes.items() for t in ids}
         no_repeat = body.get("no_repeat_picks")  # #7108
@@ -1192,6 +1230,8 @@ def set_pool(
             balance=balance, ahead=ahead, exclude_recent_hours=exclude_recent_hours,
             refill_at=refill_at,
         )
+    if PRIORITY_LANE in pool.state.get("lanes", {}) and raw_lanes and PRIORITY_LANE not in raw_lanes:
+        pool.state["lanes"][PRIORITY_LANE]["injected"] = True  # #1006: a spec edit keeps it
     result["skipped_long"] = sorted(long_ids)  # #3249
     if isinstance(body.get("starvation_config"), dict):
         pool.state["starvation_config"].update(body["starvation_config"])
@@ -1703,14 +1743,21 @@ def create_mix_spec(
     elif not isinstance(request_text, str):
         request_text = json.dumps(request_text)
 
+    # #1006: a re-save that doesn't mention priority_lane keeps the spec's old value.
+    if "priority_lane" in body:
+        priority_lane = 1 if body.get("priority_lane") else None
+    else:
+        prior = db.execute(text("SELECT priority_lane FROM dj_mix_specs WHERE name = :name"),
+                           {"name": name}).first()
+        priority_lane = prior[0] if prior else None
     db.execute(text("DELETE FROM dj_mix_specs WHERE name = :name"), {"name": name})
     db.execute(
         text("""
             INSERT INTO dj_mix_specs
             (name, request_text, sources_json, balance, ahead, exclude_recent_hours,
-             notes_json, last_counts_json, created_at, updated_at)
+             notes_json, last_counts_json, priority_lane, created_at, updated_at)  -- #1006
             VALUES (:name, :request_text, :sources_json, :balance, :ahead,
-                    :exclude_recent_hours, :notes_json, :last_counts_json,
+                    :exclude_recent_hours, :notes_json, :last_counts_json, :priority_lane,  -- #1006
                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         """),
         {
@@ -1722,6 +1769,7 @@ def create_mix_spec(
             "exclude_recent_hours": body.get("exclude_recent_hours", 12),
             "notes_json": json.dumps(body.get("notes_json", [])),
             "last_counts_json": json.dumps(body.get("last_counts", {})),
+            "priority_lane": priority_lane,  # #1006
         },
     )
     db.commit()
@@ -1738,10 +1786,12 @@ def list_mix_specs(
     from sqlalchemy import text
 
     result = db.execute(text(
-        "SELECT id, name, request_text, balance, ahead, sources_json FROM dj_mix_specs ORDER BY name"))
+        "SELECT id, name, request_text, balance, ahead, sources_json, priority_lane "  # #1006
+        "FROM dj_mix_specs ORDER BY name"))
     return [
         {"id": row[0], "name": row[1], "request_text": row[2], "balance": row[3], "ahead": row[4],
-         "sources": json.loads(row[5]) if row[5] else []}  # #4054 the one-lane guard counts lanes from this
+         "sources": json.loads(row[5]) if row[5] else [],  # #4054 the one-lane guard counts lanes from this
+         "priority_lane": bool(row[6])}  # #1006
         for row in result
     ]
 

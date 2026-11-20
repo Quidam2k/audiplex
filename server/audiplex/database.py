@@ -272,6 +272,7 @@ def _migrate_create_dj_mix_specs(engine):
             "  exclude_recent_hours REAL NOT NULL DEFAULT 12,"
             "  notes_json TEXT,"
             "  last_counts_json TEXT,"
+            "  priority_lane INTEGER,"  # #1006: NULL = off
             "  created_at TIMESTAMP,"
             "  updated_at TIMESTAMP"
             ")"
@@ -279,6 +280,17 @@ def _migrate_create_dj_mix_specs(engine):
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_dj_mix_specs_name ON dj_mix_specs (name)"
         ))
+
+
+def _migrate_spec_priority_lane(engine):  # #1006
+    """A spec opts its pool into the DJ "priorities" lane; NULL/0 = no lane."""
+    inspector = inspect(engine)
+    if "dj_mix_specs" not in inspector.get_table_names():
+        return
+    if "priority_lane" in {col["name"] for col in inspector.get_columns("dj_mix_specs")}:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE dj_mix_specs ADD COLUMN priority_lane INTEGER"))
 
 
 def _migrate_track_content_kind(engine):  # #ride0928
@@ -466,6 +478,7 @@ def init_db(database_url: str | None = None):
     _migrate_favorites_constraint(_engine)
     _migrate_create_track_tag_repairs(_engine)
     _migrate_create_dj_mix_specs(_engine)
+    _migrate_spec_priority_lane(_engine)  # #1006
     _migrate_track_content_kind(_engine)  # #ride0928 (dj_pair_notes comes from create_all)
     _migrate_track_loudness(_engine)  # #3255
     _migrate_track_end_trim(_engine)  # #5682

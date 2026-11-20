@@ -4523,6 +4523,7 @@ async def dj_spec_save(
     ahead: int = 4,
     exclude_recent_hours: float = 12,
     allow_empty: bool = False,
+    priority_lane: bool | None = None,  # #1006
 ) -> str:
     """Save a DJ mix spec on the server.
 
@@ -4537,6 +4538,9 @@ async def dj_spec_save(
     ahead:                how many tracks to keep queued (default 4)
     exclude_recent_hours: hours to exclude recently-played tracks (default 12)
     allow_empty:          allow sources that resolve to 0 tracks
+    priority_lane:        True = this spec's pool also gets the "priorities" lane (Todd's
+                          YouTube folder + Cirque, #1006). Leave it unset for rides, PT,
+                          sleep and any set Todd hand-picked; None keeps the saved value.
     """
     try:
         lanes, empty = await _resolve_lanes(sources)
@@ -4555,6 +4559,7 @@ async def dj_spec_save(
         "ahead": ahead,
         "exclude_recent_hours": exclude_recent_hours,
         "last_counts": {label: len(ids) for label, ids in lanes.items()},
+        **({"priority_lane": bool(priority_lane)} if priority_lane is not None else {}),  # #1006
     })
     return f"Saved spec '{name}' (id {saved.get('id')}): {_counts(lanes)}"
 
@@ -4663,6 +4668,7 @@ async def dj_pool_set(
     replace_set: bool = False,
     replace_reason: str = "",
     start_now: bool = False,  # #4114
+    priority_lane: bool | None = None,  # #1006
 ) -> str:
     """Start (or replace) the rolling DJ pool from a saved spec or inline sources.
 
@@ -4696,6 +4702,9 @@ async def dj_pool_set(
                           (skip + resume after the queue trim lands; #4114). Use it
                           for a ride start instead of separate dj_skip / dj_resume.
                           If the trim fails, nothing else is sent.
+    priority_lane:        True/False overrides the spec's priority_lane flag (#1006): the
+                          "priorities" lane adds Todd's YouTube folder + Cirque. Off unless
+                          asked; never for a ride, PT, sleep or a set Todd hand-picked.
     Picks within a lane are shuffled.
     """
     try:
@@ -4783,6 +4792,8 @@ async def dj_pool_set(
             body["starvation_config"] = starve
         if no_repeat_picks is not None:  # #7108
             body["no_repeat_picks"] = int(no_repeat_picks)
+        if priority_lane is not None:  # #1006
+            body["priority_lane"] = bool(priority_lane)
         if cur is None or not queue:
             body["prime_current_id"] = 0
         elif cur > 0:

@@ -21,8 +21,11 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from audiplex import dj_context_picks, taste
+from audiplex import dj_context_picks, dj_priority, taste  # #1006 dj_priority
 from audiplex.identity import build_identity_map
+
+
+PRIORITY_LANE = "priorities"  # #1006: the opt-in lane of every priority-group member
 
 
 def _weighted_pick(ids: list[int], weights: dict[int, float]) -> int:
@@ -300,6 +303,7 @@ class DJPool:
             "last_topup_at": self.state.get("last_topup_at"),
             "dropped_by_learning": self.state.get("dropped_by_learning", []),  # #4057: as of the last top-up
             "context_picks": self.state.get("context_picks"),  # #4056: as of the last top-up
+            "priority": self.state.get("priority"),  # #1006: group sizes + cooled count, last top-up
             "lanes": lane_details,
             "source_counts": self._count_sources(),  # Backward compat
             "starvation_config": self.state.get("starvation_config", {}),
@@ -376,6 +380,9 @@ class DJPool:
         self.state["lanes"] = {
             label: _lane(ids, old.get(label)) for label, ids in lanes.items()
         }
+        if old.get(PRIORITY_LANE, {}).get("injected") and PRIORITY_LANE not in lanes:  # #1006: not a spec source
+            self.state["lanes"][PRIORITY_LANE] = old[PRIORITY_LANE]
+            lanes = {**lanes, PRIORITY_LANE: old[PRIORITY_LANE].get("track_ids", [])}
         self.state["eligible_track_ids"] = [int(t) for ids in lanes.values() for t in ids]
         self.state["source_labels"] = {
             int(t): label for label, ids in lanes.items() for t in ids
@@ -500,6 +507,41 @@ class DJPool:
         def recording_of(tid: int) -> Optional[str]:
             ident = identities.get(tid) if identities else None
             return ident.recording_id if ident is not None else None
+
+        # #1006: priority groups (YouTube folder, Cirque) are boosted in every lane, a
+        # member heard within the cooldown is not picked fresh (it may still recycle),
+        # and no group takes more than its share of any window of tracks.
+        prio_by_track: dict[int, set[str]] = {}
+        prio_cooled: set[int] = set()
+        prio_recent: list[int] = []
+        prio = {}
+        if db is not None:
+            try:
+                from audiplex.config import get_settings
+
+                cfg = get_settings()
+                groups = dj_priority.groups_from_config(cfg.dj_priority_groups)
+                if groups:
+                    members = dj_priority.group_members(db, groups)
+                    prio_by_track = dj_priority.group_of(members)
+                    lane_ids = {t for d in self.state["lanes"].values() for t in d.get("track_ids", [])}
+                    weights = dj_priority.boosted_weights(weights, members, groups, only=lane_ids)
+                    days = max(0.0, float(cfg.dj_priority_cooldown_days))
+                    plays = (taste.recent_plays_for(db, owner_id, max(days * 1440, 60), identities)
+                             if owner_id is not None else [])
+                    if days > 0:
+                        prio_cooled = dj_priority.cooled(plays, members, recording_of, days,
+                                                         taste._now())
+                    # the current track's own start is already the queue's head
+                    prio_recent = dj_priority.recent_sequence(plays, 60, {current_track_id})
+                    prio = {"window": int(cfg.dj_priority_share_window),
+                            "max_share": float(cfg.dj_priority_max_share)}
+                    self.state["priority"] = {  # shown by status()
+                        "groups": {g.name: len(members.get(g.name, ())) for g in groups},
+                        "cooled": len(prio_cooled)}
+            except Exception as e:  # never let a priority fault stop the picking
+                prio_by_track, prio_cooled, prio_recent, prio = {}, set(), [], {}
+                print(f"[dj_pool] WARNING priority groups unavailable, picking without them: {e}", flush=True)
 
         # Anything already queued/played/cued blocks its other copies too.
         for tid in skip_ids:
@@ -636,6 +678,28 @@ class DJPool:
         held: list[dict] = []  # lanes blocked only by the window: retried after the next pick
         waiting: set[str] = set()  # #5696 lanes whose every candidate is the last pick's artist
         same_ok = False  # #5696 no lane has anyone else: a one-artist pool still plays
+        capped: set[str] = set()  # #1006 lanes that sat out a slot for the share cap
+
+        def share_ok(candidates: list[int], lane_name: str) -> list[int]:  # #1006
+            if not prio or not candidates:
+                return candidates
+            kept = dj_priority.not_capped(candidates, prio_by_track, share_blocked_now())
+            if not kept:
+                capped.add(lane_name)
+            return kept
+
+        def soft_cap(candidates: list[int]) -> list[int]:  # #1006: the fallback still prefers uncapped
+            if not prio or not candidates:
+                return candidates
+            return dj_priority.not_capped(candidates, prio_by_track, share_blocked_now()) or candidates
+
+        def share_blocked_now() -> set[str]:  # #1006
+            # play order: recent plays, the current track, cue picks (the bus inserts them
+            # right after the current one), the rest of the queue, then this top-up's picks
+            queue = [t for t in upcoming_track_ids if isinstance(t, int) and t > 0]
+            seq = prio_recent + queue[:1] + cue_picks + queue[1:] + picks[len(cue_picks):]
+            return dj_priority.share_blocked(prio_by_track, seq, prio["window"], prio["max_share"])
+
         while len(picks) < to_pick:
             selected_lane = self._select_next_lane(waiting)
             if not selected_lane and waiting:  # #5696 nobody else anywhere
@@ -647,8 +711,11 @@ class DJPool:
             lane = self.state["lanes"][selected_lane]
             ids = lane.get("track_ids", [])
             fresh = [t for t in ids if eligible(t)]
+            # #1006: a priority member heard within the cooldown waits until its lane has
+            # nothing else fresh; a preference, not a filter, so a pool never runs dry.
+            fresh = [t for t in fresh if t not in prio_cooled] or fresh
             if fresh:
-                varied = fresh if same_ok else other_artist(fresh)  # #5696
+                varied = soft_cap(fresh) if same_ok else share_ok(other_artist(fresh), selected_lane)  # #5696 #1006
                 if not varied:
                     waiting.add(selected_lane)
                     continue
@@ -665,16 +732,20 @@ class DJPool:
                         f"all {len(ids)} track(s) already played or queued, and no other lane "
                         "has fresh tracks left to recycle alongside")
                     continue
-                varied = again if same_ok else other_artist(again)  # #5696
+                varied = soft_cap(again) if same_ok else share_ok(other_artist(again), selected_lane)  # #5696 #1006
                 if not varied:
                     waiting.add(selected_lane)
                     continue
                 pick = pick_from(new_songs_first(varied))  # #4057 #4056 #5488
             lane["why_empty"] = None
-            if waiting:  # #5696 shown in dj_pool_status with the context picks
-                context_reasons.append(f"#{pick} artist rule: {', '.join(sorted(waiting))} "
+            if waiting - capped:  # #5696 #1006 shown in dj_pool_status with the context picks
+                context_reasons.append(f"#{pick} artist rule: {', '.join(sorted(waiting - capped))} "  # #1006
                                        "waited a turn (same artist as the song before)")
+            if capped:  # #1006
+                context_reasons.append(f"#{pick} share cap: {', '.join(sorted(capped))} waited a turn "
+                                       "(a priority group already has its share of the hour)")
             waiting.clear()
+            capped.clear()
             same_ok = False
 
             picks.append(pick)

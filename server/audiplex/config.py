@@ -42,6 +42,19 @@ class Settings(BaseSettings):
     # listening data rather than guessing a different one now.
     dj_recording_cooldown_minutes: int = 20
     dj_work_cooldown_minutes: int = 20
+    # #1006 (Todd msg 21355): "YouTube folder + Cirque heavier WITHOUT looping the same
+    # 12 songs". Members of a group are boosted inside every pool lane; a pool whose
+    # spec opts in (priority_lane) also gets a "priorities" lane of all members. A member
+    # heard within dj_priority_cooldown_days is not picked fresh, and no group takes more
+    # than max_share of any dj_priority_share_window tracks (~an hour). [] turns it off.
+    dj_priority_groups: list[dict] = Field(default_factory=lambda: [
+        {"name": "youtube", "folder_segments": ["Todd Walker - music"], "boost": 1.5},
+        {"name": "cirque", "folder_segments": ["Cirque Du Soleil"],
+         "artists": ["Cirque du Soleil"], "boost": 1.5},
+    ])
+    dj_priority_cooldown_days: float = 7.0
+    dj_priority_max_share: float = 0.34
+    dj_priority_share_window: int = 15
     # #5867: the phone's shuffle keeps versions of one song at least this far apart
     # (more on a long list; see shuffle_spacing). 0 turns the spacing off.
     shuffle_work_gap_minutes: int = 60
