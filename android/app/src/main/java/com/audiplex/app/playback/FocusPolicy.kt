@@ -67,6 +67,15 @@ object FocusPolicy {
     ): Boolean = (alreadyPausedByFocus && wasPlaying) || isPlaying || playWhenReady
 
     /**
+     * #3249: whether a play should send a focus request to the system. A GAIN's own
+     * resume must not: the GAIN already put us on top, and on 11/14 21:12:00Z the
+     * re-request (full GAIN) took the top back from Pantheon Talk's reclaim 12 ms
+     * later, Talk's LOSS for us then paused us, and no GAIN was left to come. Any
+     * other play (Todd's tap, a DJ command) still requests: his play wins (#4338).
+     */
+    fun requestOnPlay(inGainResume: Boolean, hasFocus: Boolean): Boolean = !(inGainResume && hasFocus)
+
+    /**
      * Determine the action to take when audio focus changes.
      *
      * @param focusChange one of AudioManager.AUDIOFOCUS_*

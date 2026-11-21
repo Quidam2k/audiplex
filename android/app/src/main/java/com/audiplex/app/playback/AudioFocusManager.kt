@@ -101,7 +101,16 @@ class AudioFocusManager(
     /** #2345 its own handler: holdHandler/rampHandler queues get cleared wholesale, the settle marker must not be. */
     private val focusHandler = Handler(Looper.getMainLooper())  // #2345
 
+    /**
+     * #3249: true only inside a GAIN's own resume, so the play it starts does not re-request
+     * focus ([FocusPolicy.requestOnPlay]). Main looper only. Media3 1.4.1's ListenerSet runs
+     * onPlayWhenReadyChanged inline inside player.play() when no listener flush is in progress,
+     * and a focus callback is its own looper message, so the listener sees the flag.
+     */
+    private var inGainResume = false
+
     private val focusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        if (focusChange < 0) inGainResume = false  // #3249 a loss means we are no longer on top
         if (focusChange < 0 && staleLoss.isStale()) {  // #2345 sent before our grant: we hold focus now
             log("#2345 stale focus loss $focusChange ignored: queued before our latest grant")
             return@OnAudioFocusChangeListener
@@ -123,6 +132,10 @@ class AudioFocusManager(
      * @return true if focus was granted
      */
     fun requestFocus(): Boolean {
+        if (!FocusPolicy.requestOnPlay(inGainResume, hasFocus)) {  // #3249
+            log("#3249 gain resume: focus re-request skipped, we already hold it")
+            return true
+        }
         val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val request = focusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(
@@ -269,8 +282,13 @@ class AudioFocusManager(
             is FocusPolicy.FocusAction.Restore -> {
                 val t0 = SystemClock.elapsedRealtime()  // #5834
                 val fromSilence = action.resume && !player.isPlaying  // #5834
-                fader.restore(action.volume, action.resume) {  // #3597 Pantheon #2187
-                    if (fromSilence) log("#5834 focus resume: faded in to ${action.volume} in ${SystemClock.elapsedRealtime() - t0} ms")
+                inGainResume = action.resume  // #3249 the play this GAIN starts must not re-request focus
+                try {
+                    fader.restore(action.volume, action.resume) {  // #3597 Pantheon #2187
+                        if (fromSilence) log("#5834 focus resume: faded in to ${action.volume} in ${SystemClock.elapsedRealtime() - t0} ms")
+                    }
+                } finally {
+                    inGainResume = false  // #3249 Codex: a play queued behind this GAIN still requests
                 }
                 wasPlaying = false
                 pausedByFocus = false
