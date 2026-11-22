@@ -29,7 +29,7 @@ def tail_silence(path: str, ffmpeg: str = "ffmpeg") -> tuple[float, float | None
     out = subprocess.run(
         [ffmpeg, "-hide_banner", "-nostats", "-i", path,
          "-af", f"silencedetect=noise={FLOOR_DB}dB:d={MIN_SILENCE}", "-f", "null", "-"],
-        capture_output=True, text=True, timeout=300).stderr
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300).stderr  # #6710: non-ASCII paths
     dur = re.search(r"Duration: (\d+):(\d+):([\d.]+)", out)
     total = int(dur[1]) * 3600 + int(dur[2]) * 60 + float(dur[3]) if dur else 0.0
     starts = [float(m) for m in re.findall(r"silence_start: ([\d.]+)", out)]
