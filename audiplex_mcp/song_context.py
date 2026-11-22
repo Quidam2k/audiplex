@@ -259,6 +259,11 @@ def _skip_tag(tag: str) -> bool:
     return folded in SKIP_TAGS or folded.endswith("-star-verbal")
 
 
+def _link_tag(tag: str) -> bool:
+    """#4913: a tag that links two songs; fame:* (#5694) labels a quarter of the library."""
+    return not _skip_tag(tag) and not tag.strip().casefold().startswith("fame:")
+
+
 def _facts(memory: _Memory, key: str) -> list[Fact]:
     if key not in memory.fact_cache:
         result: list[Fact] = []
@@ -538,10 +543,10 @@ def _link(memory: _Memory, track_a: int, track_b: int) -> list[Fact]:
         reasons.append(theme_reason)
 
     tags_b = {
-        tag.casefold() for tag in _tags(memory, track_b) if not _skip_tag(tag)
+        tag.casefold() for tag in _tags(memory, track_b) if _link_tag(tag)  # #4913
     }
     for tag in _tags(memory, track_a):
-        if not _skip_tag(tag) and tag.casefold() in tags_b:
+        if _link_tag(tag) and tag.casefold() in tags_b:  # #4913
             reasons.append(_reason(
                 "shared_tag", f"both tagged '{tag}'", "Todd's tags"
             ))
@@ -741,7 +746,7 @@ def _candidates(memory: _Memory, seed: Track) -> set[int]:
             add_key(row["song_key"])
 
     for tag in _tags(memory, track_id):
-        if _skip_tag(tag):
+        if not _link_tag(tag):  # #4913
             continue
         candidates.update(
             row["track_id"]

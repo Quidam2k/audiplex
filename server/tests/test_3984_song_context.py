@@ -370,3 +370,14 @@ def test_theme_lyrics_unicode_case(dbs):  # #10124 (Codex review): LIKE folds AS
 
 def test_theme_without_lyrics_table_fails_open(dbs):  # #10124
     assert [h["track_id"] for h in sc.theme("war")] == [11]  # #10124
+
+
+def test_fame_tags_are_no_link(dbs):  # #4913: "both tagged 'fame:obscure'" is not a reason to follow
+    assert not sc._link_tag("fame:obscure") and not sc._link_tag("FAME:cover") and sc._link_tag("protest")
+    with sqlite3.connect(os.environ["AUDIPLEX_DB_PATH"]) as c:
+        c.executemany("INSERT INTO dj_track_tags VALUES (?, ?, 'fame-haiku', '2026-11-09')",
+                      [(1, "fame:obscure"), (11, "fame:obscure")])
+    sc._reset_cache()
+    assert "shared_tag" not in {r["kind"] for r in sc.link(1, 11)}
+    assert 11 in {h["track_id"] for h in sc.theme("fame:obscure")}  # still searchable by name
+    assert "fame:obscure" in sc.context(1)["todd"]["tags"]  # still shown

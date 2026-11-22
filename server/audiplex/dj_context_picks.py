@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
 BOOST = 2.0
-BUDGET_S = 1.5  # same ceiling #3984 gives a queue call
+BUDGET_S = 1.5  # same ceiling #3984 gives a queue call; top_up blocks the state report before cues (#4913: kept)
 AFTER_N = 500  # after() ranks evidence-reached tracks; keep enough to meet the lane
 
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dj_context")

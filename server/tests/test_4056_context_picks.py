@@ -193,3 +193,43 @@ def test_pool_default_context_tilt_is_disabled(tmp_path):
 
     assert out["context_reasons"] == []
     assert pool.status()["context_picks"]["enabled"] is False
+
+
+def test_pool_records_context_history_capped(tmp_path, monkeypatch):  # #4913
+    def after(seed, n):
+        return [_link(tid) for tid in LANE_A]
+
+    monkeypatch.setattr(
+        dj_pool,
+        "_context_tilt",
+        lambda: dj_context_picks.ContextTilt(True, after_fn=after),
+    )
+    pool = _make_pool(tmp_path)
+
+    pool.top_up(current_track_id=999, upcoming_track_ids=[999], db=None)
+    history = pool.status()["context_picks_history"]
+    assert len(history) == 1
+    assert history[0]["picks"] == 2 and history[0]["tilted"] == 1 and history[0]["gave_up"] is None
+
+    pool.state["context_picks_history"] = [{"at": 0, "picks": 0, "tilted": 0, "gave_up": None}] * 25
+    pool.top_up(current_track_id=999, upcoming_track_ids=[999], db=None)
+    history = pool.status()["context_picks_history"]
+    assert len(history) == dj_pool.CONTEXT_HISTORY_N
+    assert history[-1]["picks"] > 0
+
+
+def test_pool_context_history_records_give_up(tmp_path, monkeypatch):  # #4913
+    def after(seed, n):
+        raise RuntimeError("song memory unavailable")
+
+    monkeypatch.setattr(
+        dj_pool,
+        "_context_tilt",
+        lambda: dj_context_picks.ContextTilt(True, after_fn=after),
+    )
+    pool = _make_pool(tmp_path)
+
+    pool.top_up(current_track_id=999, upcoming_track_ids=[999], db=None)
+
+    last = pool.status()["context_picks_history"][-1]
+    assert last["tilted"] == 0 and "RuntimeError" in last["gave_up"]

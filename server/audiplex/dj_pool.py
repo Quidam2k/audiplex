@@ -50,6 +50,7 @@ def _context_tilt() -> dj_context_picks.ContextTilt:
 # #7108: a lane that has played all its tracks recycles them, but never one
 # picked within the last this-many picks (about two hours of songs).
 NO_REPEAT_PICKS = 30
+CONTEXT_HISTORY_N = 20  # #4913: top-ups kept in context_picks_history
 
 
 def _get_pool_state_path() -> Path:
@@ -303,6 +304,7 @@ class DJPool:
             "last_topup_at": self.state.get("last_topup_at"),
             "dropped_by_learning": self.state.get("dropped_by_learning", []),  # #4057: as of the last top-up
             "context_picks": self.state.get("context_picks"),  # #4056: as of the last top-up
+            "context_picks_history": self.state.get("context_picks_history", []),  # #4913: last 20 top-ups
             "priority": self.state.get("priority"),  # #1006: group sizes + cooled count, last top-up
             "lanes": lane_details,
             "source_counts": self._count_sources(),  # Backward compat
@@ -602,6 +604,7 @@ class DJPool:
         tilt = _context_tilt()
         queue_end = next((t for t in reversed(upcoming_track_ids) if isinstance(t, int) and t > 0), current_track_id)
         context_reasons: list[str] = []
+        tilted_picks = 0  # #4913: picks the song-memory lean actually landed
 
         # #5696: never the same act twice in a row (spellings folded, "feat." dropped,
         # compilations exempt), across lanes and at the join with the queue's end.
@@ -613,10 +616,12 @@ class DJPool:
             return [t for t in candidates if not prev or artist_of.get(t) != prev]
 
         def pick_from(candidates: list[int]) -> int:
+            nonlocal tilted_picks
             seed = picks[-1] if picks else queue_end
             tilted, hits = tilt.weights(seed, candidates, weights)  # #4056
             pick = _weighted_pick(candidates, tilted)  # #4057
             if pick in hits:
+                tilted_picks += 1
                 context_reasons.append(f"#{pick} " + dj_context_picks.reason_text(seed, hits[pick]))
             return pick
 
@@ -788,6 +793,10 @@ class DJPool:
         self.state["last_topup_current_track_id"] = current_track_id
         self.state["context_picks"] = {  # #4056: shown by status()
             "enabled": tilt.enabled, "reasons": context_reasons, "skipped": tilt.gave_up}
+        history = self.state.setdefault("context_picks_history", [])  # #4913: how often it follows
+        history.append({"at": time.time(), "picks": len(picks), "tilted": tilted_picks,
+                        "gave_up": tilt.gave_up})
+        del history[:-CONTEXT_HISTORY_N]
         if not picks:
             self._persist()
             return {"picks": [], "reason": "no eligible candidates", "pending_cues": pending_cues,
