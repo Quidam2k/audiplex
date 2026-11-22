@@ -9,8 +9,10 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+from functools import lru_cache
 import sqlite3
 import sys
+from bisect import bisect_right
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -105,6 +107,7 @@ def _rfl_store_path() -> Path:
 
 def _reset_cache() -> None:
     """Discard the imported key helper and library index."""
+    _reset_facts_cache()  # #6737
     global _store_mod, _store_path, _library_stamp
     global _library_tracks, _library_keys
     _store_mod = None
@@ -615,29 +618,187 @@ def _like(text: str) -> str:
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _fact_candidates(
-    memory: _Memory,
-    kinds: tuple[str, ...],
-    patterns: tuple[str, ...],
-    limit: int | None = None,
+# #6737: theme/writer/sample scans read an in-memory copy of these fact kinds;
+# dj_notes.db has no index on kind, so each LIKE scanned the whole facts table.
+CACHED_KINDS = ("theme", "writers", "samples", "cover_of", "covers")
+
+_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+_facts_stamp: tuple[Any, ...] | None = None
+# kind -> (joined, starts, seqs, rows): every folded text of that kind joined by
+# NUL with a NUL at each end, where row i's text starts; seq = order by rank, id.
+_facts_index: dict[str, tuple[str, list[int], list[int], list[sqlite3.Row]]] | None = None
+
+_FACT_SELECT = """
+    SELECT f.song_key, f.kind, f.text, f.source_name, f.source_url,
+           s.artist, s.title
+    FROM facts f JOIN songs s ON s.key = f.song_key
+"""
+_SEP = "\x00"
+SEP_ESC = r'\x00'  # _SEP inside a regex
+
+
+def _fold(text: str) -> str:
+    """Fold ASCII A-Z to a-z only, as SQLite's default LIKE does; NUL is the row separator."""
+    return text.translate(_FOLD).replace(_SEP, "\x01")
+
+
+def _like_body(pattern: str) -> str | None:
+    """A LIKE pattern (ESCAPE '\') as a regex body over folded text; None never matches."""
+    folded = pattern.translate(_FOLD)
+    out: list[str] = []
+    i = 0
+    while i < len(folded):
+        ch = folded[i]
+        if ch == "\\":
+            if i + 1 >= len(folded):
+                return None  # a dangling escape never matches
+            out.append(re.escape(folded[i + 1]))
+            i += 2
+            continue
+        out.append("[^" + SEP_ESC + "]*" if ch == "%" else "[^" + SEP_ESC + "]" if ch == "_" else re.escape(ch))
+        i += 1
+    return "".join(out)
+
+
+@lru_cache(maxsize=512)
+def _like_regex(pattern: str) -> re.Pattern[str]:
+    """Fullmatch against one _fold()ed text."""
+    body = _like_body(pattern)
+    return re.compile("(?!)" if body is None else body)
+
+
+@lru_cache(maxsize=512)
+def _like_scan(pattern: str) -> re.Pattern[str]:
+    """Finds rows of a kind's joined text that match: a leading or trailing % is
+    dropped (search, not fullmatch) and a row edge is pinned only where the
+    pattern has none."""
+    body = _like_body(pattern)
+    if body is None:
+        return re.compile("(?!)")
+    any_run = "[^" + SEP_ESC + "]*"
+    head = body.startswith(any_run)
+    tail = body.endswith(any_run) and len(body) > len(any_run)
+    core = body[len(any_run) if head else 0:len(body) - len(any_run) if tail else len(body)]
+    return re.compile(("" if head else "(?<=" + SEP_ESC + ")") + core + ("" if tail else "(?=" + SEP_ESC + ")"))
+
+
+def _fact_index() -> dict[str, tuple[str, list[int], list[int], list[sqlite3.Row]]]:
+    """The cached kinds, reloaded only when dj_notes.db or its -wal changes (#6737).
+
+    Read through a connection opened and closed here: no handle or lock is kept.
+    Assumes the default LIKE (no case_sensitive_like pragma, no ICU), as the SQL path does."""
+    global _facts_stamp, _facts_index
+    path = _rfl_notes_db_path()
+    st = path.stat()
+    wal = Path(str(path) + "-wal")  # WAL mode: commits land here until a checkpoint
+    wst = wal.stat() if wal.exists() else None
+    stamp = (str(path.resolve()), st.st_mtime_ns, st.st_size,
+             wst.st_mtime_ns if wst else 0, wst.st_size if wst else 0)
+    index = _facts_index
+    if index is not None and _facts_stamp == stamp:
+        return index
+    kind_marks = ",".join("?" for _ in CACHED_KINDS)
+    sql = _FACT_SELECT.replace("f.text,", "f.text, CAST(f.text AS TEXT) AS like_text,") + f"""
+        WHERE s.status IN ('ok', 'research') AND f.kind IN ({kind_marks})
+        ORDER BY f.rank, f.id
+    """
+    conn = _open_db(path)
+    try:
+        fetched = conn.execute(sql, CACHED_KINDS).fetchall()
+    finally:
+        conn.close()
+    parts: dict[str, tuple[list[str], list[int], list[int], list[sqlite3.Row]]] = {}
+    pos: dict[str, int] = {}  # where the next text of a kind starts in its joined string
+    for seq, row in enumerate(fetched):
+        if row["like_text"] is None:
+            continue  # NULL never matches LIKE; other types match as text, like SQLite
+        texts, starts, seqs, rows = parts.setdefault(row["kind"], ([], [], [], []))
+        folded = _fold(row["like_text"])
+        starts.append(pos.get(row["kind"], 1))
+        pos[row["kind"]] = starts[-1] + len(folded) + 1
+        texts.append(folded)
+        seqs.append(seq)
+        rows.append(row)
+    index = {
+        kind: (_SEP + _SEP.join(texts) + _SEP, starts, seqs, rows)
+        for kind, (texts, starts, seqs, rows) in parts.items()
+    }
+    _facts_index = index  # publish before the stamp; readers keep their own reference
+    _facts_stamp = stamp
+    return index
+
+
+def _reset_facts_cache() -> None:
+    global _facts_stamp, _facts_index
+    _facts_stamp = None
+    _facts_index = None
+
+
+def _fact_candidates_cached(
+    kinds: tuple[str, ...], patterns: tuple[str, ...], limit: int | None
+) -> list[sqlite3.Row]:
+    if limit == 0 or not patterns:
+        return []
+    index = _fact_index()
+    scan, rest = _like_scan(patterns[0]), [_like_regex(p) for p in patterns[1:]]
+    single = len(set(kinds)) == 1
+    hits: list[tuple[int, sqlite3.Row]] = []
+    for kind in dict.fromkeys(kinds):
+        if kind not in index:
+            continue
+        joined, starts, seqs, rows = index[kind]
+        last = -1
+        for m in scan.finditer(joined):
+            i = bisect_right(starts, m.start()) - 1
+            if i < 0 or i == last:  # before the first row (an empty match), or a second hit
+                continue
+            last = i
+            end = starts[i + 1] - 1 if i + 1 < len(starts) else len(joined) - 1
+            if rest and not all(rx.fullmatch(joined, starts[i], end) for rx in rest):
+                continue
+            hits.append((seqs[i], rows[i]))
+            if single and limit is not None and 0 < limit <= len(hits):
+                break
+    hits.sort(key=lambda h: h[0])
+    if limit is not None and limit > 0:
+        hits = hits[:limit]
+    return [row for _, row in hits]
+
+
+def _fact_candidates_sql(
+    memory: _Memory, kinds: tuple[str, ...], patterns: tuple[str, ...], limit: int | None = None
 ) -> list[sqlite3.Row]:
     if memory.rfl is None:
         return []
     kind_marks = ",".join("?" for _ in kinds)
     filters = " AND ".join("f.text LIKE ? ESCAPE '\\'" for _ in patterns)
-    sql = f"""
-        SELECT f.song_key, f.kind, f.text, f.source_name, f.source_url,
-               s.artist, s.title
-        FROM facts f JOIN songs s ON s.key = f.song_key
+    sql = (
+        _FACT_SELECT
+        + f"""
         WHERE s.status IN ('ok', 'research')
           AND f.kind IN ({kind_marks}) AND {filters}
         ORDER BY f.rank, f.id
     """
-    params: tuple[Any, ...] = kinds + patterns
+    )
+    params = kinds + patterns
     if limit is not None:
         sql += " LIMIT ?"
         params += (limit,)
     return memory.rfl.execute(sql, params).fetchall()
+
+
+def _fact_candidates(
+    memory: _Memory, kinds: tuple[str, ...], patterns: tuple[str, ...], limit: int | None = None
+) -> list[sqlite3.Row]:
+    if memory.rfl is None:
+        return []
+    if all(k in CACHED_KINDS for k in kinds):
+        try:
+            return _fact_candidates_cached(kinds, patterns, limit)
+        except Exception as exc:  # fail open to the SQL scan
+            _error("fact_cache", exc)
+    return _fact_candidates_sql(memory, kinds, patterns, limit)
 
 
 def _lyric_candidates(

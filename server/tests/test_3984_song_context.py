@@ -381,3 +381,61 @@ def test_fame_tags_are_no_link(dbs):  # #4913: "both tagged 'fame:obscure'" is n
     assert "shared_tag" not in {r["kind"] for r in sc.link(1, 11)}
     assert 11 in {h["track_id"] for h in sc.theme("fame:obscure")}  # still searchable by name
     assert "fame:obscure" in sc.context(1)["todd"]["tags"]  # still shown
+
+
+# #6737: the cached fact scan must match SQLite LIKE ... ESCAPE '\' exactly.
+_LIKE_TEXTS = ["Written by Jane Writer.", "WRITTEN BY JANE", "Café au lait", "CAFÉ AU LAIT",
+               "café", "a_b c%d", "aXb", "line one\nline two", "Beyoncé and Björk", ""]
+_LIKE_PATTERNS = ["%jane%", "%JANE%writer%", "%café%", "%CAFÉ%", "%caf_%", "%a\_b%", "%c\%d%",
+                  "a_b", "%one%two%", "%BEYONCÉ%", "%björk%", "%", "\\", "x\\"]
+
+
+def test_like_regex_matches_sqlite_like():
+    conn = sqlite3.connect(":memory:")
+    for text in _LIKE_TEXTS:
+        for pattern in _LIKE_PATTERNS:
+            try:
+                want = bool(conn.execute("SELECT ? LIKE ? ESCAPE '\\'", (text, pattern)).fetchone()[0])
+            except sqlite3.OperationalError:  # a dangling escape: SQLite refuses it, we never match
+                want = False
+            got = bool(sc._like_regex(pattern).fullmatch(sc._fold(text)))
+            assert got == want, (text, pattern)
+
+
+def test_cached_fact_candidates_equal_sql(dbs):
+    found = 0
+    with sc._memory() as memory:
+        for kinds, patterns in [(("writers",), ("%jane writer%",)), (("theme",), ("%war%",)),
+                                (("theme",), ("%LIGHTHOUSE%sea%",)), (("writers", "theme"), ("%e%",)),
+                                (("theme",), ("a song%",)), (("theme",), ("%the sea.",)), (("theme",), ("%",)),
+                                (("theme",), ("_ song%",)), (("writers",), ("WRITTEN BY JANE WRITER.",)),
+                                (("theme",), ("%É%",)), (("theme",), ("%war%", "%vietnam%"))]:
+            for limit in (None, 1, 200):
+                sql = [(r["song_key"], r["text"]) for r in sc._fact_candidates_sql(memory, kinds, patterns, limit)]
+                cached = [(r["song_key"], r["text"]) for r in sc._fact_candidates(memory, kinds, patterns, limit)]
+                assert cached == sql, (kinds, patterns, limit)
+                found += bool(sql)
+    assert found >= 10  # most of these patterns do match the fixture
+
+
+def test_fact_cache_reloads_when_the_file_changes(dbs):
+    sc._fact_index()
+    stamp = sc._facts_stamp
+    path = sc._rfl_notes_db_path()
+    with sqlite3.connect(path) as c:
+        c.execute("UPDATE facts SET text = text || ' Extra lighthouse.' WHERE kind = 'theme'")
+    os.utime(path, ns=(stamp[1] + 10**9, stamp[1] + 10**9))
+    assert any("Extra lighthouse" in r["text"] for _, _, _, rows in sc._fact_index().values() for r in rows)
+    assert sc._facts_stamp != stamp
+
+
+def test_fact_cache_reloads_on_a_wal_write(dbs):  # #6737: WAL commits leave the main file alone
+    sc._fact_index()
+    stamp = sc._facts_stamp
+    wal = Path(str(sc._rfl_notes_db_path()) + "-wal")
+    wal.write_bytes(b"x" * 10)
+    try:
+        sc._fact_index()
+        assert sc._facts_stamp != stamp
+    finally:
+        wal.unlink()
