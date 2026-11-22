@@ -69,6 +69,16 @@
                 android:value="Maintains a persistent remote-control link to the user's self-hosted Audiplex server so playback commands arrive while the app is idle." />
         </service>
 
+        <!-- Pantheon #6707: Talk's duck depth, sent explicitly (setPackage) before each
+             of its focus requests. Exported so Pantheon can reach it; the value is clamped. -->
+        <receiver
+            android:name=".playback.DuckLevelReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.audiplex.app.DUCK_LEVEL" />
+            </intent-filter>
+        </receiver>
+
         <!-- Always-on has to survive a reboot, or it just means "until the
              phone restarts". -->
         <receiver

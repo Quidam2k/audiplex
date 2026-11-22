@@ -42,6 +42,8 @@ object FocusPolicy {
         val currentVolume: Float = 1f,
         val preDuckVolume: Float? = null,
         val isSpeech: Boolean = false,
+        /** Pantheon #6707: Talk's dial, a fraction of the dial level; null = the 5% default. */
+        val externalDuckFraction: Float? = null,
     )
 
     /** #7528: where a level change goes while the duck owns the volume. */
@@ -85,7 +87,10 @@ object FocusPolicy {
     fun decide(focusChange: Int, state: FocusState): FocusAction = when (focusChange) {
         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
             // Narrator rule: speech pauses, music ducks to 5%.
-            if (state.isSpeech) FocusAction.Pause else FocusAction.Duck(DUCK_VOLUME)
+            if (state.isSpeech) FocusAction.Pause
+            else FocusAction.Duck(state.externalDuckFraction
+                ?.let { ((state.preDuckVolume ?: state.currentVolume) * it).coerceIn(0f, 1f) }  // Pantheon #6707
+                ?: DUCK_VOLUME)
         }
         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
             // Cannot-duck loss (e.g. call): pause, resume on GAIN.

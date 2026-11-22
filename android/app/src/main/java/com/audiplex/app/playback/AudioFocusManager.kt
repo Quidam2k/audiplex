@@ -115,11 +115,16 @@ class AudioFocusManager(
             log("#2345 stale focus loss $focusChange ignored: queued before our latest grant")
             return@OnAudioFocusChangeListener
         }
+        val external = if (focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK)  // Pantheon #6707
+            ExternalDuckLevel.shared.forDuck(SystemClock.elapsedRealtime()) else null  // Pantheon #6707
+        if (focusChange > 0 || focusChange == AudioManager.AUDIOFOCUS_LOSS) ExternalDuckLevel.shared.endEpisode()  // Pantheon #6707
+        if (external != null) log("#6707 talk duck level $external of the dial (Pantheon)")  // Pantheon #6707
         val state = FocusPolicy.FocusState(
             wasPlaying = wasPlaying,
             currentVolume = player.volume,
             preDuckVolume = fader.restoreTarget,  // #5834 mid-fade: the dial level, not the faded one
             isSpeech = player.audioAttributes.contentType == C.AUDIO_CONTENT_TYPE_SPEECH,
+            externalDuckFraction = external,  // Pantheon #6707
         )
         applyAction(FocusPolicy.decide(focusChange, state))
     }
@@ -182,6 +187,7 @@ class AudioFocusManager(
      * or the service is released.
      */
     fun abandonFocus() {
+        ExternalDuckLevel.shared.endEpisode()  // Pantheon #6707
         if (hasFocus) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
