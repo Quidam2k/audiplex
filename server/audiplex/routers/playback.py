@@ -1091,6 +1091,31 @@ def playable_tracks(
 # through these routes; a DJPool() it builds itself never reaches the bus.
 
 
+def _lane_turns(db: Session, body: dict, spec_id) -> dict[str, int]:
+    """#6730: turns per lane label: the body's lane_turns, else the spec's sources."""
+    from sqlalchemy import text
+    from audiplex.dj_pool import clamp_turns, turns_by_label
+
+    if isinstance(body.get("lane_turns"), dict):
+        return {str(k): clamp_turns(v) for k, v in body["lane_turns"].items()}
+    if spec_id is None:
+        return {}
+    row = db.execute(text("SELECT sources_json FROM dj_mix_specs WHERE id = :id"), {"id": spec_id}).first()
+    try:
+        return turns_by_label(json.loads(row[0]) if row and row[0] else [])
+    except (TypeError, ValueError):
+        return {}
+
+
+def _bucket_lane_ids(db: Session, name: str) -> list[int]:
+    """#6730: a bucket's tracks as a live lane, filtered like POST /pool/set filters lanes."""
+    from audiplex.routers.buckets import _buckets
+
+    ids = [int(t) for t in _buckets().track_ids(name)]
+    skip = non_music(db, ids) | too_long_for_mix(db, ids) | banned_ids(db)
+    return [t for t in ids if t not in skip]
+
+
 def _spec_row(db: Session, name: str):
     from sqlalchemy import text
 
@@ -1216,7 +1241,8 @@ def set_pool(
         source_labels = {t: label for label, ids in lanes.items() for t in ids}
         no_repeat = body.get("no_repeat_picks")  # #7108
         result = pool.set_pool(
-            spec_id, track_ids, source_labels, lanes=lanes_from_ids(lanes, dropped),
+            spec_id, track_ids, source_labels,
+            lanes=lanes_from_ids(lanes, dropped, _lane_turns(db, body, spec_id)),  # #6730
             balance=balance, ahead=ahead, exclude_recent_hours=exclude_recent_hours,
             refill_at=refill_at, no_repeat_picks=int(no_repeat) if no_repeat is not None else None,
         )
@@ -1842,11 +1868,19 @@ def update_mix_spec(
     spec_id = row[0]
     sources = json.loads(row[3]) if row[3] else []
 
+    from audiplex.dj_pool import PRIORITY_LANE, clamp_turns, source_label
+
+    removed_labels: set[str] = set()
     if body.get("add_sources"):
         sources.extend(body["add_sources"])
     if body.get("remove_sources"):
         gone = set(body["remove_sources"])
+        removed_labels = {source_label(s) for s in sources if s.get("query") in gone or s.get("label") in gone}
         sources = [s for s in sources if s.get("query") not in gone and s.get("label") not in gone]
+    lane_turns = {str(k): clamp_turns(v) for k, v in (body.get("lane_turns") or {}).items()}  # #6730
+    for s in sources:
+        if source_label(s) in lane_turns:
+            s["turns"] = lane_turns[source_label(s)]
 
     db.execute(
         text("UPDATE dj_mix_specs SET sources_json = :sources_json, "
@@ -1858,8 +1892,24 @@ def update_mix_spec(
     resynced = False
     pool = get_pool()
     lanes = body.get("lanes")
-    if lanes is not None and pool.is_active() and pool.state.get("spec_id") == spec_id:
-        pool.resync_lanes({str(k): [int(t) for t in v] for k, v in lanes.items()})
+    live = pool.is_active() and pool.state.get("spec_id") == spec_id
+    turns_now = {source_label(s): clamp_turns(s.get("turns")) for s in sources}  # #6730
+    if lanes is None and live and (removed_labels or any(  # #6730 a web edit: resolve buckets here
+            s.get("kind") == "bucket" for s in body.get("add_sources") or [])):
+        current = {n: l.get("track_ids", []) for n, l in pool.state.get("lanes", {}).items()
+                   if n != PRIORITY_LANE and n not in removed_labels}
+        for s in body.get("add_sources") or []:
+            if s.get("kind") == "bucket":
+                try:
+                    current[source_label(s)] = _bucket_lane_ids(db, s.get("query", ""))
+                except ValueError:
+                    current[source_label(s)] = []
+        lanes = current
+    if lanes is not None and live:
+        pool.resync_lanes({str(k): [int(t) for t in v] for k, v in lanes.items()}, turns=turns_now)
+        resynced = True
+    elif lane_turns and live:
+        pool.set_lane_turns(lane_turns)  # #6730 turns alone: no re-plan needed
         resynced = True
         if body.get("replan", True):  # #4054 a bucket joining the ride set only appends its lane
             bus.replan_pool(f"{user.username}/spec_edit")  # #3644: show the edit now

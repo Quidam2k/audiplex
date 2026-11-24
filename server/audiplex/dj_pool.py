@@ -80,8 +80,31 @@ def _write_json_atomic(path: Path, data: Any) -> None:
     temp.replace(path)
 
 
+MAX_TURNS = 5  # #6730
+
+
+def clamp_turns(n: Any) -> int:
+    """#6730: a lane's turns per rotation, 1..MAX_TURNS; junk is 1."""
+    try:
+        return max(1, min(MAX_TURNS, int(n)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def source_label(src: dict) -> str:
+    """The lane label a spec source resolves to; mirrors audiplex_mcp _source_label (#6730)."""
+    q = str(src.get("query") or "").rstrip("/\\")
+    return str(src.get("label") or q.replace("\\", "/").split("/")[-1] or src.get("kind", "source"))
+
+
+def turns_by_label(sources: list[dict]) -> dict[str, int]:
+    """#6730: {lane label: turns} for the sources that ask for more than one turn."""
+    return {source_label(s): clamp_turns(s.get("turns")) for s in sources
+            if isinstance(s, dict) and clamp_turns(s.get("turns")) != 1}
+
+
 def _lane(track_ids: list[int], prior: Optional[dict] = None,
-          dropped: Optional[dict[str, int]] = None) -> dict[str, Any]:
+          dropped: Optional[dict[str, int]] = None, turns: Optional[int] = None) -> dict[str, Any]:
     """One lane record; a zero-track lane is born exhausted (#5495).
 
     dropped (#7108): {reason: count} of resolved tracks the server filtered
@@ -99,6 +122,8 @@ def _lane(track_ids: list[int], prior: Optional[dict] = None,
         "exhausted": not ids,
         "zero_on_resolve": not ids,
         "paused": prior.get("paused", False),  # #2806: survives a spec resync
+        "turns": clamp_turns(prior.get("turns", 1) if turns is None else turns),  # #6730
+        "pass": prior.get("pass"),  # #6730 stride position, kept across a resync
     }
 
 
@@ -111,9 +136,12 @@ def _why_no_tracks(dropped: Optional[dict[str, int]]) -> str:
 
 
 def lanes_from_ids(lanes: dict[str, list[int]],
-                   dropped: Optional[dict[str, dict[str, int]]] = None) -> dict[str, dict]:
-    """{label: [track_ids]} -> full lane records (#5495); dropped per label (#7108)."""
-    return {label: _lane(ids, dropped=(dropped or {}).get(label)) for label, ids in lanes.items()}
+                   dropped: Optional[dict[str, dict[str, int]]] = None,
+                   turns: Optional[dict[str, int]] = None) -> dict[str, dict]:
+    """{label: [track_ids]} -> full lane records (#5495); dropped per label (#7108);
+    turns per label, 1 when absent (#6730)."""
+    return {label: _lane(ids, dropped=(dropped or {}).get(label), turns=(turns or {}).get(label, 1))
+            for label, ids in lanes.items()}
 
 
 def owner_user_id(db: Any) -> Optional[int]:
@@ -288,6 +316,7 @@ class DJPool:
                 "exhausted": lane_data.get("exhausted", False),
                 "zero_on_resolve": lane_data.get("zero_on_resolve", False),
                 "paused": lane_data.get("paused", False),  # #2806
+                "turns": clamp_turns(lane_data.get("turns", 1)),  # #6730
                 "why_empty": lane_data.get("why_empty"),  # #7108
             })
 
@@ -349,7 +378,33 @@ class DJPool:
                   and n not in skip]  # #5696 a lane sitting out this slot
         if not active:
             return None
-        return min(active, key=lambda n: (lanes[n].get("last_pick_index", -1), order.index(n)))
+        if all(clamp_turns(lanes[n].get("turns", 1)) == 1 for n in active):  # #6730 the old rotation, untouched
+            return min(active, key=lambda n: (lanes[n].get("last_pick_index", -1), order.index(n)))
+        return min(active, key=lambda n: (self._lane_pass(lanes[n]), lanes[n].get("last_pick_index", -1),
+                                          order.index(n)))
+
+    def _lane_pass(self, lane: dict) -> float:
+        """#6730 stride scheduling: a lane's place in line. One that sat out (new, paused,
+        empty) is lifted to where the line is now, so it can't take a burst of turns."""
+        return max(float(lane.get("pass") or 0.0), float(self.state.get("stride_pass") or 0.0))
+
+    def _advance_pass(self, lane: dict) -> None:
+        """#6730: after a pick a lane with N turns moves back 1/N of a place in line."""
+        here = self._lane_pass(lane)
+        self.state["stride_pass"] = here
+        lane["pass"] = here + 1.0 / clamp_turns(lane.get("turns", 1))
+
+    def set_lane_turns(self, turns: dict[str, int]) -> dict[str, int]:
+        """#6730: change turns on the running pool's lanes by label; returns what changed."""
+        lanes = self.state.get("lanes", {})
+        changed = {}
+        for label, n in turns.items():
+            if label in lanes:
+                lanes[label]["turns"] = clamp_turns(n)
+                changed[label] = lanes[label]["turns"]
+        if changed:
+            self._persist()
+        return changed
 
     def set_lane(self, lane: str, action: str) -> dict[str, Any]:  # #2806
         """Pause, resume or remove one lane. Raises KeyError/ValueError with a sayable message."""
@@ -370,7 +425,8 @@ class DJPool:
         self._persist()
         return {"lane": name, "action": action, "lanes": self.status()["lanes"]}
 
-    def resync_lanes(self, lanes: dict[str, list[int]]) -> dict[str, int]:
+    def resync_lanes(self, lanes: dict[str, list[int]],
+                     turns: Optional[dict[str, int]] = None) -> dict[str, int]:
         """Replace lane track lists after a spec edit, keeping per-lane stats (#5495).
 
         lanes: {label: [track_ids]} resolved by the caller. A label that keeps
@@ -380,7 +436,8 @@ class DJPool:
         """
         old = self.state.get("lanes", {})
         self.state["lanes"] = {
-            label: _lane(ids, old.get(label)) for label, ids in lanes.items()
+            label: _lane(ids, old.get(label), turns=(turns or {}).get(label))  # #6730
+            for label, ids in lanes.items()
         }
         if old.get(PRIORITY_LANE, {}).get("injected") and PRIORITY_LANE not in lanes:  # #1006: not a spec source
             self.state["lanes"][PRIORITY_LANE] = old[PRIORITY_LANE]
@@ -767,6 +824,7 @@ class DJPool:
                 skip_recordings.add(rec)
 
             lane["played_count"] = lane.get("played_count", 0) + 1
+            self._advance_pass(lane)  # #6730 (only read when some lane has turns > 1)
             lane["last_pick_index"] = self.state.get("round_robin_index", 0)  # #7108
             lane["last_played_at"] = time.time()
             self.state["round_robin_index"] = self.state.get("round_robin_index", 0) + 1
