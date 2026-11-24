@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from audiplex import playback_bus as playback_bus_module
 from audiplex import scheduled_stop, todd_stop
 from audiplex.playback_bus import bus
 
@@ -14,6 +15,25 @@ START_TYPES = (
     "play_now", "resume", "queue", "play_next", "play_stream",
     "play_book", "activate", "announce", "bed_play",
 )
+
+
+@pytest.fixture(autouse=True)
+def empty_guard_db(monkeypatch, tmp_path):
+    """#5631: the bus's queue guard (#7335) reads listening history through
+    playback_bus._pool_session, which is the REAL server/audiplex.db unless
+    patched: a song Todd played today then made the guard drop these tests'
+    tracks before the latch ever refused them. Give it an empty temp DB."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from audiplex import models  # noqa: F401  (registers the tables)
+    from audiplex.database import Base
+
+    engine = create_engine(f"sqlite:///{(tmp_path / 'guard.db').as_posix()}")
+    Base.metadata.create_all(bind=engine)
+    monkeypatch.setattr(playback_bus_module, "_pool_session", sessionmaker(bind=engine))
+    yield
+    engine.dispose()
 
 
 @pytest.fixture(autouse=True)
