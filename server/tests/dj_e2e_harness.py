@@ -637,6 +637,9 @@ async def run_scenario(dev: SimulatedDevice, dj, ids: dict, rep: Report, tts: "F
               "dj_queue_by resolved an artist by PREFIX", f"queue={[i['id'] for i in dev.queue]} | {qb[:400]}")
     rep.check("Queue guard: dropped So What (Live)" in qb,
               "...and the queue guard named the live cut it dropped (#7335)", qb[:400])
+    guard_line = next((l for l in qb.splitlines() if l.startswith("Queue guard:")), "")  # #6854
+    rep.check(guard_line.endswith("already in this batch") and "Sent to play now" not in guard_line,
+              "...on its own line, apart from the tool's 'Sent to play now' sentence", qb[:400])
 
     qb = await step(dj.dj_queue_by("Kind of Blue", "album", "now"), "dj_queue_by(album)")
     rep.check([i["id"] for i in dev.queue] == jazz, "dj_queue_by resolved an album",
@@ -775,13 +778,14 @@ async def run_scenario(dev: SimulatedDevice, dj, ids: dict, rep: Report, tts: "F
 
     n_before = dev.applied
     advised = await dj.dj_play_next([ids["recently_played"]])
-    rep.check("Heads-up" in advised and "played recently" in advised,
-              "queueing a just-played track warns instead of silently filtering",
-              advised.splitlines()[-1].strip())
     await asyncio.sleep(0.5)
     rep.check("Queue guard: dropped So What" in advised and dev.applied == n_before,
-              "...and the #7335 queue guard drops a play_next of the song now playing (a veto, no longer advisory)",
+              "the #7335 queue guard drops a play_next of the song now playing (a veto, no longer advisory)",
               advised[:600])
+    # #6854: one honest line, not "Inserted 0 ... (queued anyway)".
+    rep.check("Nothing was sent: the queue guard dropped every track" in advised
+              and "queued anyway" not in advised and "Inserted 0" not in advised,
+              "...and the reply says plainly that nothing was sent", advised[:600])
     n = dev.applied
 
     print("\n-- guards ----------------------------------------------------")
@@ -804,6 +808,8 @@ async def run_scenario(dev: SimulatedDevice, dj, ids: dict, rep: Report, tts: "F
     refused = await dj.dj_queue([gone])
     rep.check("has a file on disk" in refused and "nothing was sent" in refused,
               "a track whose file is gone is refused, not queued", refused)
+    rep.check('skipped_missing=["Flamenco Sketches - Miles Davis"]' in refused,  # #6854
+              "...and the refusal names the missing track in skipped_missing", refused)
     await asyncio.sleep(0.5)
     rep.check(dev.applied == n and [i["id"] for i in dev.queue] == queue_before,
               "...and nothing reached the device or changed its queue",

@@ -522,6 +522,14 @@ def _missing_note(data) -> str:  # #3249
             "phone and play nothing).")
 
 
+def _guard_dropped_all(data, asked: int) -> bool:  # #6854
+    """True when the queue guard dropped every track, so nothing went out."""
+    return isinstance(data, dict) and bool(data.get("guard_notes")) and _sent_count(data, asked) == 0
+
+
+NOTHING_SENT = "Nothing was sent: the queue guard dropped every track (reasons above)."  # #6854
+
+
 def _sent_count(data, asked: int) -> int:  # #3249: count what was SENT, not asked
     return int(data.get("sent_count", asked)) if isinstance(data, dict) else asked
 
@@ -555,8 +563,14 @@ def _held_kind(text: str) -> str:  # #ride0928
     return "not_sent"
 
 
+class _Refused(str):  # #6854: a refusal that also names the files it found missing
+    """Pass it straight to _held_result: any str operation (+, slicing) drops .skipped."""
+    skipped: tuple[str, ...] | list[str] = ()
+
+
 def _held_result(text: str) -> str:  # #ride0928: same shape as _result, for a refusal
-    return f"RESULT sent=0 held={_held_kind(text)} skipped_missing=[] phone_ack=none\n{text}"
+    skipped = json.dumps(list(getattr(text, "skipped", [])), ensure_ascii=False)  # #6854
+    return f"RESULT sent=0 held={_held_kind(text)} skipped_missing={skipped} phone_ack=none\n{text}"
 
 
 async def _ack_row(command_id: int, timeout: float) -> dict | None:  # #3505
@@ -702,7 +716,7 @@ def _guard_text(data) -> str:  # #7335: queue_guard drops and moves, named for t
         b = book.get("book") or {}  # #4052
         text += (f"\nBook paused and bookmarked: {b.get('title') or 'his audiobook'}, chapter "  # #4052
                  f"{int(book.get('chapter_index') or 0) + 1}. Don't tell him to pause it.")  # #4052
-    return text
+    return text + "\n" if text else text  # #6854: the tool's own line starts on a fresh line
 
 
 async def _result(data: dict, asked: int, wait_ack: bool = True) -> str:  # #ride0928
@@ -842,8 +856,10 @@ async def _enqueue(cmd_type: str, payload: dict) -> str:
     if payload.get("track_ids"):
         kept, dropped = await _playable_split(payload["track_ids"])
         if not kept:
-            return (f"None of those {len(dropped)} track(s) has a file on disk, so "
-                    "nothing was sent: it would ack and play silence. (#3249)")
+            refusal = _Refused(f"None of those {len(dropped)} track(s) has a file on disk, so "
+                               "nothing was sent: it would ack and play silence. (#3249)")
+            refusal.skipped = await _titles(dropped)  # #6854
+            return refusal
         payload = {**payload, "track_ids": kept}
     rest: list[int] = []  # #3249
     if cmd_type in _CHUNKABLE and len(kept) > QUEUE_CHUNK:
@@ -954,6 +970,8 @@ async def dj_queue(track_ids: list[int]) -> str:
     data = await _enqueue("queue", {"track_ids": track_ids})
     if isinstance(data, str):
         return _held_result(data)  # #ride0928
+    if _guard_dropped_all(data, len(track_ids)):  # #6854
+        return await _result(data, len(track_ids)) + NOTHING_SENT
     return await _result(data, len(track_ids)) + (  # #ride0928
         f"Queued {_sent_count(data, len(track_ids))} track(s) to the end "
         f"(command #{data.get('id')}, {data.get('pending')} pending). "
@@ -973,6 +991,8 @@ async def dj_play_next(track_ids: list[int]) -> str:
     data = await _enqueue("play_next", {"track_ids": track_ids})
     if isinstance(data, str):
         return _held_result(data)  # #ride0928
+    if _guard_dropped_all(data, len(track_ids)):  # #6854
+        return await _result(data, len(track_ids)) + NOTHING_SENT
     return await _result(data, len(track_ids)) + (  # #ride0928
         f"Inserted {_sent_count(data, len(track_ids))} track(s) to play next "
         f"(command #{data.get('id')}, {data.get('pending')} pending)."
@@ -2500,6 +2520,8 @@ async def dj_queue_by(
     data = await _enqueue(cmd_type, {"track_ids": track_ids})
     if isinstance(data, str):
         return _held_result(data)  # #ride0928
+    if _guard_dropped_all(data, len(track_ids)):  # #6854
+        return await _result(data, len(track_ids)) + NOTHING_SENT
     verb = {"now": "Sent to play now", "queue": "Queued", "next": "Sent to play next"}[mode]  # #2843
     return await _result(data, len(track_ids)) + (  # #ride0928
         f"{verb} {_sent_count(data, len(track_ids))} track(s) from {label} "
