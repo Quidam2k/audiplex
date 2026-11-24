@@ -144,6 +144,20 @@ def build_fixture(tmp: Path) -> dict:
     Base.metadata.create_all(bind=engine)
     session = sessionmaker(bind=engine)()
 
+    # #3819/#3249: the server's playable check does os.path.exists on every
+    # track, so fixture tracks need real files. Tiny silent clips, kept under
+    # the harness temp dir (removed with it). They are WAV bytes behind .mp3
+    # names: fine for an exists() check, but a server change that probes file
+    # headers or duration would need real mp3s here.
+    media = tmp / "media"
+    silent = FakeTts._silent_wav()
+
+    def media_file(*parts: str) -> str:
+        path = media.joinpath(*parts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(silent)
+        return path.as_posix()
+
     owner = User(username="admin", password_hash=hash_password("x"),
                  display_name="Owner", is_admin=True)
     agent = User(username="dj-agent", password_hash=hash_password("y"),
@@ -157,14 +171,14 @@ def build_fixture(tmp: Path) -> dict:
         session.flush()
         album = Album(title=album_title, artist_id=artist.id, genre=genre,
                       year=1959, duration_seconds=600.0, track_count=len(titles),
-                      folder_path=f"/fake/{artist_name}/{album_title}")
+                      folder_path=(media / artist_name / album_title).as_posix())
         session.add(album)
         session.flush()
         out = []
         for i, t in enumerate(titles, start=1):
             tr = Track(title=t, album_id=album.id, artist_id=artist.id,
                        disc_number=1, track_number=i, duration_seconds=200.0 + i,
-                       file_path=f"/fake/{artist_name}/{album_title}/{i:02d} {t}.mp3",
+                       file_path=media_file(artist_name, album_title, f"{i:02d} {t}.mp3"),
                        file_size=1_000_000)
             session.add(tr)
             session.flush()
@@ -182,13 +196,13 @@ def build_fixture(tmp: Path) -> dict:
     # the work key can connect them.
     live_album = Album(title="Live In Europe", artist_id=jazz[0].artist_id,
                        genre="Jazz", year=1967, duration_seconds=480.0,
-                       track_count=1, folder_path="/fake/Miles Davis/Live In Europe")
+                       track_count=1, folder_path=(media / "Miles Davis" / "Live In Europe").as_posix())
     session.add(live_album)
     session.flush()
     live_take = Track(title="So What (Live)", album_id=live_album.id,
                       artist_id=jazz[0].artist_id, disc_number=1, track_number=1,
                       duration_seconds=480.0,
-                      file_path="/fake/Miles Davis/Live In Europe/01 So What.mp3",
+                      file_path=media_file("Miles Davis", "Live In Europe", "01 So What.mp3"),
                       file_size=2_000_000)
     session.add(live_take)
     session.flush()
@@ -207,25 +221,6 @@ def build_fixture(tmp: Path) -> dict:
         Favorite(entity_type="track", entity_key=str(classical[1].id), user_id=owner.id),
     ])
 
-    # Listening history for the OWNER (#947/#948). dj-agent has none of its
-    # own, which is the whole point of the owner-scoped reads.
-    #   'So What'    — just heard, so it is inside the cooldown window.
-    #   'Movement I' — heard two hours ago: out of cooldown, but its history
-    #                  still shows a poor completion rate and early bails.
-    now = datetime.now(timezone.utc)
-    long_ago = now - timedelta(hours=2)
-    session.add_all(
-        [PlayStat(track_id=jazz[0].id, user_id=owner.id, event="start",
-                  played_seconds=0.0, timestamp=now)]
-        + [PlayStat(track_id=jazz[0].id, user_id=owner.id, event="complete",
-                    played_seconds=201.0, timestamp=now)]
-        + [PlayStat(track_id=classical[0].id, user_id=owner.id, event="start",
-                    played_seconds=0.0, timestamp=long_ago) for _ in range(4)]
-        + [PlayStat(track_id=classical[0].id, user_id=owner.id, event="complete",
-                    played_seconds=201.0, timestamp=long_ago)]
-        + [PlayStat(track_id=classical[0].id, user_id=owner.id, event="skip",
-                    played_seconds=5.0, timestamp=long_ago) for _ in range(2)]
-    )
     session.commit()
 
     token = create_token(agent.id, agent.username, secret, 24)
@@ -238,9 +233,56 @@ def build_fixture(tmp: Path) -> dict:
         "recently_played": jazz[0].id,   # inside the cooldown window
         "long_ago": classical[0].id,     # history, but out of cooldown
     }
+    # The #3249 gate check deletes this one: no history and no same-work sibling,
+    # so only the file check (not the #7335 repeat guard) can refuse it.
+    ids["gone"] = jazz[2].id
+    ids["gone_file"] = Path(jazz[2].file_path)
     session.close()
     engine.dispose()
+    ids["db_path"] = db_path
     return {"token": token, "ids": ids, "db_path": db_path}
+
+
+def seed_history(db_path: str, ids: dict) -> None:
+    """Listening history for the OWNER (#947/#948), seeded when the cooldown
+    section starts. dj-agent has none of its own, which is the whole point of
+    the owner-scoped reads.
+
+    Seeded late on purpose: the #7335 repeat guard drops a just-completed work
+    from agent queue commands, so seeding at fixture time starved every
+    transport check of its tracks.
+      'So What'    - just heard, so it is inside the cooldown window.
+      'Movement I' - heard two hours ago: out of the recency cooldown, but its
+                     history still shows a poor completion rate and early bails.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from audiplex.models import PlayStat, User
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    session = sessionmaker(bind=engine)()
+    owner = session.query(User).filter_by(username="admin").one()
+    recent, old = ids["recently_played"], ids["long_ago"]
+    now = datetime.now(timezone.utc)
+    long_ago = now - timedelta(hours=2)
+    session.add_all(
+        [PlayStat(track_id=recent, user_id=owner.id, event="start",
+                  played_seconds=0.0, timestamp=now)]
+        + [PlayStat(track_id=recent, user_id=owner.id, event="complete",
+                    played_seconds=201.0, timestamp=now)]
+        # >3 s apart: #6837 collapses starts closer than that (extra-listener copies)
+        + [PlayStat(track_id=old, user_id=owner.id, event="start",
+                    played_seconds=0.0, timestamp=long_ago - timedelta(minutes=5 * k))
+           for k in range(1, 5)]
+        + [PlayStat(track_id=old, user_id=owner.id, event="complete",
+                    played_seconds=201.0, timestamp=long_ago)]
+        + [PlayStat(track_id=old, user_id=owner.id, event="skip",
+                    played_seconds=5.0, timestamp=long_ago) for _ in range(2)]
+    )
+    session.commit()
+    session.close()
+    engine.dispose()
 
 
 def start_server(tmp: Path, port: int) -> subprocess.Popen:
@@ -479,8 +521,17 @@ class SimulatedDevice:
                         continue                      # long-poll timeout; re-issue
                     r.raise_for_status()
                     cmd = r.json()
+                    if os.environ.get("HARNESS_TRACE"):
+                        print(f"  [device] {cmd['type']} {cmd.get('payload')} src={cmd.get('source')}")
                     self.apply(cmd["type"], cmd.get("payload") or {})
                     await self._report(client)
+                    # The real client acks every command (#900 Phase 3a); without
+                    # it the bus redelivers the command and the MCP waits out its
+                    # ack window ("playing=UNCONFIRMED").
+                    if cmd.get("id") is not None:
+                        await client.post(
+                            f"{self.base}/api/playback/command/{cmd['id']}/ack",
+                            headers=self.headers, json={"status": "ok"})
                     self.applied += 1
                 except httpx.ReadTimeout:
                     continue
@@ -559,7 +610,7 @@ async def run_scenario(dev: SimulatedDevice, dj, ids: dict, rep: Report, tts: "F
     await step(dj.dj_pause(), "dj_pause")
     rep.check(dev.playing is False, "dj_pause stopped playback")
 
-    await step(dj.dj_resume(), "dj_resume")
+    await step(importlib.import_module("audiplex_mcp.dj_toolkit").dj_resume(), "dj_resume")  # #5892: moved out of server.py
     rep.check(dev.playing is True, "dj_resume restarted playback")
 
     await step(dj.dj_seek(120), "dj_seek")
@@ -577,28 +628,36 @@ async def run_scenario(dev: SimulatedDevice, dj, ids: dict, rep: Report, tts: "F
     print("\n-- MCP-side name resolution ----------------------------------")
 
     # Every Miles Davis track, both albums — Kind of Blue first, then the live
-    # take, ordered by album title as /artists/{id}/tracks returns them.
-    all_miles = jazz + [ids["live_variant"]]
-    await step(dj.dj_queue_by("Miles", "artist", "now"), "dj_queue_by(artist)")
+    # take, ordered by album title as /artists/{id}/tracks returns them. Since
+    # #7335 the queue guard drops the live cut ("same song as So What is already
+    # in this batch"), so the device gets Kind of Blue only and the reply says why.
+    all_miles = jazz
+    qb = await step(dj.dj_queue_by("Miles", "artist", "now"), "dj_queue_by(artist)")
     rep.check([i["id"] for i in dev.queue] == all_miles,
-              "dj_queue_by resolved an artist by PREFIX", f"queue={[i['id'] for i in dev.queue]}")
+              "dj_queue_by resolved an artist by PREFIX", f"queue={[i['id'] for i in dev.queue]} | {qb[:400]}")
+    rep.check("Queue guard: dropped So What (Live)" in qb,
+              "...and the queue guard named the live cut it dropped (#7335)", qb[:400])
 
-    await step(dj.dj_queue_by("Kind of Blue", "album", "now"), "dj_queue_by(album)")
-    rep.check([i["id"] for i in dev.queue] == jazz, "dj_queue_by resolved an album")
+    qb = await step(dj.dj_queue_by("Kind of Blue", "album", "now"), "dj_queue_by(album)")
+    rep.check([i["id"] for i in dev.queue] == jazz, "dj_queue_by resolved an album",
+              f"queue={[i['id'] for i in dev.queue]} | {qb[:400]}")
 
-    await step(dj.dj_queue_by("Classical", "genre", "now"), "dj_queue_by(genre)")
+    rep.check("CONTEXT (sourced" not in qb,
+              "song context did not leak Todd's real library notes into the harness", qb[:400])
+
+    qb = await step(dj.dj_queue_by("Classical", "genre", "now"), "dj_queue_by(genre)")
     rep.check([i["id"] for i in dev.queue] == classical,
-              "dj_queue_by resolved a genre", f"queue={[i['id'] for i in dev.queue]}")
+              "dj_queue_by resolved a genre", f"queue={[i['id'] for i in dev.queue]} | {qb[:400]}")
 
-    await step(dj.dj_queue_by("Road Trip", "playlist", "now"), "dj_queue_by(playlist)")
+    qb = await step(dj.dj_queue_by("Road Trip", "playlist", "now"), "dj_queue_by(playlist)")
     rep.check([i["id"] for i in dev.queue] == ids["playlist"],
               "dj_queue_by resolved the OWNER's playlist (not the agent's empty one)",
-              f"queue={[i['id'] for i in dev.queue]}")
+              f"queue={[i['id'] for i in dev.queue]} | {qb[:400]}")
 
-    await step(dj.dj_queue_by("", "favorites", "now"), "dj_queue_by(favorites)")
+    qb = await step(dj.dj_queue_by("", "favorites", "now"), "dj_queue_by(favorites)")
     rep.check(sorted(i["id"] for i in dev.queue) == sorted(ids["favorites"]),
               "dj_queue_by resolved the OWNER's favorites",
-              f"queue={[i['id'] for i in dev.queue]}")
+              f"queue={[i['id'] for i in dev.queue]} | {qb[:400]}")
 
     miss = await dj.dj_queue_by("zzz-nope", "artist", "queue")
     rep.check("No artist matching" in miss, "dj_queue_by fails gracefully on no match", miss)
@@ -682,11 +741,13 @@ async def run_scenario(dev: SimulatedDevice, dj, ids: dict, rep: Report, tts: "F
 
     print("\n-- listening signal + recency cooldown (#947/#948) -----------")
 
+    seed_history(ids["db_path"], ids)
+
     stats = await dj.dj_track_stats(min_starts=1)
     rep.check("Movement I" in stats, "dj_track_stats reports the owner's history",
               stats.splitlines()[1] if len(stats.splitlines()) > 1 else stats)
     rep.check("25% finished" in stats,
-              "completion RATE, not a raw count (1 of 4 starts finished)")
+              "completion RATE, not a raw count (1 of 4 starts finished)", stats[:600])
     rep.check("first 10s" in stats,
               "early bails are called out with where they land")
 
@@ -717,8 +778,10 @@ async def run_scenario(dev: SimulatedDevice, dj, ids: dict, rep: Report, tts: "F
     rep.check("Heads-up" in advised and "played recently" in advised,
               "queueing a just-played track warns instead of silently filtering",
               advised.splitlines()[-1].strip())
-    rep.check(await wait_applied(dev, n_before + 1),
-              "...and the command STILL reached the device — advisory, not a veto")
+    await asyncio.sleep(0.5)
+    rep.check("Queue guard: dropped So What" in advised and dev.applied == n_before,
+              "...and the #7335 queue guard drops a play_next of the song now playing (a veto, no longer advisory)",
+              advised[:600])
     n = dev.applied
 
     print("\n-- guards ----------------------------------------------------")
@@ -730,6 +793,20 @@ async def run_scenario(dev: SimulatedDevice, dj, ids: dict, rep: Report, tts: "F
     empty = await dj.dj_play_now([])
     rep.check("nothing to play" in empty, "dj_play_now guards an empty track list", empty)
     rep.check(dev.applied == n, "no phantom commands reached the device",
+              f"applied={dev.applied} sent={n}")
+
+    print("\n-- missing files are never queued (#3249) ---------------------")
+
+    gone = ids["gone"]
+    ids["gone_file"].unlink()
+    n = dev.applied
+    queue_before = [i["id"] for i in dev.queue]
+    refused = await dj.dj_queue([gone])
+    rep.check("has a file on disk" in refused and "nothing was sent" in refused,
+              "a track whose file is gone is refused, not queued", refused)
+    await asyncio.sleep(0.5)
+    rep.check(dev.applied == n and [i["id"] for i in dev.queue] == queue_before,
+              "...and nothing reached the device or changed its queue",
               f"applied={dev.applied} sent={n}")
 
     expected_types = {
@@ -776,6 +853,17 @@ async def amain() -> int:
         os.environ["DJ_TTS_URL"] = tts_url
         os.environ["DJ_TTS_FORMAT"] = "wav"
         os.environ["DJ_PERSONA_NAME"] = "the DJ"   # persona-agnostic until Todd names it
+        # Hermetic: point the live-Pantheon guards (Todd talking #ride0928, quiet
+        # window/DND #3493, Pantheon db) at nothing, so a real person talking or
+        # a quiet-time window on this box can't hold the harness's commands.
+        os.environ["DJ_SPEECH_STATE_FILE"] = str(tmp / "no-speech-state.json")
+        os.environ["DJ_PANTHEON_SRC"] = str(tmp / "no-pantheon-src")
+        os.environ["DJ_PANTHEON_DB"] = str(tmp / "no-pantheon.db")
+        # Song context (CONTEXT lines) otherwise reads Todd's real library db and
+        # the Radio Free Luna notes by default, keyed on our fixture's track ids.
+        os.environ["AUDIPLEX_DB_PATH"] = fixture["db_path"]
+        os.environ["RFL_DJ_NOTES_DB"] = str(tmp / "no-dj-notes.db")
+        os.environ["RFL_STORE_PY"] = str(tmp / "no-store.py")
         os.environ.pop("DJ_TTS_CMD", None)
         os.environ.pop("DJ_LAT", None)             # keep the harness offline
         os.environ.pop("DJ_LON", None)
