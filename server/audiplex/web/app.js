@@ -426,7 +426,14 @@ async function showSet(name) {
       : el("span", { class: "row-link" }, text);
     const turns = Math.min(5, Math.max(1, Number(src.turns) || 1));
     const sel = el("select", { "aria-label": `Turns for ${label}`,
-      onchange: (ev) => guard(() => api("PATCH", path, { lane_turns: { [label]: Number(ev.target.value) } }), "Saved") },
+      onchange: async (ev) => {
+        const n = Number(ev.target.value);
+        const r = await guard(() => api("PATCH", path, { lane_turns: { [label]: n } }));
+        if (!r) return;
+        // #6730 a server from before turns existed answers 200 but drops them: say so, don't claim "Saved"
+        const kept = (r.sources || []).find((x) => laneLabel(x) === label);
+        toast(kept && (Number(kept.turns) || 1) === n ? "Saved" : "Not saved: the server needs a restart for turns.");
+      } },
       [1, 2, 3, 4, 5].map((n) => el("option", { value: String(n), selected: n === turns }, `${n} ${n === 1 ? "turn" : "turns"}`)));
     const remove = el("button", { class: "icon danger", type: "button", title: "Remove this lane", "aria-label": "Remove this lane",
       onclick: async () => {
