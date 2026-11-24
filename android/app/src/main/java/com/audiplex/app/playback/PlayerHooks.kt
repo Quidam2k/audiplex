@@ -1,5 +1,6 @@
 package com.audiplex.app.playback
 
+import android.os.SystemClock
 import androidx.media3.exoplayer.ExoPlayer
 
 /**
@@ -26,7 +27,30 @@ object PlayerHooks {
         pauseSource = source
     }
 
-    fun takePauseSource(): String? = pauseSource.also { pauseSource = null }
+    @Volatile
+    private var sessionSource: String? = null
+
+    @Volatile
+    private var sessionSourceAtMs = 0L
+
+    /**
+     * #3249: the session controller that asked for play/pause. It names a pause only when nobody
+     * nearer has, and only briefly: a controller's play() while already playing must not label
+     * some later focus pause.
+     */
+    fun noteSessionCommand(source: String, nowMs: Long = SystemClock.elapsedRealtime()) {
+        sessionSource = source
+        sessionSourceAtMs = nowMs
+    }
+
+    fun takePauseSource(nowMs: Long = SystemClock.elapsedRealtime()): String? {
+        val session = sessionSource?.takeIf { nowMs - sessionSourceAtMs in 0..SESSION_SOURCE_TTL_MS }
+        sessionSource = null
+        return (pauseSource ?: session).also { pauseSource = null }
+    }
+
+    /** #3249: the session applies a command right after asking us, so a second is plenty. */
+    const val SESSION_SOURCE_TTL_MS = 1_000L
 
     /** Pause when the current song ends (one-shot). Main thread. False if no player. */
     fun stopAfterCurrent(): Boolean {

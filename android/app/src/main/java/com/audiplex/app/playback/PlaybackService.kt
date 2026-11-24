@@ -3,9 +3,13 @@ package com.audiplex.app.playback
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -50,6 +54,11 @@ class PlaybackService : MediaSessionService() {
     private val clipEdgeHandler = Handler(Looper.getMainLooper())
     private var clipEdgeTick: Runnable? = null
     private var lastMediaId: String? = null  // #5836 the item a transition leaves
+
+    // #3249: when an audio output last came or went, so a headset's own PAUSE as it connects
+    // or disconnects can't start music (MediaKeyRules.ROUTE_GUARD_MS).
+    @Volatile private var lastRouteChangeMs: Long? = null
+    private var routeCallback: AudioDeviceCallback? = null
 
     @OptIn(UnstableApi::class)
     override fun onCreate() {
@@ -149,9 +158,32 @@ class PlaybackService : MediaSessionService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        val audioManager = getSystemService(AudioManager::class.java)
+        // #3249: registering replays the devices already connected; that first call is not a change.
+        val routes = object : AudioDeviceCallback() {
+            private var primed = false
+            override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
+                if (primed) lastRouteChangeMs = SystemClock.elapsedRealtime()
+                primed = true
+            }
+
+            override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+                lastRouteChangeMs = SystemClock.elapsedRealtime()
+            }
+        }
+        audioManager.registerAudioDeviceCallback(routes, Handler(Looper.getMainLooper()))
+        routeCallback = routes
+
         mediaSession = MediaSession.Builder(this, forwardingPlayer)
             .setSessionActivity(pendingIntent)
-            .setCallback(MultiTapMediaSessionCallback(forwardingPlayer))
+            .setCallback(
+                MultiTapMediaSessionCallback(
+                    forwardingPlayer,
+                    audioManager,
+                    msSinceRouteChange = { lastRouteChangeMs?.let { SystemClock.elapsedRealtime() - it } },
+                    report = { message, detail -> clientLog.report("info", "media_key", message, detail) },
+                )
+            )
             .setBitmapLoader(bitmapLoader)
             .build()
 
@@ -264,6 +296,8 @@ class PlaybackService : MediaSessionService() {
     override fun onDestroy() {
         PlayerHooks.onBedStateChanged = null  // #4018
         clipEdgeTick?.let(clipEdgeHandler::removeCallbacks)  // #8197
+        routeCallback?.let { getSystemService(AudioManager::class.java).unregisterAudioDeviceCallback(it) }  // #3249
+        routeCallback = null
         audioFocusManager?.abandonFocus()
         if (PlayerHooks.focusManager === audioFocusManager) PlayerHooks.focusManager = null  // #7528
         audioFocusManager = null
