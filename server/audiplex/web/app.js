@@ -345,6 +345,120 @@ async function showBucket(name) {
   ]);
 }
 
+// ---- DJ sets (#6730) ----
+function setLastSeg(query) {
+  const qy = String(query || "").replace(/[\/\\]+$/, "");
+  return qy.replace(/\\/g, "/").split("/").pop() || qy;
+}
+
+function laneLabel(s) {
+  const qy = String(s.query || "").replace(/[\/\\]+$/, "");
+  return String(s.label || qy.replace(/\\/g, "/").split("/").pop() || s.kind || "source");
+}
+
+function laneWhat(s) {
+  if (s.kind === "bucket") {
+    const b = (state.buckets || []).find((x) => x.name === s.query);
+    return b ? `bucket · ${b.track_count} songs` : "bucket";
+  }
+  if (s.kind === "folder") return `folder · ${setLastSeg(s.query)}`;
+  if (s.kind === "folder_match") return `folders matching "${s.query}"`;
+  if (s.kind === "tracks") {
+    const n = (s.ids || []).length || String(s.query || "").split(",").filter(Boolean).length;
+    return `${n} picked songs`;
+  }
+  return s.kind;
+}
+
+async function showSets() {
+  await refreshBuckets();
+  state.sets = (await guard(() => get("/api/playback/mix-specs"))) || state.sets || [];
+  setCrumbs([{ label: "Sets" }]);
+  const buckets = state.buckets || [];
+  const nameInput = el("input", { type: "text", placeholder: "New set name", "aria-label": "New set name" });
+  const boxes = buckets.map((b) => ({ b, box: el("input", { type: "checkbox" }) }));
+
+  const create = async (ev) => {
+    ev.preventDefault();
+    const name = nameInput.value.trim();
+    if (!name) return toast("Give the set a name.");
+    const picked = boxes.filter((x) => x.box.checked).map((x) => x.b);
+    if (!picked.length) return toast("Tick at least one bucket.");
+    const taken = (state.sets || []).some((x) => String(x.name).trim().toLowerCase() === name.toLowerCase());
+    if (taken) return toast(`A set called ${name} already exists.`);
+    const sources = picked.map((b) => ({ kind: "bucket", query: b.name, label: `bucket: ${b.name}` }));
+    const res = await guard(() => api("POST", "/api/playback/mix-specs", { name, request_text: "", sources }), "Set created");
+    if (res) withView(() => showSet(name));
+  };
+
+  render([
+    el("p", { class: "muted" }, "A set is what the DJ plays from: a few lanes (mostly buckets), taking turns. Open one to change how many turns each lane gets."),
+    el("ul", { class: "list" }, (state.sets || []).map((set) => {
+      const names = (set.sources || []).filter((s) => s.kind === "bucket").map((s) => s.query);
+      const sub = `${(set.sources || []).length} lanes` + (names.length ? ` · ${names.join(", ")}` : "");
+      return linkRow(set.name, sub, () => withView(() => showSet(set.name)));
+    })),
+    el("h3", {}, "New set from buckets"),
+    buckets.length
+      ? el("form", { onsubmit: create },
+          el("div", { class: "actions" }, nameInput, el("button", { type: "submit" }, "Create set")),
+          el("fieldset", {},
+            el("legend", {}, "Buckets to include"),
+            boxes.map(({ b, box }) => el("div", {}, el("label", {}, box, ` ${b.name} (${b.track_count})`)))))
+      : el("p", { class: "muted" }, "No buckets yet. Make one on the Buckets tab."),
+  ]);
+}
+
+async function showSet(name) {
+  await refreshBuckets();
+  const s = await guard(() => get(`/api/playback/mix-specs/${q(name)}`));
+  if (!s) return;
+  setCrumbs([{ label: "Sets", go: () => withView(showSets) }, { label: s.name }]);
+  const again = () => withView(() => showSet(s.name), { replace: true });
+  const path = `/api/playback/mix-specs/${q(s.name)}`;
+  const sources = s.sources || [];
+
+  const laneRow = (src) => {
+    const label = laneLabel(src);
+    const text = [el("span", { class: "title" }, label), el("span", { class: "sub" }, laneWhat(src))];
+    const left = src.kind === "bucket"
+      ? el("button", { class: "row-link", type: "button", onclick: () => withView(() => showBucket(src.query)) }, text)
+      : el("span", { class: "row-link" }, text);
+    const turns = Math.min(5, Math.max(1, Number(src.turns) || 1));
+    const sel = el("select", { "aria-label": `Turns for ${label}`,
+      onchange: (ev) => guard(() => api("PATCH", path, { lane_turns: { [label]: Number(ev.target.value) } }), "Saved") },
+      [1, 2, 3, 4, 5].map((n) => el("option", { value: String(n), selected: n === turns }, `${n} ${n === 1 ? "turn" : "turns"}`)));
+    const remove = el("button", { class: "icon danger", type: "button", title: "Remove this lane", "aria-label": "Remove this lane",
+      onclick: async () => {
+        if (!confirm(`Remove "${label}" from ${s.name}? The songs stay in your library.`)) return;
+        const r = await guard(() => api("PATCH", path, { remove_sources: [src.label || src.query || label] }), "Removed");
+        if (r !== undefined) again();
+      } }, "✕");
+    return el("li", { class: "link-row lane-row" }, left, el("div", { class: "row-actions" }, sel, remove));
+  };
+
+  const inSet = new Set(sources.filter((x) => x.kind === "bucket").map((x) => x.query));
+  const free = (state.buckets || []).filter((b) => !inSet.has(b.name));
+  const pick = el("select", { "aria-label": "Bucket to add" },
+    el("option", { value: "" }, "Add a bucket…"),
+    free.map((b) => el("option", { value: b.name }, b.name)));
+  const addLane = async () => {
+    const bn = pick.value;
+    if (!bn) return toast("Pick a bucket to add.");
+    const src = { kind: "bucket", query: bn, label: `bucket: ${bn}` };
+    const r = await guard(() => api("PATCH", path, { add_sources: [src] }), "Added");
+    if (r !== undefined) again();
+  };
+
+  render([
+    el("p", { class: "muted" }, "Turns: how many songs a lane gets each time round. 1 everywhere means plain rotation. Changes reach the set right away if it is playing."),
+    sources.length ? el("ul", { class: "list" }, sources.map(laneRow)) : el("p", { class: "muted" }, "No lanes yet."),
+    free.length
+      ? el("div", { class: "actions" }, pick, el("button", { type: "button", onclick: addLane }, "Add lane"))
+      : el("p", { class: "muted" }, "Every bucket is already in this set."),
+  ]);
+}
+
 // ---- rendering --------------------------------------------------------------
 
 function setCrumbs(crumbs) {
@@ -1167,6 +1281,7 @@ const TABS = {
   folders: () => showFolder(null),
   playlists: showPlaylists,
   buckets: showBuckets,  // #11055
+  sets: showSets,  // #6730
   favorites: showFavorites,
   videos: renderVideosView,
   queue: renderQueueView,

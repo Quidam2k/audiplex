@@ -72,6 +72,8 @@ h2 { font-size: 16px; margin: 18px 0 6px; }
 button.icon { min-width: 40px; padding: 0 8px; }
 button.fav { color: var(--star); font-size: 18px; }
 select.rating { min-width: 56px; padding: 0 4px; }
+/* #6730 set lanes: the turns picker and remove button stay beside the name on a phone */
+.lane-row .row-actions { width: auto; flex-wrap: nowrap; }
 @media (max-width: 520px) {
   .track .meta { flex-basis: 100%; }
   .row-actions { width: 100%; justify-content: flex-end; }
