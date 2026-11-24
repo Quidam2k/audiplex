@@ -650,6 +650,10 @@ private fun TitleBlock(title: String, subtitle: String?, detail: String?, onLong
 private fun StarRating(rating: Double, onTap: (Int) -> Unit, onClear: () -> Unit) {
     // #5681: one tap target per star (no half zones). Tap = that star, tap again = +half,
     // again = back to whole; long-press clears. Bigger targets for eyes-light use.
+    // #6785: the gesture below outlives a track change (its key is only the star), so it must
+    // read the CURRENT callbacks; capturing them directly rated (and cleared) the first song.
+    val tap by rememberUpdatedState(onTap)
+    val clear by rememberUpdatedState(onClear)
     Row(
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
@@ -661,7 +665,7 @@ private fun StarRating(rating: Double, onTap: (Int) -> Unit, onClear: () -> Unit
                 modifier = Modifier
                     .size(56.dp)  // #5681 was 48
                     .pointerInput(star) {
-                        detectTapGestures(onTap = { onTap(star) }, onLongPress = { onClear() })  // #5681
+                        detectTapGestures(onTap = { tap(star) }, onLongPress = { clear() })  // #5681 #6785
                     },
             ) {
                 Icon(

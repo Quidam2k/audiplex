@@ -1,16 +1,10 @@
 package com.audiplex.app.navigation
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column  // #6781
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Book
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider  // #4221
 import androidx.compose.runtime.collectAsState
@@ -20,9 +14,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
@@ -31,17 +23,6 @@ import com.audiplex.app.ui.common.LocalHomeTick
 import com.audiplex.app.ui.common.LocalOpenSettings  // #4221
 import com.audiplex.app.ui.player.MiniPlayer
 import com.audiplex.app.ui.player.PlayerViewModel
-
-private data class RootTab(
-    val route: String,
-    val label: String,
-    val icon: ImageVector
-)
-
-private val rootTabs = listOf(
-    RootTab(Routes.LIBRARY, "Audiobooks", Icons.Default.Book),
-    RootTab(Routes.MUSIC_HOME, "Music", Icons.Default.MusicNote)
-)
 
 @Composable
 fun RootScaffold() {
@@ -52,7 +33,12 @@ fun RootScaffold() {
     val currentRoute = backStackEntry?.destination?.route
 
     val showMiniPlayer = hasActive && currentRoute != Routes.PLAYER
-    val showBottomBar = currentRoute in rootTabs.map { it.route }
+    // #6781: the Audiobooks / Music switch is on every screen (Player included), so Todd
+    // hops sides without backing out.
+    val (side, showBottomBar) = remember(backStackEntry) {
+        fun onStack(route: String) = runCatching { navController.getBackStackEntry(route) }.isSuccess
+        sideOf(onStack(Routes.MUSIC_HOME)) to showsSideBar(currentRoute, onStack(Routes.LIBRARY))
+    }
 
     val openSettings = remember(navController) {  // #4221
         { navController.navigate(Routes.SETTINGS) { launchSingleTop = true } }
@@ -66,14 +52,19 @@ fun RootScaffold() {
     ) { Scaffold(
         modifier = Modifier.fillMaxSize(),
         bottomBar = {
-            if (showMiniPlayer) {
-                MiniPlayer(
-                    viewModel = playerViewModel,
-                    onClick = { navController.openPlayer() }
-                )
-            }
-            if (showBottomBar) {
-                BottomNav(navController = navController, currentRoute = currentRoute)
+            // #6781: one Column, so the mini-player sits above the bar instead of under it
+            // (Scaffold's bottomBar slot overlaps its children).
+            // Emitted only when it has content: an empty one would zero the bottom inset.
+            if (showMiniPlayer || showBottomBar) Column {
+                if (showMiniPlayer) {
+                    MiniPlayer(
+                        viewModel = playerViewModel,
+                        onClick = { navController.openPlayer() }
+                    )
+                }
+                if (showBottomBar) {
+                    SideBar(selected = side, onTap = { navController.tapSide(currentRoute, side, it) })
+                }
             }
         }
     ) { innerPadding ->
@@ -83,25 +74,25 @@ fun RootScaffold() {
     } }  // #4221
 }
 
-@Composable
-private fun BottomNav(navController: NavHostController, currentRoute: String?) {
-    NavigationBar {
-        rootTabs.forEach { tab ->
-            NavigationBarItem(
-                selected = currentRoute == tab.route,
-                onClick = {
-                    if (currentRoute == tab.route) return@NavigationBarItem
-                    navController.navigate(tab.route) {
-                        popUpTo(navController.graph.findStartDestination().id) {
-                            saveState = true
-                        }
-                        launchSingleTop = true
-                        restoreState = true
-                    }
-                },
-                icon = { Icon(tab.icon, contentDescription = tab.label) },
-                label = { Text(tab.label) }
-            )
+/**
+ * #6781: tapping the side you are on returns to its root; tapping the other side switches.
+ * Only Music's screens are saved and restored (it comes back inside the album you left).
+ * Audiobooks comes back to the Library screen, which is never popped, so its tab and scroll
+ * stay. Library is the start destination: saving screens under its id goes stale after Back,
+ * Home or logout and reopens an old book, so Music is saved with an INCLUSIVE pop of its own
+ * root, which files the state under Music home only.
+ */
+private fun NavHostController.tapSide(currentRoute: String?, currentSide: Side, tapped: Side) {
+    when (sideTap(currentRoute, currentSide, tapped)) {
+        SideTap.NOTHING -> Unit
+        SideTap.POP_TO_ROOT -> popBackStack(tapped.root, inclusive = false)
+        SideTap.SWITCH -> when (tapped) {
+            Side.AUDIOBOOKS -> popBackStack(Routes.MUSIC_HOME, inclusive = true, saveState = true)
+            Side.MUSIC -> navigate(Routes.MUSIC_HOME) {
+                popUpTo(Routes.LIBRARY)
+                launchSingleTop = true
+                restoreState = true
+            }
         }
     }
 }
