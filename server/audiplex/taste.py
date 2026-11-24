@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from audiplex.identity import TrackIdentity, build_identity_map
 from audiplex.models import PlayStat, TrackRating
+from audiplex.play_dedupe import collapse_dup_starts  # #6837
 
 # Abandoning a track in its first few seconds is the strongest dislike signal
 # the client can produce. Canonical here; music.py re-exports it so the taste
@@ -117,6 +118,8 @@ def recording_stats_for(
         .filter(PlayStat.user_id == user_id)
         .all()
     )
+    # #6837: duplicate starts from extra phone listeners deflated completion_rate
+    rows = collapse_dup_starts(rows, lambda r: r[0], lambda r: r[1], lambda r: r[3].timestamp())
     for track_id, event, played_seconds, timestamp in rows:
         identity = identities.get(track_id)
         if identity is None:  # event for a track that has since left the library
@@ -209,7 +212,8 @@ def recent_plays_for(
             )
         )
     plays.sort(key=lambda p: p.at, reverse=True)
-    return plays
+    # #6837: extra phone listeners posted 2-4 'start's per play; count each play once
+    return collapse_dup_starts(plays, lambda p: p.track_id, lambda p: p.event, lambda p: p.at.timestamp())
 
 
 @dataclass

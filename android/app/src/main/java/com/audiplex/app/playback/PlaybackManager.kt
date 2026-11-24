@@ -1094,9 +1094,10 @@ class PlaybackManager @Inject constructor(
         applyVolumeForCurrentKind()
     }
 
-    private fun ensureController(onReady: (MediaController) -> Unit) {
-        controller?.let { onReady(it); return }
-
+    // #6837: one connect at a time. Callers that arrive while it is in flight wait
+    // for it instead of each building a controller (and attaching playerListener).
+    // (The lambda below names controllerGate itself, in onDisconnected; it only runs after construction.)
+    private val controllerGate: ControllerGate<MediaController> = ControllerGate { onConnected: (MediaController) -> Unit, onFailed: (Throwable) -> Unit ->
         val token = SessionToken(context, ComponentName(context, PlaybackService::class.java))
         val future = MediaController.Builder(context, token)
             .setListener(object : MediaController.Listener {
@@ -1107,13 +1108,20 @@ class PlaybackManager @Inject constructor(
                     if (this@PlaybackManager.controller === controller) {
                         this@PlaybackManager.controller = null
                         controllerFuture = null
+                        controllerGate.reset(controller)
                     }
                 }
             })
             .buildAsync()
         controllerFuture = future
         future.addListener({
-            val ctrl = future.get()
+            val ctrl = try {
+                future.get()
+            } catch (e: Exception) {  // refused or cancelled: let the next request retry
+                if (controllerFuture === future) controllerFuture = null
+                onFailed(e)
+                return@addListener
+            }
             controller = ctrl
             ctrl.addListener(playerListener)
             // A controller connecting to an ALREADY-PLAYING session (the app
@@ -1124,10 +1132,12 @@ class PlaybackManager @Inject constructor(
             // no pause control in the app" gap Todd hit (#3105/#993). Runs
             // before onReady so a fresh play command still wins if there is one.
             hydrateFromController(ctrl)
-            onReady(ctrl)
+            onConnected(ctrl)  // runs every waiting onReady
             startPositionUpdates()
         }, MoreExecutors.directExecutor())
     }
+
+    private fun ensureController(onReady: (MediaController) -> Unit) = controllerGate.request(onReady)
 
     /**
      * Connect the MediaController to whatever the session is doing, without
@@ -2753,6 +2763,7 @@ class PlaybackManager @Inject constructor(
         overlaySession?.cancel("release")  // #5695 the duck is undone before the controller goes
         controller?.removeListener(playerListener)
         controllerFuture?.let { MediaController.releaseFuture(it) }
+        controllerGate.reset()  // #6837
         controller = null
     }
 }

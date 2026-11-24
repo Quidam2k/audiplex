@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
-from sqlalchemy import func
+from sqlalchemy import func, or_  # #6837
 from sqlalchemy.orm import Session, selectinload
 
 from audiplex import taste
@@ -15,6 +15,7 @@ from audiplex.gain import served_music_target  # #3501
 from audiplex.auth import get_admin_user, get_current_user
 from audiplex.database import get_db
 from audiplex.identity import build_identity_map
+from audiplex.play_dedupe import DUP_START_WINDOW_S  # #6837
 from audiplex.models import (
     Album,
     Artist,
@@ -804,13 +805,29 @@ def likely_skips_for(
         .having(func.count(PlayStat.id) >= min_skips)
         .subquery()
     )
-    starts_subq = (
+    # #6837: a start within 3 s of the previous start of the same track is a copy
+    # (extra phone listeners), so count each play once.
+    lagged = (
         db.query(
             PlayStat.track_id.label("tid"),
-            func.count(PlayStat.id).label("starts"),
+            PlayStat.timestamp.label("ts"),
+            func.lag(PlayStat.timestamp).over(
+                partition_by=PlayStat.track_id, order_by=(PlayStat.timestamp, PlayStat.id)
+            ).label("prev_ts"),
         )
         .filter(PlayStat.user_id == user_id, PlayStat.event == "start")
-        .group_by(PlayStat.track_id)
+        .subquery()
+    )
+    starts_subq = (  # #6837
+        db.query(lagged.c.tid.label("tid"), func.count().label("starts"))
+        .filter(
+            or_(
+                lagged.c.prev_ts.is_(None),
+                (func.julianday(lagged.c.ts) - func.julianday(lagged.c.prev_ts)) * 86400.0
+                > DUP_START_WINDOW_S,
+            )
+        )
+        .group_by(lagged.c.tid)
         .subquery()
     )
     rows = (

@@ -1,5 +1,8 @@
 """Tests for the music API (`/api/music/*`)."""
 
+import itertools  # #6837
+from datetime import datetime, timedelta, timezone  # #6837
+
 from sqlalchemy.orm import sessionmaker
 
 from audiplex.models import (
@@ -685,12 +688,18 @@ class TestFavorites:
         assert resp.status_code == 400
 
 
+_play_stat_seq = itertools.count()  # #6837
+
+
 def _add_play_stat(db_engine, track_id, event, played_seconds=0.0):
     Session = sessionmaker(bind=db_engine)
     session = Session()
     user = session.query(User).first()
+    # each row a minute apart: #6837 collapses starts within 3 s as duplicates
+    at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=next(_play_stat_seq))
     session.add(
-        PlayStat(track_id=track_id, user_id=user.id, event=event, played_seconds=played_seconds)
+        PlayStat(track_id=track_id, user_id=user.id, event=event, played_seconds=played_seconds,
+                 timestamp=at)
     )
     session.commit()
     session.close()

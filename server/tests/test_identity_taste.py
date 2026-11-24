@@ -163,11 +163,12 @@ class TestRecordingStats:
         loved = _add_track(db_session, "Heart", "Barracuda", 260.0)
         endured = _add_track(db_session, "Heart", "Dog & Butterfly", 300.0)
 
-        for _ in range(2):
-            _play(db_session, user.id, loved.id, "start")
+        # starts are minutes apart: #6837 collapses starts within 3 s as duplicates
+        for i in range(2):
+            _play(db_session, user.id, loved.id, "start", minutes_ago=10 * i)
             _play(db_session, user.id, loved.id, "complete", 260.0)
-        for _ in range(8):
-            _play(db_session, user.id, endured.id, "start")
+        for i in range(8):
+            _play(db_session, user.id, endured.id, "start", minutes_ago=10 * i)
         for _ in range(2):
             _play(db_session, user.id, endured.id, "complete", 300.0)
 
@@ -342,8 +343,8 @@ class TestIdentityAndTasteEndpoints:
     def test_track_stats_endpoint_reports_the_rate(self, client, db_session):
         user = db_session.query(User).first()
         track = _add_track(db_session, "Heart", "Barracuda", 260.0)
-        for _ in range(4):
-            _play(db_session, user.id, track.id, "start")
+        for i in range(4):  # minutes apart: #6837 collapses starts within 3 s
+            _play(db_session, user.id, track.id, "start", minutes_ago=10 * i)
         _play(db_session, user.id, track.id, "complete", 260.0)
 
         resp = client.get("/api/music/track-stats")

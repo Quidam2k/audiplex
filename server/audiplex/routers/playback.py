@@ -2096,7 +2096,12 @@ def owner_history(
         q = q.filter(PlayStat.event == "start")
     if since is not None:
         q = q.filter(PlayStat.timestamp >= datetime.fromtimestamp(since, timezone.utc).replace(tzinfo=None))
-    rows = q.order_by(PlayStat.timestamp.desc(), PlayStat.id.desc()).limit(limit).all()
+    # #6837: collapse duplicate starts (extra phone listeners), so over-fetch then trim
+    from audiplex.play_dedupe import collapse_dup_starts
+    rows = q.order_by(PlayStat.timestamp.desc(), PlayStat.id.desc()).limit(limit * 4).all()
+    rows = collapse_dup_starts(
+        rows, lambda r: r[0].track_id, lambda r: r[0].event, lambda r: r[0].timestamp.timestamp()
+    )[:limit]
 
     def epoch(ts):
         if ts is None:
