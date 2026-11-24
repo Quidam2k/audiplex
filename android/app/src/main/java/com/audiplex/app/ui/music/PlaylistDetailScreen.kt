@@ -3,6 +3,7 @@ package com.audiplex.app.ui.music
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -14,6 +15,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Shuffle  // #3295
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -21,6 +23,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -102,8 +105,8 @@ fun PlaylistDetailScreen(
                 state = state,
                 query = searchQuery,
                 favoriteTracks = favoritesByType["track"].orEmpty(),
-                onPlay = {
-                    viewModel.playPlaylist(state.playlist, state.albumLookup, 0)
+                onPlay = { shuffle ->  // #3295 shuffle a playlist, like Most played
+                    viewModel.playPlaylist(state.playlist, state.albumLookup, 0, shuffle)
                     onPlayerClick()
                 },
                 onTrackClick = { idx ->
@@ -158,7 +161,7 @@ private fun PlaylistContent(
     state: PlaylistDetailUiState.Success,
     query: String,
     favoriteTracks: Set<String>,
-    onPlay: () -> Unit,
+    onPlay: (shuffle: Boolean) -> Unit,  // #3295
     onTrackClick: (Int) -> Unit,
     onTrackLongPress: (TrackSchema) -> Unit
 ) {
@@ -178,15 +181,22 @@ private fun PlaylistContent(
         }
 
         item {
-            Button(
-                onClick = onPlay,
+            Row(  // #3295 Play + Shuffle, the same pair Most played has
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(Icons.Default.PlayArrow, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("Play playlist")
+                Button(onClick = { onPlay(false) }, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Play")
+                }
+                OutlinedButton(onClick = { onPlay(true) }, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Default.Shuffle, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Shuffle")
+                }
             }
         }
 

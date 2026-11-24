@@ -685,6 +685,14 @@ class PlaybackManager @Inject constructor(
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying
 
+    private val _shuffleOn = MutableStateFlow(false)  // #3295 the Now Playing shuffle toggle
+    val shuffleOn: StateFlow<Boolean> = _shuffleOn
+
+    /** #3295: flip shuffle on the music queue; switching it on gets the spaced order (#5881). */
+    fun toggleShuffle() {
+        controller?.let { it.shuffleModeEnabled = !it.shuffleModeEnabled }
+    }
+
     /**
      * The most recent player error, numbered so a waiter can tell a NEW one
      * from a stale one. Lets the DJ ack say "failed: <why>" instead of "ok"
@@ -967,6 +975,7 @@ class PlaybackManager @Inject constructor(
         }
 
         override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+            _shuffleOn.value = shuffleModeEnabled  // #3295
             if (shuffleModeEnabled) applySpacedShuffle()  // #5881 any controller, not only our list shuffle
         }
 
@@ -1049,6 +1058,7 @@ class PlaybackManager @Inject constructor(
                 updateControllerMetadata(ctrl.mediaMetadata)
             }
             _isPlaying.value = ctrl.isPlaying
+            _shuffleOn.value = ctrl.shuffleModeEnabled  // #3295
         }
     }
 
@@ -1464,7 +1474,8 @@ class PlaybackManager @Inject constructor(
         )
     }
 
-    fun playPlaylist(playlist: PlaylistDetail, baseUrl: String, albumLookup: Map<Int, Pair<String, Boolean>>, startIndex: Int = 0) {
+    fun playPlaylist(playlist: PlaylistDetail, baseUrl: String, albumLookup: Map<Int, Pair<String, Boolean>>, startIndex: Int = 0,
+                     shuffle: Boolean = false) {  // #3295
         val items = playlist.tracks.map { track ->
             val (albumTitle, hasCover) = albumLookup[track.albumId] ?: ("Unknown" to false)
             MusicQueueItem(
@@ -1480,7 +1491,8 @@ class PlaybackManager @Inject constructor(
             albumId = null,
             playlistId = playlist.id,
             title = playlist.name,
-            startIndex = startIndex
+            startIndex = startIndex,
+            shuffle = shuffle  // #3295 spaced like every other shuffle (#5867)
         )
     }
 

@@ -91,6 +91,7 @@ import androidx.compose.material.icons.filled.FastForward  // #4220
 import androidx.compose.material.icons.filled.Forward10  // #4220
 import androidx.compose.material.icons.filled.Replay  // #4220
 import androidx.compose.material.icons.filled.Replay30  // #4220
+import androidx.compose.material.icons.filled.Shuffle  // #3295
 import androidx.compose.material3.DropdownMenu  // #4220
 import androidx.compose.material3.DropdownMenuItem  // #4220
 
@@ -106,6 +107,7 @@ fun PlayerScreen(
     val ratings by viewModel.ratings.collectAsState()
     val streamTitle by viewModel.currentStreamTitle.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
+    val shuffleOn by viewModel.shuffleOn.collectAsState()  // #3295
     val positionMs by viewModel.positionMs.collectAsState()
     val durationMs by viewModel.durationMs.collectAsState()
     val chapterIndex by viewModel.currentChapterIndex.collectAsState()
@@ -352,6 +354,7 @@ fun PlayerScreen(
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (kind == PlayerKind.Music) Spacer(Modifier.width(48.dp))  // #3295 keeps Play centred opposite Shuffle
             IconButton(onClick = { viewModel.previousChapter() }) {
                 Icon(
                     Icons.Default.SkipPrevious,
@@ -398,6 +401,18 @@ fun PlayerScreen(
                     contentDescription = if (kind == PlayerKind.Music) "Next track" else "Next chapter",
                     modifier = Modifier.size(32.dp)
                 )
+            }
+
+            if (kind == PlayerKind.Music) {  // #3295 shuffle on/off for whatever is queued
+                IconButton(onClick = { viewModel.toggleShuffle() }) {
+                    Icon(
+                        Icons.Default.Shuffle,
+                        contentDescription = if (shuffleOn) "Shuffle on" else "Shuffle off",
+                        tint = if (shuffleOn) MaterialTheme.colorScheme.primary
+                               else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
             }
         }
 

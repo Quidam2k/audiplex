@@ -61,9 +61,10 @@ class PlaylistDetailViewModel @Inject constructor(
     fun playPlaylist(
         playlist: PlaylistDetail,
         albumLookup: Map<Int, Pair<String, Boolean>>,
-        startIndex: Int = 0
+        startIndex: Int = 0,
+        shuffle: Boolean = false  // #3295
     ) {
-        playbackManager.playPlaylist(playlist, apiHolder.baseUrl, albumLookup, startIndex)
+        playbackManager.playPlaylist(playlist, apiHolder.baseUrl, albumLookup, startIndex, shuffle)
     }
 
     fun toggleFavorite(type: String, key: String) {

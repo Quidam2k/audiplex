@@ -41,6 +41,8 @@ class PlayerViewModel @Inject constructor(
     val currentStreamTitle: StateFlow<String?> = playbackManager.currentStreamTitle
     val playerKind: StateFlow<PlayerKind?> = playbackManager.playerKind
     val isPlaying: StateFlow<Boolean> = playbackManager.isPlaying
+    val shuffleOn: StateFlow<Boolean> = playbackManager.shuffleOn  // #3295
+    fun toggleShuffle() = playbackManager.toggleShuffle()  // #3295
     val positionMs: StateFlow<Long> = playbackManager.positionMs
     val durationMs: StateFlow<Long> = playbackManager.durationMs
     val currentChapterIndex: StateFlow<Int> = playbackManager.currentChapterIndex
