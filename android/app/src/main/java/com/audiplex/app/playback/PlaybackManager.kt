@@ -1184,6 +1184,9 @@ class PlaybackManager @Inject constructor(
                     discNumber = extras?.getInt("discNumber") ?: 0,
                     trackNumber = md.trackNumber ?: 0,
                     durationSeconds = extras?.getDouble("durationSeconds") ?: 0.0,
+                    // #6995: keep the cache key if this item is ever rebuilt into the player
+                    fileSize = extras?.takeIf { it.containsKey("fileSize") }?.getLong("fileSize"),
+                    endTrimSeconds = extras?.takeIf { it.containsKey("endTrimSeconds") }?.getDouble("endTrimSeconds"),
                 ),
                 albumId = albumId,
                 albumTitle = extras?.getString("albumTitle") ?: md.albumTitle?.toString() ?: "Unknown",
@@ -1349,10 +1352,14 @@ class PlaybackManager @Inject constructor(
             putInt("artistId", item.track.artistId)
             putInt("discNumber", item.track.discNumber)
             putDouble("durationSeconds", item.track.durationSeconds)
+            item.track.fileSize?.let { putLong("fileSize", it) }  // #6995
+            item.track.endTrimSeconds?.let { putDouble("endTrimSeconds", it) }
         }
         return MediaItem.Builder()
             .setUri(uri)
             .setMediaId("track:${item.track.id}")
+            // #6995: key on size + trim so a re-cut or swapped file is fetched fresh.
+            .setCustomCacheKey(StreamCache.musicCacheKey(uri, item.track.fileSize, item.track.endTrimSeconds))
             .setMediaMetadata(
                 MediaMetadata.Builder()
                     .setTitle(item.track.title)

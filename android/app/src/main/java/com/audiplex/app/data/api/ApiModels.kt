@@ -222,7 +222,10 @@ data class TrackSchema(
     @Json(name = "disc_number") val discNumber: Int,
     @Json(name = "track_number") val trackNumber: Int,
     @Json(name = "duration_seconds") val durationSeconds: Double,
-    @Json(name = "loudness_lufs") val loudnessLufs: Double? = null  // #7109: EBU R128 integrated loudness for per-track gain
+    @Json(name = "loudness_lufs") val loudnessLufs: Double? = null,  // #7109: EBU R128 integrated loudness for per-track gain
+    // #6995/#5993: the stream-cache key, so a swapped file or a new end trim is never played stale
+    @Json(name = "file_size") val fileSize: Long? = null,
+    @Json(name = "end_trim_seconds") val endTrimSeconds: Double? = null
 )
 
 @JsonClass(generateAdapter = true)

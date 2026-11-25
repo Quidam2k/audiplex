@@ -59,6 +59,15 @@ object StreamCache {
     /** Book streams (/api/stream/...) use the book cache; everything else uses the music cache. */
     internal fun isBookPath(path: String?): Boolean = path?.startsWith("/api/stream/") == true
 
+    /**
+     * #6995/#5993: a music track's cache key. The stream URL alone kept a copy cut
+     * before a new end trim (or a swapped file) playing from disk. Never the bare
+     * URL: copies cached under it before 1.0.94 may be stale. A track rebuilt without
+     * a file size (Recently played rows) gets "?" and cannot see later changes.
+     */
+    internal fun musicCacheKey(uri: String, fileSize: Long?, endTrimSeconds: Double?): String =
+        "$uri@${fileSize ?: "?"}@${endTrimSeconds ?: "none"}"
+
     private fun provider(context: Context): StandaloneDatabaseProvider =
         dbProvider ?: StandaloneDatabaseProvider(context.applicationContext).also { dbProvider = it }
 
