@@ -102,6 +102,10 @@ interface AudiplexApi {
     @GET("api/music/tracks/{id}")
     suspend fun getTrack(@Path("id") id: Int): TrackSchema
 
+    /** #6999: fresh rows for many ids at once (comma-separated, at most 200), in the order asked. */
+    @GET("api/music/tracks")
+    suspend fun getTracks(@Query("ids") ids: String): List<TrackSchema>
+
     @GET("api/music/levels")  // #7109: get music loudness normalization settings
     suspend fun getMusicLevels(): MusicLevelsResponse
 

@@ -407,6 +407,37 @@ def update_music_roots(
     return _roots_response(cleaned)
 
 
+TRACKS_BY_IDS_MAX = 200  # #6999
+
+
+@router.get("/tracks", response_model=list[TrackSchema])
+def get_tracks_by_ids(ids: str = Query(..., description="comma-separated track ids, at most 200"),
+                      db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """#6999: fresh rows for a phone list (Recently played), in the order asked.
+
+    Read-only. Unknown ids are skipped. The phone rebuilds its stream-cache key
+    from file_size and end_trim_seconds, so a re-cut track is never replayed stale.
+    """
+    try:
+        wanted = [int(x) for x in ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(status_code=422, detail="ids must be comma-separated integers")
+    if len(wanted) > TRACKS_BY_IDS_MAX:
+        raise HTTPException(status_code=422, detail=f"at most {TRACKS_BY_IDS_MAX} ids")
+    if not wanted:
+        return []
+    rows = (db.query(Track).options(selectinload(Track.artist))
+            .filter(Track.id.in_(set(wanted))).all())
+    by_id = {t.id: t for t in rows}
+    seen: set[int] = set()
+    out = []
+    for tid in wanted:
+        if tid in by_id and tid not in seen:
+            seen.add(tid)
+            out.append(_track_schema(by_id[tid]))
+    return out
+
+
 @router.get("/tracks/{track_id}", response_model=TrackSchema)
 def get_track(track_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     track = (

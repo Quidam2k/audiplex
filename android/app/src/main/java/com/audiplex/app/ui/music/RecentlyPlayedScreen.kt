@@ -35,9 +35,15 @@ import com.audiplex.app.data.ApiServiceHolder
 import com.audiplex.app.ui.common.SettingsAction  // #4221
 import com.audiplex.app.data.db.RecentlyPlayedDao
 import com.audiplex.app.data.db.RecentlyPlayedTrackEntity
+import android.os.SystemClock
+import com.audiplex.app.playback.ClientLogReporter
 import com.audiplex.app.playback.PlaybackManager
 import com.audiplex.app.playback.RecentlyPlayed
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -47,6 +53,7 @@ import javax.inject.Inject
 class RecentlyPlayedViewModel @Inject constructor(
     private val apiHolder: ApiServiceHolder,
     private val playbackManager: PlaybackManager,
+    private val clientLog: ClientLogReporter,  // #6999
     recentlyPlayedDao: RecentlyPlayedDao
 ) : ViewModel() {
 
@@ -64,14 +71,47 @@ class RecentlyPlayedViewModel @Inject constructor(
     fun play(startIndex: Int, onStarted: () -> Unit = {}) {
         val list = rows.value
         if (startIndex !in list.indices) return
-        playbackManager.playTracks(
-            tracks = RecentlyPlayed.toTracks(list),
-            baseUrl = apiHolder.baseUrl,
-            title = "Recently played",
-            albumLookup = RecentlyPlayed.albumLookup(list)
-        )
-        if (startIndex > 0) playbackManager.seekToTrack(startIndex)
-        onStarted()
+        val stored = RecentlyPlayed.toTracks(list)
+        playJob?.cancel()
+        playJob = viewModelScope.launch {
+            // #6999: one request for the current size + trim of every row, so the
+            // cache key is fresh. Any failure or the cap plays the stored rows at once.
+            val t0 = SystemClock.elapsedRealtime()
+            var capped = true
+            val fresh = try {
+                withTimeoutOrNull(FRESH_TIMEOUT_MS) {
+                    apiHolder.api?.getTracks(stored.joinToString(",") { it.id.toString() })
+                        .also { capped = false }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                capped = false
+                null
+            }
+            val ms = SystemClock.elapsedRealtime() - t0
+            clientLog.report(
+                level = "info",
+                event = "recent_fresh",
+                message = if (fresh != null) "fresh rows in ${ms}ms" else "stored rows after ${ms}ms",
+                detail = mapOf("ms" to ms.toString(), "ok" to (fresh != null).toString(),
+                    "capped" to capped.toString(), "count" to stored.size.toString()),
+            )
+            playbackManager.playTracks(
+                tracks = if (fresh != null) RecentlyPlayed.withFresh(stored, fresh) else stored,
+                baseUrl = apiHolder.baseUrl,
+                title = "Recently played",
+                albumLookup = RecentlyPlayed.albumLookup(list)
+            )
+            if (startIndex > 0) playbackManager.seekToTrack(startIndex)
+            onStarted()
+        }
+    }
+
+    private var playJob: Job? = null
+
+    private companion object {
+        const val FRESH_TIMEOUT_MS = 3_000L  // #6999
     }
 }
 

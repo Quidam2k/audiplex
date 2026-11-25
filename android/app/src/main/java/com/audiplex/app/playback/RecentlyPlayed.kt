@@ -50,6 +50,17 @@ object RecentlyPlayed {
     fun toTracks(rows: List<RecentlyPlayedTrackEntity>): List<TrackSchema> = rows.map { toTrack(it) }
 
     /**
+     * #6999: the stored rows with the server's current copy swapped in by id. A
+     * stored row has no file size and an old trim, so its cache key could replay a
+     * copy cut before the last trim change. Same order and length; an id the
+     * server didn't return keeps its stored row.
+     */
+    fun withFresh(stored: List<TrackSchema>, fresh: List<TrackSchema>): List<TrackSchema> {
+        val byId = fresh.associateBy { it.id }
+        return stored.map { byId[it.id] ?: it }
+    }
+
+    /**
      * album_id -> (album title, has cover) taken straight from the stored rows,
      * so playback needs no /api/music/albums round-trip to render artwork.
      */
