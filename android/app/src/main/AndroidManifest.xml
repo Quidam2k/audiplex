@@ -36,6 +36,11 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- #7044: Pantheon's volume icon opens the Volumes screen. Opens a screen only. -->
+            <intent-filter>
+                <action android:name="com.audiplex.app.OPEN_LEVELS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
 
         <service

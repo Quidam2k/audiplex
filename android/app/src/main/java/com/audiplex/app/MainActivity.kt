@@ -1,6 +1,7 @@
 package com.audiplex.app
 
 import android.Manifest
+import android.content.Intent  // #7044
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -12,10 +13,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf  // #7044
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.audiplex.app.data.SettingsStore
+import com.audiplex.app.navigation.LevelsEntry  // #7044
 import com.audiplex.app.navigation.RootScaffold
 import com.audiplex.app.playback.DjLinkService
 import com.audiplex.app.playback.PlaybackManager
@@ -32,6 +35,9 @@ class MainActivity : ComponentActivity() {
     @Inject lateinit var settingsStore: SettingsStore
     @Inject lateinit var playbackManager: PlaybackManager
 
+    // #7044: bumped on each OPEN_LEVELS intent (cold start or onNewIntent); RootScaffold navigates.
+    private var openLevelsTick = mutableIntStateOf(0)  // #7044
+
     private val requestNotifications =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
@@ -40,10 +46,11 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         askForNotificationsIfNeeded()
         startDjLinkIfEnabled()
+        if (savedInstanceState == null && LevelsEntry.wantsLevels(intent?.action)) openLevelsTick.intValue++  // #7044
         setContent {
             AudiplexTheme {
                 Box(Modifier.fillMaxSize()) {
-                    RootScaffold()
+                    RootScaffold(openLevelsTick = openLevelsTick.intValue)  // #7044
                     val sleepMode by playbackManager.sleepMode.collectAsState()  // #5876
                     val bedState by playbackManager.bedState.collectAsState()
                     if (sleepMode) SleepModeScreen(bedState, onWake = { playbackManager.wakeFromSleep() })
@@ -51,6 +58,12 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {  // #7044
+        super.onNewIntent(intent)  // #7044
+        setIntent(intent)  // #7044
+        if (LevelsEntry.wantsLevels(intent.action)) openLevelsTick.intValue++  // #7044
+    }  // #7044
 
     override fun onResume() {
         super.onResume()

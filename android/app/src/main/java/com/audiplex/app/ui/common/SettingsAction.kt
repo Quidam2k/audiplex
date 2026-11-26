@@ -1,6 +1,7 @@
 package com.audiplex.app.ui.common
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp  // #7044
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -14,8 +15,20 @@ import androidx.compose.runtime.staticCompositionLocalOf
  */
 val LocalOpenSettings = staticCompositionLocalOf<(() -> Unit)?> { null }
 
+/** #7044 (Todd 68920): every volume slider one tap away, so the Volumes icon rides beside every gear. */
+val LocalOpenLevels = staticCompositionLocalOf<(() -> Unit)?> { null }  // #7044
+
+@Composable
+fun LevelsAction() {  // #7044
+    val open = LocalOpenLevels.current ?: return  // #7044
+    IconButton(onClick = open) {  // #7044
+        Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "Volumes")  // #7044
+    }  // #7044
+}  // #7044
+
 @Composable
 fun SettingsAction() {
+    LevelsAction()  // #7044
     val open = LocalOpenSettings.current ?: return
     IconButton(onClick = open) {
         Icon(Icons.Default.Settings, contentDescription = "Settings")

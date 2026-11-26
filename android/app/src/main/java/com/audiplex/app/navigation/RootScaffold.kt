@@ -21,11 +21,13 @@ import androidx.navigation.compose.rememberNavController
 import com.audiplex.app.ui.common.LocalGoHome  // #5396
 import com.audiplex.app.ui.common.LocalHomeTick
 import com.audiplex.app.ui.common.LocalOpenSettings  // #4221
+import com.audiplex.app.ui.common.LocalOpenLevels  // #7044
+import androidx.compose.runtime.LaunchedEffect  // #7044
 import com.audiplex.app.ui.player.MiniPlayer
 import com.audiplex.app.ui.player.PlayerViewModel
 
 @Composable
-fun RootScaffold() {
+fun RootScaffold(openLevelsTick: Int = 0) {  // #7044: bumped by MainActivity on OPEN_LEVELS
     val navController = rememberNavController()
     val playerViewModel: PlayerViewModel = hiltViewModel()
     val hasActive by playerViewModel.hasActiveBook.collectAsState()
@@ -43,10 +45,15 @@ fun RootScaffold() {
     val openSettings = remember(navController) {  // #4221
         { navController.navigate(Routes.SETTINGS) { launchSingleTop = true } }
     }
+    val openLevels = remember(navController) {  // #7044
+        { navController.navigate(Routes.LEVELS) { launchSingleTop = true } }  // #7044
+    }  // #7044
+    LaunchedEffect(openLevelsTick) { if (openLevelsTick > 0) openLevels() }  // #7044
     var homeTick by rememberSaveable { mutableIntStateOf(0) }  // #5396
     val goHome = remember(navController) { { homeTick++; navController.goHome() } }
     CompositionLocalProvider(
         LocalOpenSettings provides openSettings,  // #4221
+        LocalOpenLevels provides openLevels,  // #7044
         LocalGoHome provides goHome,  // #5396
         LocalHomeTick provides homeTick
     ) { Scaffold(

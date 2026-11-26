@@ -35,6 +35,7 @@ object Routes {
     const val BOOK_DETAIL = "book/{bookId}"
     const val PLAYER = "player"
     const val SETTINGS = "settings"
+    const val LEVELS = "levels"  // #7044
     const val DOWNLOADS = "downloads"
 
     const val MUSIC_HOME = "music"
@@ -127,6 +128,7 @@ fun AppNavigation(navController: NavHostController) {
             SettingsScreen(
                 onBack = { navController.popBackStack() },
                 onDownloadsClick = { navController.navigate(Routes.DOWNLOADS) },
+                onLevelsClick = { navController.navigate(Routes.LEVELS) { launchSingleTop = true } },  // #7044
                 onLogout = {
                     navController.navigate(Routes.LOGIN) {
                         popUpTo(0) { inclusive = true }
@@ -134,6 +136,10 @@ fun AppNavigation(navController: NavHostController) {
                 }
             )
         }
+
+        composable(Routes.LEVELS) {  // #7044
+            com.audiplex.app.ui.settings.LevelsScreen(onBack = { navController.popBackStack() })  // #7044
+        }  // #7044
 
         composable(Routes.DOWNLOADS) {
             DownloadsScreen(

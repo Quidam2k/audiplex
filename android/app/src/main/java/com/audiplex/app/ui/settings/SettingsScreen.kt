@@ -49,6 +49,7 @@ import com.audiplex.app.ui.player.PastFullSlider
 fun SettingsScreen(
     onBack: () -> Unit,
     onDownloadsClick: () -> Unit = {},
+    onLevelsClick: () -> Unit = {},  // #7044
     onLogout: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel()
 ) {
@@ -60,9 +61,6 @@ fun SettingsScreen(
     val autoDownloadMeditations by viewModel.autoDownloadMeditations.collectAsState()
     val djLinkEnabled by viewModel.djLinkEnabled.collectAsState()
     val restoreManualQueues by viewModel.restoreManualQueues.collectAsState()  // #3601
-    val evenOutLoudness by viewModel.evenOutLoudness.collectAsState()  // #5626
-    val mixLevels by viewModel.mixLevels.collectAsState()
-    val bedtimeShiftCappedDb by viewModel.bedtimeShiftCappedDb.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
     val totalStorageUsed by viewModel.totalStorageUsed.collectAsState()
     val username by viewModel.username.collectAsState()
@@ -265,16 +263,20 @@ fun SettingsScreen(
             HorizontalDivider()
             Spacer(Modifier.height(16.dp))
 
-            // #997/#3111, #5282 slice 2: a level for each category of sound.
-            LevelsSection(
-                levels = mixLevels,
-                bedtimeShiftCappedDb = bedtimeShiftCappedDb,
-                onChange = viewModel::setMixLevel,
-                evenOut = evenOutLoudness,  // #5626
-                onEvenOutChange = viewModel::setEvenOutLoudness,  // #5626
-                onOpenVoices = if (remember { PantheonVoices.launchIntent(context) } == null) null  // #5422
-                    else ({ PantheonVoices.open(context) })  // #5422: resolved again on tap
-            )
+            // #7044 (Todd 68920): the levels moved to their own Volumes screen, one tap from
+            // every top bar; this row is how Settings still gets there.
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {  // #7044
+                Column(Modifier.weight(1f)) {  // #7044
+                    Text("Volumes", style = MaterialTheme.typography.titleMedium)  // #7044
+                    Text(  // #7044
+                        "Every volume slider on one screen. The speaker icon at the top of any screen opens it too.",  // #7044
+                        style = MaterialTheme.typography.bodySmall,  // #7044
+                        color = MaterialTheme.colorScheme.onSurfaceVariant  // #7044
+                    )  // #7044
+                }  // #7044
+                Spacer(Modifier.width(12.dp))  // #7044
+                OutlinedButton(onClick = onLevelsClick) { Text("Open") }  // #7044
+            }  // #7044
 
             Spacer(Modifier.height(32.dp))
             HorizontalDivider()
@@ -515,7 +517,7 @@ private val LEVEL_LABELS = listOf(
  * store and applies them at once).
  */
 @Composable
-private fun LevelsSection(
+internal fun LevelsSection(  // #7044: shared with LevelsScreen
     levels: Map<MixCategory, Float>,
     bedtimeShiftCappedDb: Float,
     onChange: (MixCategory, Float) -> Unit,
