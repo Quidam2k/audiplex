@@ -641,10 +641,40 @@ class PlaybackManager @Inject constructor(
         }
     }
 
+    // #7044: Pantheon's explicit (setPackage) VOICE_VOTE: Todd moved the shared volume during
+    // a Pantheon line, so the playing channel's slider moves back by the same dB (VoiceVote).
+    private val voiceVoteReceiver = object : BroadcastReceiver() {  // #7044
+        override fun onReceive(c: Context, intent: Intent) {  // #7044
+            if (intent.action != VoiceVote.ACTION) return  // #7044
+            applyVoiceVote(intent.getIntExtra(VoiceVote.EXTRA_BEFORE, -1), intent.getIntExtra(VoiceVote.EXTRA_AFTER, -1))  // #7044
+        }  // #7044
+    }  // #7044
+
     init {
         ContextCompat.registerReceiver(
             context, volumeReceiver, IntentFilter(VOLUME_CHANGED_ACTION), ContextCompat.RECEIVER_NOT_EXPORTED,
         )
+        ContextCompat.registerReceiver(  // #7044 exported: Pantheon is another app; the step is clamped
+            context, voiceVoteReceiver, IntentFilter(VoiceVote.ACTION), ContextCompat.RECEIVER_EXPORTED,  // #7044
+        )  // #7044
+    }
+
+    /** #7044: nothing loaded -> nothing to keep level; else the playing channel's dial absorbs the step. */
+    private fun applyVoiceVote(before: Int, after: Int) {  // #7044
+        if (before < 0 || after < 0 || before == after) return  // #7044
+        val kind = _playerKind.value ?: return  // #7044
+        val deviceType = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)  // #7044
+            .firstOrNull { it.type in EXTERNAL_OUTPUTS }?.type ?: AudioDeviceInfo.TYPE_BUILTIN_SPEAKER  // #7044
+        val deltaDb = VoiceVote.stepDb(before, after) { idx ->  // #7044
+            if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.P) null  // #7044
+            else try { audioManager.getStreamVolumeDb(AudioManager.STREAM_MUSIC, idx, deviceType).toDouble() } catch (_: Exception) { null }  // #7044
+        }  // #7044
+        val book = channelForVolumeCommand(kind) == PlayerKind.Audiobook  // #7044
+        val from = if (book) audiobookVolume else musicVolume  // #7044
+        val to = VoiceVote.compensate(from, deltaDb)  // #7044
+        clientLog.report("info", "voice_vote", "voice vote $before->$after: ${if (book) "book" else "music"} dial $from -> $to",  // #7044
+            volumeDetail() + mapOf("before" to "$before", "after" to "$after", "delta_db" to "%.1f".format(deltaDb), "from" to "$from", "to" to "$to"))  // #7044
+        if (to != from) setChannelVolume(to)  // #7044
     }
 
     /** #5047: what was playing, and how loud, alongside a volume press or the sleep handoff. */
