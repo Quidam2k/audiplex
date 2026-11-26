@@ -259,14 +259,14 @@ def test_swap_waits_for_the_song_to_end(phone):
 
 def test_swap_defers_while_todd_talks(phone, isolated):  # #2845
     speech = isolated / "speech.json"
-    speech.write_text(json.dumps({"talk_active": True}), encoding="utf-8")
+    speech.write_text(json.dumps({"stt_active": True}), encoding="utf-8")  # #7028 speech, not the Talk latch
 
     async def scenario():
         await mcp_server.dj_mix(sources=[{"kind": "folder", "query": "Ren"}, {"kind": "folder", "query": "YT"}])
         for _ in range(30):  # three songs' worth of polls, all while talking
             await asyncio.sleep(0)
         assert not [c for c in phone.sent if c[0] == "play_now"]
-        speech.write_text(json.dumps({"talk_active": False}), encoding="utf-8")
+        speech.write_text(json.dumps({"stt_active": False}), encoding="utf-8")  # #7028
         await mcp_server._SWAP["task"]
 
     asyncio.run(scenario())

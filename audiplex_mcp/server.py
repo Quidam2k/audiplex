@@ -1962,7 +1962,7 @@ def _todd_talking(claim: bool = False) -> str:  # #ride0928: one guard for every
     """'talking', 'clear', 'missing' or 'unreadable', from Pantheon's speech state.
 
     Merges #2858's _someone_talking and #5463's _speech_busy. Any truthy
-    stt_active / talk_active / composing is Todd talking or typing; claim=True
+    stt_active / composing is Todd talking or typing; claim=True
     also counts a persona holding the speaking claim (a clip playing).
     'missing' = no Pantheon on this box, so no talk signal exists; 'unreadable'
     = the file is there but broken, which callers treat as talking (fail closed).
@@ -1981,7 +1981,10 @@ def _todd_talking(claim: bool = False) -> str:  # #ride0928: one guard for every
             time.sleep(0.05)
     if not isinstance(state, dict):
         return "unreadable"
-    keys = ("stt_active", "talk_active", "composing") + (("current_claim_holder",) if claim else ())
+    # #7028: talk_active is the Talk latch, not speech. Left on (hot mic) it is True for
+    # hours, so it held every music start. Pantheon's todd_talking (#439) and say() (#1137)
+    # already ignore it; stt_active is the live-speech signal.
+    keys = ("stt_active", "composing") + (("current_claim_holder",) if claim else ())  # #7028
     return "talking" if any(state.get(k) for k in keys) else "clear"
 
 

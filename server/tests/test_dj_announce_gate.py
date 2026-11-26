@@ -31,10 +31,25 @@ def _setup(monkeypatch, tmp_path, state):
 
 
 def test_talking_blocks_the_break(monkeypatch, tmp_path):
-    calls = _setup(monkeypatch, tmp_path, {"stt_active": False, "talk_active": True})
+    calls = _setup(monkeypatch, tmp_path, {"stt_active": True, "talk_active": True})  # #7028 live speech
     out = asyncio.run(mcp_server.dj_announce("hello"))
     assert "Todd is talking" in out
     assert calls == []
+
+
+def test_talk_left_on_while_silent_is_not_talking(monkeypatch, tmp_path):  # #7028
+    """#7028 2026-11-25 18:48 PT: Talk ON (lav), Todd silent between lines. The exact
+    speech_state Pantheon wrote must read clear, for music starts AND swaps."""
+    f = tmp_path / "speech_state.json"
+    f.write_text(json.dumps({"stt_active": False, "stt_active_leg": None, "composing": False,
+                             "talk_active": True, "current_claim_holder": None}))
+    monkeypatch.setenv("DJ_SPEECH_STATE_FILE", str(f))
+    assert mcp_server._todd_talking() == "clear"
+    assert mcp_server._someone_talking() is False
+    assert mcp_server._speech_busy() is False
+    assert mcp_server._talk_hold("play") is None
+    f.write_text(json.dumps({"stt_active": True, "talk_active": True}))  # he speaks: held again
+    assert mcp_server._todd_talking() == "talking"
 
 
 def test_quiet_goes_through(monkeypatch, tmp_path):
