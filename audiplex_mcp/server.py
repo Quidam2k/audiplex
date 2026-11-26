@@ -1981,11 +1981,14 @@ def _todd_talking(claim: bool = False) -> str:  # #ride0928: one guard for every
             time.sleep(0.05)
     if not isinstance(state, dict):
         return "unreadable"
-    # #7028: talk_active is the Talk latch, not speech. Left on (hot mic) it is True for
-    # hours, so it held every music start. Pantheon's todd_talking (#439) and say() (#1137)
-    # already ignore it; stt_active is the live-speech signal.
-    keys = ("stt_active", "composing") + (("current_claim_holder",) if claim else ())  # #7028
-    return "talking" if any(state.get(k) for k in keys) else "clear"
+    # #7028: talk_active is the Talk latch, not speech; #7029: Pantheon's one verdict
+    # (todd_talking key) decides, via talk_verdict, with a stale file never talking.
+    import talk_verdict  # #7029 repo root, on sys.path beside audiplex_paths
+    if talk_verdict.is_talking(state):  # #7029
+        return "talking"
+    if claim and talk_verdict.is_fresh(state) and state.get("current_claim_holder"):  # #5463 a clip on air; #7029 never from a dead writer
+        return "talking"
+    return "clear"
 
 
 def _someone_talking() -> bool:  # #2858

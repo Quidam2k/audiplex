@@ -52,6 +52,8 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     import audiplex_paths
 
+import talk_verdict  # noqa: E402  #7029 repo root (on sys.path after audiplex_paths)
+
 logger = logging.getLogger("audiplex.dj_triggers")
 
 TRIGGER_KINDS = ("track_end", "track_start", "clock", "geofence")
@@ -356,7 +358,7 @@ def read_speech_state() -> dict:
             logger.warning("speech state %s unreadable (%s): treating Todd as not talking", path, e)
         return {"talking": False, "last_spoke_at": None, "readable": False}
     return {
-        "talking": any(data.get(k) for k in ("stt_active", "talk_active", "composing")),
+        "talking": talk_verdict.is_talking(data),  # #7029 one verdict; the Talk latch never counts (#7028)
         "last_spoke_at": _parse_ts(data.get("todd_last_spoke_at")),
         "agent_audio_until": _parse_ts(data.get("agent_audio_until")),  # #5837 a persona clip on air until then
         "readable": True,

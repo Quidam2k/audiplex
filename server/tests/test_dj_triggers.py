@@ -215,7 +215,7 @@ def test_missing_speech_file_is_fail_open(engine):
 
 def test_unset_env_defaults_to_the_pantheon_speech_file(engine, monkeypatch, tmp_path):
     default = tmp_path / "pantheon_speech_state.json"
-    default.write_text(json.dumps({"talk_active": True}), encoding="utf-8")
+    default.write_text(json.dumps({"stt_active": True, "talk_active": True}), encoding="utf-8")  # #7029 speech, not the Talk latch (#7028)
     monkeypatch.delenv("DJ_SPEECH_STATE_FILE", raising=False)
     monkeypatch.setattr(dj_triggers, "default_speech_state_file", lambda: str(default))  # #5457
     assert dj_triggers.speech_state_path() == default
