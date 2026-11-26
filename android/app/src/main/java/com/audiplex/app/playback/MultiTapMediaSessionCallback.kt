@@ -93,12 +93,23 @@ class MultiTapMediaSessionCallback(
         return SessionResult.RESULT_SUCCESS
     }
 
+    /** #7042: every started player's usage, content type, state and capture policy; null if unreadable. */
+    private fun activePlayers(): List<MediaKeyRules.PlayerAttrs>? = try {  // #7042
+        audioManager.activePlaybackConfigurations.map {
+            val a = it.audioAttributes  // #7042
+            MediaKeyRules.PlayerAttrs(a.usage, a.contentType, MediaKeyRules.startedFrom(it.toString()),
+                if (android.os.Build.VERSION.SDK_INT >= 29) a.allowedCapturePolicy else null)  // #7042
+        }
+    } catch (_: Exception) { null }  // #7042 unreadable: otherMusicPlaying keeps the old isMusicActive answer
+
     private fun dispatch(press: MediaKeyRules.Press, source: Source) {
         val (key, taps) = press
         // Wants to play, even while focus suppresses it, so a PAUSE then still pauses.
         val playing = !Util.shouldShowPlayButton(player, /* playIfSuppressed = */ false)
         val sinceRoute = msSinceRouteChange()
-        val otherAppPlaying = !playing && audioManager.isMusicActive
+        // #7042: our own speech and Talk ping no longer count; only another app's music does.
+        val players = activePlayers()  // #7042
+        val otherAppPlaying = !playing && audioManager.isMusicActive && MediaKeyRules.otherMusicPlaying(players)  // #7042
         val decision = MediaKeyRules.decide(key, taps, playing, sinceRoute, otherAppPlaying)
         Log.d(TAG, "dispatch key=$key taps=$taps -> $decision")
         report(
@@ -111,6 +122,7 @@ class MultiTapMediaSessionCallback(
                 "playing" to playing.toString(),
                 "msSinceRouteChange" to (sinceRoute?.toString() ?: ""),
                 "otherAppPlaying" to otherAppPlaying.toString(),
+                "players" to (players?.joinToString(",") { "u${it.usage}/c${it.contentType}/s${it.started}/p${it.capturePolicy}" } ?: "unreadable"),  // #7042
                 "action" to decision.action.name,
                 "why" to decision.why,
             ),

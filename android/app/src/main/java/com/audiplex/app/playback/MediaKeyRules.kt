@@ -18,6 +18,53 @@ object MediaKeyRules {
     /** #3249: [why] is a short stable reason string, handy for logs and tests. */
     data class Decision(val action: Action, val why: String)
 
+    /**
+     * #7042: one active player's AudioAttributes, as the plain ints AudioPlaybackConfiguration
+     * reports. For an app like us, AOSP lists only started players (anonymized, state kept), so
+     * [started] is belt-and-braces; null when unreadable. [capturePolicy] is null below API 29.
+     */
+    data class PlayerAttrs(val usage: Int, val contentType: Int, val started: Boolean? = null, val capturePolicy: Int? = null)
+
+    /**
+     * #7042: Pantheon's SinkWarmer (#6749) keeps a Bluetooth sink awake with a dither track
+     * tagged USAGE_MEDIA + CONTENT_TYPE_UNKNOWN + ALLOW_CAPTURE_BY_NONE, whenever a BT media
+     * sink is up: exactly the headset case. Same signature as Pantheon's SinkWarmerRules.isWarmer.
+     */
+    fun isPantheonWarmer(p: PlayerAttrs): Boolean =  // #7042
+        p.usage == USAGE_MEDIA && p.contentType == CONTENT_TYPE_UNKNOWN && p.capturePolicy == ALLOW_CAPTURE_BY_NONE
+
+    /** #7042: "state:started" in AudioPlaybackConfiguration.toString -> true, another state -> false, none -> null. */
+    fun startedFrom(description: String?): Boolean? {  // #7042
+        val state = description?.let { Regex("""\bstate:(\w+)""").find(it)?.groupValues?.get(1) } ?: return null
+        return state.equals("started", ignoreCase = true)  // #7042
+    }
+
+    /**
+     * #7042 (Todd msg 68888, "with Talk on you can pause the music but can't start it again"):
+     * is another app playing MUSIC right now? Pantheon's persona speech is USAGE_MEDIA +
+     * CONTENT_TYPE_SPEECH and its Talk ping is SONIFICATION, and AudioManager.isMusicActive
+     * counted both, so a headset press during speech hit other_app_playing and did nothing.
+     * Call it only when isMusicActive is true (something IS playing): it then says whether that
+     * something is music. Counts a media/game/unknown-usage player unless it is tagged speech or
+     * sonification, is Pantheon's sink warmer, or is known not to be started; an unreadable
+     * list (null) counts, which is the old isMusicActive answer.
+     * Trade-off (Jarvis ok, plan-back 57664): a podcast app tagged SPEECH no longer counts.
+     */
+    fun otherMusicPlaying(players: List<PlayerAttrs>?): Boolean = players?.any {  // #7042 null = unreadable: keep isMusicActive's answer
+        it.started != false && !isPantheonWarmer(it) && it.usage in MUSIC_USAGES &&
+            it.contentType != CONTENT_TYPE_SPEECH && it.contentType != CONTENT_TYPE_SONIFICATION
+    } ?: true
+
+    // #7042: android.media.AudioAttributes values, as literals so the rule stays pure JVM.
+    const val USAGE_UNKNOWN = 0
+    const val USAGE_MEDIA = 1
+    const val USAGE_GAME = 14
+    const val CONTENT_TYPE_UNKNOWN = 0
+    const val CONTENT_TYPE_SPEECH = 1
+    const val ALLOW_CAPTURE_BY_NONE = 3
+    const val CONTENT_TYPE_SONIFICATION = 4
+    private val MUSIC_USAGES = setOf(USAGE_UNKNOWN, USAGE_MEDIA, USAGE_GAME)  // #7042
+
     /** #3249: Maps 79/85 to PLAY_PAUSE, 126 to PLAY, 127 to PAUSE, else null (session handles it). */
     fun keyOf(keyCode: Int): Key? = when (keyCode) {
         79, 85 -> Key.PLAY_PAUSE

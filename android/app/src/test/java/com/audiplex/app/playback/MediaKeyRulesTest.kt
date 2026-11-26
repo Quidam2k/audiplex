@@ -358,4 +358,98 @@ class MediaKeyRulesTest {
         c.press(Key.PLAY_PAUSE)
         assertEquals(MediaKeyRules.Press(Key.PLAY_PAUSE, 1), c.flush())
     }
+
+    // #7042: Pantheon speech (media + speech) and the Talk ping (sonification) are not "another
+    // app playing", so a PAUSE press on paused music during a persona line plays. On the old
+    // code there was no otherMusicPlaying: isMusicActive was true and the press was ignored.
+
+    private fun attrs(usage: Int, contentType: Int) = MediaKeyRules.PlayerAttrs(usage, contentType)
+    private val pantheonSpeech = attrs(MediaKeyRules.USAGE_MEDIA, MediaKeyRules.CONTENT_TYPE_SPEECH)
+    private val talkPing = attrs(MediaKeyRules.USAGE_MEDIA, MediaKeyRules.CONTENT_TYPE_SONIFICATION)
+    private val spotify = attrs(MediaKeyRules.USAGE_MEDIA, 2 /* CONTENT_TYPE_MUSIC */)
+    private val youtube = attrs(MediaKeyRules.USAGE_MEDIA, 3 /* CONTENT_TYPE_MOVIE */)
+    private val untagged = attrs(MediaKeyRules.USAGE_MEDIA, 0 /* CONTENT_TYPE_UNKNOWN */)
+    private val navVoice = attrs(12 /* USAGE_ASSISTANCE_NAVIGATION_GUIDANCE */, MediaKeyRules.CONTENT_TYPE_SPEECH)
+
+    @Test
+    fun `pantheon speech and talk ping do not count as other music`() {
+        assertFalse(MediaKeyRules.otherMusicPlaying(listOf(pantheonSpeech)))
+        assertFalse(MediaKeyRules.otherMusicPlaying(listOf(talkPing)))
+        assertFalse(MediaKeyRules.otherMusicPlaying(listOf(pantheonSpeech, talkPing, navVoice)))
+        assertFalse(MediaKeyRules.otherMusicPlaying(emptyList()))
+    }
+
+    @Test
+    fun `another app's music or video still counts`() {
+        assertTrue(MediaKeyRules.otherMusicPlaying(listOf(spotify)))
+        assertTrue(MediaKeyRules.otherMusicPlaying(listOf(youtube)))
+        assertTrue(MediaKeyRules.otherMusicPlaying(listOf(untagged)))
+        assertTrue(MediaKeyRules.otherMusicPlaying(listOf(pantheonSpeech, spotify)))
+        assertTrue(MediaKeyRules.otherMusicPlaying(listOf(attrs(MediaKeyRules.USAGE_GAME, 0))))
+    }
+
+    @Test
+    fun `pause key on paused music during a persona line plays`() {
+        val other = MediaKeyRules.otherMusicPlaying(listOf(pantheonSpeech, talkPing))
+        assertEquals(Decision(Action.PLAY, "pause_key_while_paused"), decide(Key.PAUSE, otherAppPlaying = other))
+    }
+
+    @Test
+    fun `pause key on paused music while spotify plays is still ignored`() {
+        val other = MediaKeyRules.otherMusicPlaying(listOf(spotify))
+        assertEquals(Decision(Action.IGNORE, "other_app_playing"), decide(Key.PAUSE, otherAppPlaying = other))
+    }
+
+    @Test
+    fun `literals match android AudioAttributes`() {
+        assertEquals(android.media.AudioAttributes.USAGE_MEDIA, MediaKeyRules.USAGE_MEDIA)
+        assertEquals(android.media.AudioAttributes.USAGE_GAME, MediaKeyRules.USAGE_GAME)
+        assertEquals(android.media.AudioAttributes.USAGE_UNKNOWN, MediaKeyRules.USAGE_UNKNOWN)
+        assertEquals(android.media.AudioAttributes.CONTENT_TYPE_SPEECH, MediaKeyRules.CONTENT_TYPE_SPEECH)
+        assertEquals(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION, MediaKeyRules.CONTENT_TYPE_SONIFICATION)
+        assertEquals(android.media.AudioAttributes.CONTENT_TYPE_UNKNOWN, MediaKeyRules.CONTENT_TYPE_UNKNOWN)
+        assertEquals(android.media.AudioAttributes.ALLOW_CAPTURE_BY_NONE, MediaKeyRules.ALLOW_CAPTURE_BY_NONE)
+    }
+
+    // #7042: getActivePlaybackConfigurations lists paused players too. Our own paused ExoPlayer
+    // (media + music) must not block the press, or every PAUSE-while-paused would be ignored.
+    @Test
+    fun `a paused or idle music player does not count`() {
+        val ourPausedPlayer = MediaKeyRules.PlayerAttrs(MediaKeyRules.USAGE_MEDIA, 2, started = false)
+        assertFalse(MediaKeyRules.otherMusicPlaying(listOf(ourPausedPlayer, pantheonSpeech.copy(started = true))))
+        assertTrue(MediaKeyRules.otherMusicPlaying(listOf(ourPausedPlayer, spotify.copy(started = true))))
+    }
+
+    @Test
+    fun `started state reads from the configuration description`() {
+        assertEquals(true, MediaKeyRules.startedFrom(
+            "AudioPlaybackConfiguration piid:87 deviceId:0 type:android.media.AudioTrack u/pid:-1/-1 state:started attr:AudioAttributes: usage=USAGE_MEDIA"))
+        assertEquals(false, MediaKeyRules.startedFrom("AudioPlaybackConfiguration piid:12 type:exoplayer u/pid:-1/-1 state:paused attr:x"))
+        assertEquals(false, MediaKeyRules.startedFrom("... state:idle ..."))
+        assertNull(MediaKeyRules.startedFrom("AudioPlaybackConfiguration piid:12"))
+        assertNull(MediaKeyRules.startedFrom(null))
+    }
+
+    // #7042 review: Pantheon's SinkWarmer dither track (u1/c0/capture NONE) runs whenever a BT sink
+    // is up, so without this exclusion the fix did nothing on a headset.
+    private val sinkWarmer = MediaKeyRules.PlayerAttrs(MediaKeyRules.USAGE_MEDIA, MediaKeyRules.CONTENT_TYPE_UNKNOWN,
+        started = true, capturePolicy = MediaKeyRules.ALLOW_CAPTURE_BY_NONE)
+
+    @Test
+    fun `pantheon sink warmer with speech does not count`() {
+        assertFalse(MediaKeyRules.otherMusicPlaying(listOf(sinkWarmer, pantheonSpeech, talkPing)))
+        val other = MediaKeyRules.otherMusicPlaying(listOf(sinkWarmer, pantheonSpeech))
+        assertEquals(Decision(Action.PLAY, "pause_key_while_paused"), decide(Key.PAUSE, otherAppPlaying = other))
+    }
+
+    @Test
+    fun `an untagged player that allows capture still counts`() {
+        assertTrue(MediaKeyRules.otherMusicPlaying(listOf(sinkWarmer.copy(capturePolicy = 1))))
+        assertTrue(MediaKeyRules.otherMusicPlaying(listOf(sinkWarmer.copy(capturePolicy = null))))
+    }
+
+    @Test
+    fun `an unreadable player list keeps the old answer`() {
+        assertTrue(MediaKeyRules.otherMusicPlaying(null))
+    }
 }
