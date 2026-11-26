@@ -63,15 +63,20 @@ def peak_db(path, start, length):
 
 
 def scan_track(tid, title, path, total):
-    rc, err = ffmpeg(["-sseof", "-40", "-i", path, "-af", "silencedetect=noise=-45dB:d=1.0",
-                      "-f", "null", "-"])
+    flt = ["-af", "silencedetect=noise=-45dB:d=1.0", "-f", "null", "-"]
+    rc, err = ffmpeg(["-sseof", "-40", "-i", path, *flt])
+    if rc != 0:  # #6991 files that will not seek from the end (rc=69, "Output file is empty"): decode the whole file
+        rc, err = ffmpeg(["-i", path, *flt])
+        tail = False  # #6991
+    else:
+        tail = True  # #6991
     if rc != 0:
         raise RuntimeError(f"ffmpeg rc={rc}: {err.strip()[-150:]}")
     # The file's own length, not the DB's: -sseof counts back from the real end.
     dur = re.search(r"Duration: (\d+):(\d+):([\d.]+)", err)
     if dur:
         total = int(dur[1]) * 3600 + int(dur[2]) * 60 + float(dur[3])
-    ws = max(0.0, total - 40)
+    ws = max(0.0, total - 40) if tail else 0.0  # #6991
     starts = [ws + float(x) for x in re.findall(r"silence_start: (-?[\d.]+)", err)]
     ends = [ws + float(x) for x in re.findall(r"silence_end: ([\d.]+)", err)]
     rec = {"id": tid, "title": title, "total": total, "candidate": False}
