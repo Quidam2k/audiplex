@@ -1,7 +1,7 @@
 package com.audiplex.app.ui.common
 
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.VolumeUp  // #7044
+import androidx.compose.material.icons.filled.Tune  // #7044 sliders glyph: Pantheon uses the speaker for mute
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -22,7 +22,7 @@ val LocalOpenLevels = staticCompositionLocalOf<(() -> Unit)?> { null }  // #7044
 fun LevelsAction() {  // #7044
     val open = LocalOpenLevels.current ?: return  // #7044
     IconButton(onClick = open) {  // #7044
-        Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "Volumes")  // #7044
+        Icon(Icons.Filled.Tune, contentDescription = "Volumes")  // #7044
     }  // #7044
 }  // #7044
 

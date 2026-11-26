@@ -27,7 +27,7 @@ import com.audiplex.app.ui.common.HomeAction
 
 /**
  * #7044 (Todd 68920: "an easy to access universal panel for all of the volume sliders"):
- * the #5282/#5422 levels, on their own screen. Opened from the speaker icon beside every
+ * the #5282/#5422 levels, on their own screen. Opened from the sliders icon (#7044) beside every
  * gear, from Settings, and from Pantheon via the com.audiplex.app.OPEN_LEVELS action.
  * Voices stay a link to the Pantheon app: the two apps are signed with different keys, so
  * a live cross-app slider would need an unprotected receiver (Jarvis's hard stop, asg 15024).

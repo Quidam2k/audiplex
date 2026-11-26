@@ -269,7 +269,7 @@ fun SettingsScreen(
                 Column(Modifier.weight(1f)) {  // #7044
                     Text("Volumes", style = MaterialTheme.typography.titleMedium)  // #7044
                     Text(  // #7044
-                        "Every volume slider on one screen. The speaker icon at the top of any screen opens it too.",  // #7044
+                        "Every volume slider on one screen. The sliders icon at the top of any screen opens it too.",  // #7044
                         style = MaterialTheme.typography.bodySmall,  // #7044
                         color = MaterialTheme.colorScheme.onSurfaceVariant  // #7044
                     )  // #7044
